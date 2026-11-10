@@ -480,3 +480,25 @@ fn invalid_page_urls_are_rejected() {
     });
     assert!(err.is_err());
 }
+
+#[test]
+fn match_media_answers_from_the_viewport() {
+    let js = page("https://example.com/");
+    let out = eval(
+        &js,
+        r#"
+        const mql = matchMedia('  (MIN-WIDTH: 768px)   and (hover)');
+        const log = [];
+        mql.addListener(() => log.push('legacy'));
+        mql.onchange = () => log.push('handler');
+        mql.dispatchEvent(new MediaQueryListEvent('change', { media: mql.media, matches: true }));
+        ({ media: mql.media, matches: mql.matches, dark: matchMedia('(prefers-color-scheme: dark)').matches,
+           mobile: matchMedia('(max-width: 767px)').matches, invalid: matchMedia('(min-width: nope)').matches,
+           target: mql instanceof EventTarget, log, tag: String(mql) })
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"{"media":"(min-width: 768px) and (hover)","matches":true,"dark":false,"mobile":false,"invalid":false,"target":true,"log":["legacy","handler"],"tag":"[object MediaQueryList]"}"#
+    );
+}

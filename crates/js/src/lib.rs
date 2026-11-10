@@ -61,6 +61,7 @@ mod event_loop;
 mod glue;
 mod heap;
 mod log;
+mod media;
 mod random;
 mod remote;
 mod run;

@@ -7,6 +7,7 @@ use std::rc::Rc;
 use rquickjs::{Ctx, Function, Object};
 use url::Url;
 
+use crate::media;
 use crate::runtime::{JsRuntime, Shared};
 use crate::storage::{self, StorageStore};
 
@@ -166,6 +167,7 @@ pub(crate) fn install<'js>(
     env.set("screenHeight", viewport.screen_height)?;
     env.set("touch", viewport.touch)?;
     native.set("env", env)?;
+    media::install(ctx, native, &options.viewport)?;
     storage::install(
         ctx,
         native,
