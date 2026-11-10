@@ -12,9 +12,11 @@ mod document;
 mod error;
 mod name;
 mod node;
+mod parse;
 mod serialize;
 
 pub use document::{Children, Descendants, Document, QuirksMode};
 pub use error::DomError;
 pub use name::{Name, Names};
 pub use node::{Attr, Doctype, NodeId, NodeKind};
+pub use parse::{AdjacentPosition, ParseOptions};

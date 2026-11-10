@@ -112,6 +112,8 @@ pub struct Doctype {
 pub(crate) mod flags {
     /// The script element's "already started" flag: it must not run.
     pub const SCRIPT_ALREADY_STARTED: u8 = 1 << 0;
+    /// A MathML `annotation-xml` that is an HTML integration point.
+    pub const MATHML_HTML_INTEGRATION_POINT: u8 = 1 << 1;
     /// The element has a prefix, stored out of line.
     pub const HAS_PREFIX: u8 = 1 << 2;
 }

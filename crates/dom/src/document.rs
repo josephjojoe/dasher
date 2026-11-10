@@ -275,7 +275,6 @@ impl Document {
         })))
     }
 
-    #[cfg(test)]
     pub(crate) fn create_document_node(&mut self) -> NodeId {
         self.alloc(NodeData::Document)
     }
@@ -409,6 +408,13 @@ impl Document {
         }
     }
 
+    pub(crate) fn text_mut(&mut self, id: NodeId) -> Option<&mut String> {
+        match &mut self.node_mut(id).data {
+            NodeData::Text(s) | NodeData::Comment(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// The contents fragment of a `<template>` element.
     pub fn template_contents(&self, id: NodeId) -> Option<NodeId> {
         self.template_contents.get(&id).copied()
@@ -523,6 +529,22 @@ impl Document {
         match e.attrs.iter_mut().find(|a| a.ns == ns && a.local == local) {
             Some(a) => a.value = value.into(),
             None => self.push_attr(id, ns, prefix, local, value),
+        }
+    }
+
+    /// Appends an attribute unless the element already has one with this
+    /// namespace and local name, as the parser does for repeated `<html>` and
+    /// `<body>` tags.
+    pub(crate) fn add_attr_if_missing(
+        &mut self,
+        id: NodeId,
+        ns: Name,
+        prefix: Name,
+        local: Name,
+        value: &str,
+    ) {
+        if self.attribute_ns(id, ns, local).is_none() {
+            self.push_attr(id, ns, prefix, local, value);
         }
     }
 
@@ -804,6 +826,13 @@ impl Document {
         }
     }
 
+    /// Moves all children of `from` to the end of `to`.
+    pub(crate) fn reparent_children(&mut self, from: NodeId, to: NodeId) {
+        while let Some(c) = self.first_child(from) {
+            self.insert_unchecked(to, c, None);
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Checked mutation, following the DOM standard's algorithms.
 
@@ -831,7 +860,8 @@ impl Document {
         Ok(node)
     }
 
-    fn insert(&mut self, node: NodeId, parent: NodeId, before: Option<NodeId>) {
+    /// Inserts `node` (a fragment's children, if it is one) without checks.
+    pub(crate) fn insert(&mut self, node: NodeId, parent: NodeId, before: Option<NodeId>) {
         if self.kind(node) == NodeKind::DocumentFragment {
             while let Some(c) = self.first_child(node) {
                 self.insert_unchecked(parent, c, before);
