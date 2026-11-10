@@ -83,7 +83,8 @@
   }
   // Resolves `input` against the base URL; null if it is not a valid URL.
   function parseURL(input) {
-    return resolveUrl(usv(input), baseURL());
+    const url = resolveUrl(usv(input), baseURL());
+    return url === undefined ? null : url;
   }
 
   function stripFragment(url) {

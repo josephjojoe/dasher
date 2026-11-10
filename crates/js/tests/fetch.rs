@@ -348,7 +348,7 @@ async fn blocked_and_failed_requests_reject_with_type_error() {
             fetch({blocked:?}).catch((e) => out.blocked = e.name + ': ' + e.message);
             fetch('http://127.0.0.1:1/').catch((e) => out.refused = e.message);
             fetch('ftp://example.com/').catch((e) => out.scheme = e.message);
-            fetch('not a url').catch((e) => out.invalid = e.name);
+            fetch('http://[bad').catch((e) => out.invalid = e.name);
             fetch({url:?}, {{ method: 'GET', body: 'x' }}).catch((e) => out.getBody = e.name);
             "#,
             blocked = server.url("/api/items"),
@@ -515,7 +515,8 @@ async fn request_and_response_classes() {
                              () => new Request('https://example.com/', { mode: 'navigate' }),
                              () => new Response('x', { status: 204 }),
                              () => new Response('', { status: 700 }),
-                             () => req.clone()]) {
+                             () => req.clone(),
+                             () => new Request('http://[bad')]) {
                 try { f(); out.errors.push('no error'); } catch (e) { out.errors.push(e.name); }
             }
             const res = new Response('{"a":[1]}', { status: 201, statusText: 'Made', headers: { 'X-A': 'b' } });
@@ -546,7 +547,7 @@ async fn request_and_response_classes() {
     assert_eq!(json(&js, "out.transferred"), r#"[true,"hi",[["x-a","1"]]]"#);
     assert_eq!(
         json(&js, "out.errors"),
-        r#"["TypeError","TypeError","TypeError","TypeError","RangeError","TypeError"]"#
+        r#"["TypeError","TypeError","TypeError","TypeError","RangeError","TypeError","TypeError"]"#
     );
     assert_eq!(
         json(&js, "out.response"),
