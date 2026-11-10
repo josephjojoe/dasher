@@ -60,6 +60,7 @@ mod error;
 mod event_loop;
 mod heap;
 mod log;
+mod random;
 mod remote;
 mod run;
 mod runtime;

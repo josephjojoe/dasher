@@ -18,6 +18,7 @@ use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::heap::{self, HeapState};
 use crate::log::BoundedLog;
+use crate::random;
 use crate::remote::Remote;
 use crate::urls;
 
@@ -35,6 +36,8 @@ const GLUE: &[(&str, &str)] = &[
     ("dasher:events", include_str!("events.js")),
     ("dasher:encoding", include_str!("encoding.js")),
     ("dasher:url", include_str!("url.js")),
+    ("dasher:clone", include_str!("clone.js")),
+    ("dasher:crypto", include_str!("crypto.js")),
 ];
 
 /// How a [`JsRuntime`] is set up.
@@ -519,6 +522,7 @@ fn install<'js>(
     console::install(ctx, &native, shared, max_console_message_len)?;
     encoding::install(ctx, &native)?;
     urls::install(ctx, &native)?;
+    random::install(ctx, &native)?;
 
     let prelude: Function<'js> = ctx.eval_with_options(PRELUDE, eval_options("dasher:prelude"))?;
     let hooks: Object<'js> = prelude.call((native.clone(),))?;
