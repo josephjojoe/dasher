@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rquickjs::{Ctx, Function, JsLifetime, Object};
+use rquickjs::{Ctx, Function, JsLifetime, Object, Persistent};
 
 use crate::clock::{Clock, ClockMode};
 use crate::remote::TaskSender;
@@ -418,6 +418,19 @@ pub(crate) fn install<'js>(
     native.set(
         "cancelFrame",
         Function::new(ctx.clone(), move |id: u32| s.event_loop.cancel_frame(id))?,
+    )?;
+    let s = Rc::clone(shared);
+    native.set(
+        "queueTask",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, callback: Function<'js>| {
+                let callback = Persistent::save(&ctx, callback);
+                s.event_loop.queue(Box::new(move |ctx| {
+                    callback.restore(&ctx)?.call::<_, ()>(())
+                }));
+            },
+        )?,
     )?;
     let s = Rc::clone(shared);
     native.set(
