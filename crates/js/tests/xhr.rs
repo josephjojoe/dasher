@@ -361,3 +361,33 @@ async fn misuse_throws_dom_exceptions() {
         r#"["InvalidStateError","InvalidStateError","SyntaxError","SecurityError","SyntaxError","SyntaxError","SyntaxError","InvalidStateError","InvalidStateError","InvalidStateError","TypeError",4,0,"[object XMLHttpRequest]"]"#
     );
 }
+
+#[tokio::test]
+async fn same_origin_requests_send_cookies_without_credentials() {
+    let server = server();
+    let js = JsRuntime::new(RuntimeOptions {
+        clock: ClockMode::Virtual,
+        network: Some(session()),
+        window: dasher_js::WindowOptions {
+            url: server.url("/app/"),
+            ..dasher_js::WindowOptions::default()
+        },
+        ..RuntimeOptions::default()
+    })
+    .unwrap();
+    run(
+        &js,
+        r#"
+        var out = [];
+        function get(path, next) {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', path);
+            xhr.onload = () => { out.push(xhr.responseText); if (next) next(); };
+            xhr.send();
+        }
+        get('/login', () => get('../cookie'));
+        "#,
+    )
+    .await;
+    assert_eq!(json(&js, "out"), r#"["ok","session=abc"]"#);
+}

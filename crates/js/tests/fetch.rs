@@ -652,3 +652,125 @@ async fn url_search_params_bodies_are_form_encoded() {
     let get = requests.iter().find(|r| r.method == "GET").unwrap();
     assert_eq!(get.query.as_deref(), Some("x=1"));
 }
+
+/// A page whose document is at `url`.
+fn page_at(url: &str, network: Session) -> JsRuntime {
+    JsRuntime::new(RuntimeOptions {
+        clock: ClockMode::Virtual,
+        network: Some(network),
+        window: dasher_js::WindowOptions {
+            url: url.into(),
+            ..dasher_js::WindowOptions::default()
+        },
+        ..RuntimeOptions::default()
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn relative_urls_resolve_against_the_document() {
+    let server = server();
+    let js = page_at(&server.url("/app/page?x=1"), session());
+    run(
+        &js,
+        r#"
+        var out = {};
+        (async () => {
+            const r = await fetch('/api/items');
+            out.absolute = [r.url, r.type];
+            out.request = new Request('../text').url;
+            history.pushState({}, '', '/deep/path/');
+            out.pushed = (await fetch('../../echo?after=push')).url;
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', 'sub?xhr=1');
+            xhr.onload = () => { out.xhr = xhr.responseURL; };
+            xhr.send();
+        })();
+        "#,
+    )
+    .await;
+    assert_eq!(
+        json(&js, "[out.absolute, out.request, out.pushed, out.xhr]"),
+        format!(
+            r#"[["{}","basic"],"{}","{}","{}"]"#,
+            server.url("/api/items"),
+            server.url("/text"),
+            server.url("/echo?after=push"),
+            server.url("/deep/path/sub?xhr=1"),
+        )
+    );
+    // Requests carry the document as their referrer.
+    let echo = server
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/echo")
+        .unwrap();
+    assert_eq!(
+        echo.header("referer"),
+        Some(server.url("/deep/path/").as_str())
+    );
+    assert_eq!(echo.header("origin"), None);
+}
+
+#[tokio::test]
+async fn same_origin_credentials_follow_the_document_origin() {
+    let server = server();
+    let session = session();
+    // Seed a cookie for the server's origin.
+    let origin = dasher_net::Url::parse(&server.url("/")).unwrap();
+    session
+        .cookies()
+        .set_from_header(&origin, "session=abc; Path=/");
+
+    let same = page_at(&server.url("/page"), session.clone());
+    // The same server reached through another host name is another origin.
+    let other_origin = server.url("/page").replace("127.0.0.1", "localhost");
+    let cross = page_at(&other_origin, session.clone());
+    let script = format!(
+        r#"
+        const url = {url:?};
+        fetch(url + '?mode=default');
+        fetch(url + '?mode=include', {{ credentials: 'include' }});
+        fetch(url + '?mode=post', {{ method: 'POST', body: 'x' }});
+        "#,
+        url = server.url("/echo")
+    );
+    run(&same, &script.replace("mode=", "page=same&mode=")).await;
+    run(&cross, &script.replace("mode=", "page=cross&mode=")).await;
+
+    let request = |query: &str| {
+        server
+            .requests()
+            .into_iter()
+            .find(|r| r.query.as_deref() == Some(query))
+            .unwrap()
+    };
+    let cookie = |query: &str| request(query).header("cookie").map(String::from);
+    assert_eq!(
+        cookie("page=same&mode=default").as_deref(),
+        Some("session=abc")
+    );
+    assert_eq!(
+        cookie("page=same&mode=include").as_deref(),
+        Some("session=abc")
+    );
+    assert_eq!(cookie("page=cross&mode=default"), None);
+    assert_eq!(
+        cookie("page=cross&mode=include").as_deref(),
+        Some("session=abc")
+    );
+
+    // Origin goes on cross-origin requests and on POSTs.
+    let origin_of = |query: &str| request(query).header("origin").map(String::from);
+    assert_eq!(origin_of("page=same&mode=default"), None);
+    assert_eq!(origin_of("page=same&mode=post"), Some(server.origin()));
+    assert_eq!(
+        origin_of("page=cross&mode=default"),
+        Some(server.origin().replace("127.0.0.1", "localhost"))
+    );
+    // Cross-origin requests only send the referrer's origin.
+    assert_eq!(
+        request("page=cross&mode=default").header("referer"),
+        Some(format!("{}/", server.origin().replace("127.0.0.1", "localhost")).as_str())
+    );
+}
