@@ -11,8 +11,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bytes.workspace = true
 dasher-css.workspace = true
 dasher-dom.workspace = true
+dasher-net.workspace = true
 rquickjs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 

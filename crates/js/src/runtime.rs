@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use dasher_net::Session;
 use rquickjs::context::EvalOptions;
 use rquickjs::{
     Coerced, Context, Ctx, Exception, FromJs, Function, JsLifetime, Object, Runtime, Value, qjs,
@@ -17,6 +18,7 @@ use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::heap::{self, HeapState};
 use crate::log::BoundedLog;
+use crate::net::{self, NetState};
 use crate::remote::Remote;
 
 /// Default cap on the JS heap of one page.
@@ -57,6 +59,14 @@ pub struct RuntimeOptions {
     /// Spacing of the virtual frame clock that drives
     /// `requestAnimationFrame`.
     pub frame_interval: Duration,
+    /// The browsing session `fetch()` and `XMLHttpRequest` send requests
+    /// through, so they share the page's cookies, request policy and
+    /// network-idle tracking. `None` makes every request fail as a network
+    /// error (`data:` URLs still work).
+    ///
+    /// Requests run as Tokio tasks: on the runtime the request is started
+    /// from, or else on the one current when the `JsRuntime` was created.
+    pub network: Option<Session>,
 }
 
 impl Default for RuntimeOptions {
@@ -70,6 +80,7 @@ impl Default for RuntimeOptions {
             max_console_message_len: 16 * 1024,
             clock: ClockMode::default(),
             frame_interval: DEFAULT_FRAME_INTERVAL,
+            network: None,
         }
     }
 }
@@ -108,6 +119,7 @@ pub(crate) struct Shared {
     errors: RefCell<BoundedLog<ScriptError>>,
     pub(crate) console: RefCell<BoundedLog<ConsoleMessage>>,
     pub(crate) event_loop: LoopState,
+    pub(crate) net: NetState,
 }
 
 impl Shared {
@@ -120,6 +132,7 @@ impl Shared {
             errors: RefCell::new(BoundedLog::new(options.error_capacity)),
             console: RefCell::new(BoundedLog::new(options.console_capacity)),
             event_loop: LoopState::new(options.clock, options.frame_interval),
+            net: NetState::new(options.network.clone()),
         }
     }
 
@@ -490,6 +503,7 @@ impl Drop for JsRuntime {
         // runtime is still alive.
         self.shared.remote.close();
         self.shared.event_loop.clear();
+        self.shared.net.abort_all();
     }
 }
 
@@ -511,6 +525,7 @@ fn install<'js>(
 
     event_loop::install(ctx, &native, shared)?;
     console::install(ctx, &native, shared, max_console_message_len)?;
+    net::install(ctx, &native, shared)?;
 
     let prelude: Function<'js> = ctx.eval_with_options(PRELUDE, eval_options("dasher:prelude"))?;
     let hooks: Object<'js> = prelude.call((native.clone(),))?;

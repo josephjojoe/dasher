@@ -55,10 +55,12 @@
 
 mod clock;
 mod console;
+mod data_url;
 mod error;
 mod event_loop;
 mod heap;
 mod log;
+mod net;
 mod remote;
 mod run;
 mod runtime;
