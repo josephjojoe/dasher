@@ -12,4 +12,8 @@ workspace = true
 
 [dependencies]
 hyper.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

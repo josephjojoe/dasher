@@ -5,9 +5,11 @@
 //! and fetch/XHR traffic ever go over the network; images, stylesheets, fonts
 //! and media are refused without a request being made.
 
+mod activity;
 mod cookies;
 mod policy;
 
+pub use activity::{InFlight, NetworkActivity};
 pub use cookies::{
     Cookie, CookieJar, MAX_COOKIE_SIZE, MAX_COOKIES, MAX_COOKIES_PER_DOMAIN, SameSite,
 };
