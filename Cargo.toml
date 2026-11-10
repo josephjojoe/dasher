@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+repository = "https://github.com/josephjojoe/dasher"
+publish = false
+
+[workspace.dependencies]
+# Internal crates. Depend on these with `dasher-foo.workspace = true`.
+dasher = { path = "crates/dasher" }
+dasher-css = { path = "crates/css" }
+dasher-dom = { path = "crates/dom" }
+dasher-js = { path = "crates/js" }
+dasher-net = { path = "crates/net" }
+dasher-page = { path = "crates/page" }

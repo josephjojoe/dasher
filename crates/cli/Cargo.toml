@@ -1,0 +1,18 @@
+[package]
+name = "dasher-cli"
+description = "Command-line interface for dasher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+dasher.workspace = true
+
+[[bin]]
+name = "dasher"
+path = "src/main.rs"
+# The library crate is also called `dasher`; skip rustdoc for the binary so
+# their documentation output paths don't collide.
+doc = false

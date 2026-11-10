@@ -1,0 +1,11 @@
+[package]
+name = "dasher"
+description = "Minimal headless browser for scraping JavaScript-rendered pages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+dasher-page.workspace = true

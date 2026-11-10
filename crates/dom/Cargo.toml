@@ -1,0 +1,10 @@
+[package]
+name = "dasher-dom"
+description = "Arena-based DOM tree and HTML parsing for dasher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

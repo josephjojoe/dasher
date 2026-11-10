@@ -1,0 +1,10 @@
+[package]
+name = "dasher-net"
+description = "HTTP client and network policy for dasher (documents, scripts and fetch/XHR only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
