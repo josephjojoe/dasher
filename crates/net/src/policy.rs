@@ -262,12 +262,10 @@ impl RequestPolicy {
         if let Some(pattern) = self.blocked.iter().find(|p| p.matches(url)) {
             return Err(BlockReason::UrlPattern(pattern.clone()));
         }
-        if let Some(filter) = &self.filter
-            && !filter(request)
-        {
-            return Err(BlockReason::Filter);
+        match &self.filter {
+            Some(filter) if !filter(request) => Err(BlockReason::Filter),
+            _ => Ok(()),
         }
-        Ok(())
     }
 }
 

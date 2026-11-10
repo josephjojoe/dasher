@@ -690,33 +690,31 @@ impl Session {
         override_headers(&mut all, &self.default_headers);
         override_headers(&mut all, headers);
 
-        if use_cookies
-            && !all.contains_key(COOKIE)
-            && let Some(cookies) = self.cookies.header_for(url)
-        {
-            all.insert(
-                COOKIE,
-                HeaderValue::try_from(cookies).map_err(|e| invalid(&e))?,
-            );
+        if use_cookies && !all.contains_key(COOKIE) {
+            if let Some(cookies) = self.cookies.header_for(url) {
+                all.insert(
+                    COOKIE,
+                    HeaderValue::try_from(cookies).map_err(|e| invalid(&e))?,
+                );
+            }
         }
-        if !all.contains_key(REFERER)
-            && let Some(referer) = referrer.and_then(|r| referrer_for(r, url))
-        {
-            all.insert(
-                REFERER,
-                HeaderValue::try_from(referer).map_err(|e| invalid(&e))?,
-            );
+        if !all.contains_key(REFERER) {
+            if let Some(referer) = referrer.and_then(|r| referrer_for(r, url)) {
+                all.insert(
+                    REFERER,
+                    HeaderValue::try_from(referer).map_err(|e| invalid(&e))?,
+                );
+            }
         }
-        if !all.contains_key(AUTHORIZATION)
-            && let Some(auth) = basic_auth_from_url(url)
-        {
-            all.insert(AUTHORIZATION, auth);
+        if !all.contains_key(AUTHORIZATION) {
+            if let Some(auth) = basic_auth_from_url(url) {
+                all.insert(AUTHORIZATION, auth);
+            }
         }
-
-        if url.scheme() == "http"
-            && let Some(authorization) = &self.client.inner.proxy_authorization
-        {
-            all.insert(PROXY_AUTHORIZATION, authorization.clone());
+        if url.scheme() == "http" {
+            if let Some(authorization) = &self.client.inner.proxy_authorization {
+                all.insert(PROXY_AUTHORIZATION, authorization.clone());
+            }
         }
 
         let uri = request_uri(url).map_err(|e| invalid(&e))?;

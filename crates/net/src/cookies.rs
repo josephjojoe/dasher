@@ -617,22 +617,15 @@ fn parse_cookie_date(input: &str) -> Option<i64> {
         .split(|&b| is_delimiter(b))
         .filter(|t| !t.is_empty())
     {
-        if time.is_none()
-            && let Some(t) = parse_time(token)
-        {
-            time = Some(t);
-        } else if day.is_none()
-            && let Some(d) = leading_digits(token, 1, 2)
-        {
-            day = Some(d);
-        } else if month.is_none()
-            && let Some(m) = parse_month(token)
-        {
-            month = Some(m);
-        } else if year.is_none()
-            && let Some(y) = leading_digits(token, 2, 4)
-        {
-            year = Some(y);
+        // Each token fills the first still-missing field it parses as.
+        if time.is_none() && parse_time(token).is_some() {
+            time = parse_time(token);
+        } else if day.is_none() && leading_digits(token, 1, 2).is_some() {
+            day = leading_digits(token, 1, 2);
+        } else if month.is_none() && parse_month(token).is_some() {
+            month = parse_month(token);
+        } else if year.is_none() && leading_digits(token, 2, 4).is_some() {
+            year = leading_digits(token, 2, 4);
         }
     }
     let ((hour, minute, second), day, month, mut year) = (time?, day?, month?, year?);
