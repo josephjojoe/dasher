@@ -11,3 +11,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+hyper.workspace = true
+url = "2"
