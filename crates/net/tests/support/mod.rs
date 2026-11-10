@@ -138,3 +138,89 @@ impl Drop for TlsServer {
         }
     }
 }
+
+/// A minimal HTTP proxy: `CONNECT` tunnels, and plain requests in absolute
+/// form forwarded byte for byte. Records each request line together with
+/// its `Proxy-Authorization` header.
+pub struct TestProxy {
+    pub addr: SocketAddr,
+    log: Arc<std::sync::Mutex<Vec<ProxiedRequest>>>,
+}
+
+/// A request line and its `Proxy-Authorization` header.
+pub type ProxiedRequest = (String, Option<String>);
+
+impl TestProxy {
+    pub fn start() -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let thread_log = Arc::clone(&log);
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                while let Ok((mut client, _)) = listener.accept().await {
+                    let log = Arc::clone(&thread_log);
+                    tokio::spawn(async move {
+                        let mut head = Vec::new();
+                        let mut byte = [0u8; 1];
+                        while !head.ends_with(b"\r\n\r\n") {
+                            if client.read(&mut byte).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            head.push(byte[0]);
+                        }
+                        let text = String::from_utf8_lossy(&head).into_owned();
+                        let mut lines = text.split("\r\n");
+                        let request_line = lines.next().unwrap_or("").to_owned();
+                        let auth = lines
+                            .filter_map(|l| l.split_once(':'))
+                            .find(|(n, _)| n.eq_ignore_ascii_case("proxy-authorization"))
+                            .map(|(_, v)| v.trim().to_owned());
+                        log.lock().unwrap().push((request_line.clone(), auth));
+
+                        let mut parts = request_line.split(' ');
+                        let method = parts.next().unwrap_or("");
+                        let target = parts.next().unwrap_or("");
+                        let authority = if method == "CONNECT" {
+                            target.to_owned()
+                        } else {
+                            let rest = target.strip_prefix("http://").unwrap_or(target);
+                            rest.split('/').next().unwrap_or("").to_owned()
+                        };
+                        let host = authority.replace("localhost", "127.0.0.1");
+                        let Ok(mut upstream) = tokio::net::TcpStream::connect(host).await else {
+                            let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                            return;
+                        };
+                        if method == "CONNECT" {
+                            let _ = client
+                                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                                .await;
+                        } else {
+                            let _ = upstream.write_all(&head).await;
+                        }
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                    });
+                }
+            });
+        });
+        Self { addr, log }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Every request line received, with its `Proxy-Authorization`.
+    pub fn requests(&self) -> Vec<ProxiedRequest> {
+        self.log.lock().unwrap().clone()
+    }
+}

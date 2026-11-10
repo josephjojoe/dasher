@@ -9,10 +9,9 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::{
     self, ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, COOKIE, HeaderName, HeaderValue, LOCATION,
-    REFERER, SET_COOKIE, USER_AGENT,
+    PROXY_AUTHORIZATION, REFERER, SET_COOKIE, USER_AGENT,
 };
 use hyper::{HeaderMap, Method, StatusCode, Uri};
-use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
@@ -22,6 +21,7 @@ use tokio::time::Instant;
 use url::{Origin, Url};
 
 use crate::activity::NetworkActivity;
+use crate::connector::{Connector, Proxy};
 use crate::cookies::CookieJar;
 use crate::decode::ACCEPT_ENCODING as ACCEPT_ENCODING_VALUE;
 use crate::error::{Error, ErrorKind, Result};
@@ -45,7 +45,6 @@ pub const DEFAULT_MAX_REDIRECTS: usize = 20;
 /// connection can go back to the pool. Longer bodies just close it.
 const REDIRECT_DRAIN_LIMIT: usize = 64 * 1024;
 
-type Connector = HttpsConnector<HttpConnector>;
 type Hyper = HyperClient<Connector, Full<Bytes>>;
 
 /// Configures a [`Client`].
@@ -63,6 +62,7 @@ pub struct ClientBuilder {
     http2: bool,
     built_in_roots: bool,
     root_certificates: Vec<CertificateDer<'static>>,
+    proxy: Option<Proxy>,
 }
 
 impl Default for ClientBuilder {
@@ -85,6 +85,7 @@ impl Default for ClientBuilder {
             http2: true,
             built_in_roots: true,
             root_certificates: Vec::new(),
+            proxy: None,
         }
     }
 }
@@ -95,6 +96,7 @@ impl fmt::Debug for ClientBuilder {
             .field("user_agent", &self.user_agent)
             .field("timeout", &self.timeout)
             .field("max_response_size", &self.max_response_size)
+            .field("proxy", &self.proxy)
             .finish_non_exhaustive()
     }
 }
@@ -186,6 +188,12 @@ impl ClientBuilder {
         self
     }
 
+    /// Sends every request through `proxy`.
+    pub fn proxy(mut self, proxy: Proxy) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
     /// Builds the client.
     pub fn build(self) -> Result<Client> {
         let tls = self.tls_config()?;
@@ -194,14 +202,7 @@ impl ClientBuilder {
         http.enforce_http(false);
         http.set_nodelay(true);
         http.set_connect_timeout(self.connect_timeout);
-        let builder = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls)
-            .https_or_http();
-        let connector = if self.http2 {
-            builder.enable_all_versions().wrap_connector(http)
-        } else {
-            builder.enable_http1().wrap_connector(http)
-        };
+        let connector = Connector::new(http, tls, self.http2, self.proxy.as_ref());
 
         let hyper = HyperClient::builder(TokioExecutor::new())
             .timer(TokioTimer::new())
@@ -217,6 +218,7 @@ impl ClientBuilder {
         Ok(Client {
             inner: Arc::new(ClientInner {
                 hyper,
+                proxy_authorization: self.proxy.as_ref().and_then(|p| p.authorization().cloned()),
                 user_agent: self.user_agent,
                 default_headers: Arc::new(self.default_headers),
                 policy: Arc::new(self.policy),
@@ -261,6 +263,8 @@ pub struct Client {
 
 struct ClientInner {
     hyper: Hyper,
+    /// Sent with plain `http` requests, which go to the proxy itself.
+    proxy_authorization: Option<HeaderValue>,
     user_agent: HeaderValue,
     default_headers: Arc<HeaderMap>,
     policy: Arc<RequestPolicy>,
@@ -708,6 +712,12 @@ impl Session {
             && let Some(auth) = basic_auth_from_url(url)
         {
             all.insert(AUTHORIZATION, auth);
+        }
+
+        if url.scheme() == "http"
+            && let Some(authorization) = &self.client.inner.proxy_authorization
+        {
+            all.insert(PROXY_AUTHORIZATION, authorization.clone());
         }
 
         let uri = request_uri(url).map_err(|e| invalid(&e))?;

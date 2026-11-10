@@ -7,6 +7,7 @@
 
 mod activity;
 mod client;
+mod connector;
 mod cookies;
 mod decode;
 mod error;
@@ -18,6 +19,7 @@ pub use client::{
     Client, ClientBuilder, Credentials, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_REDIRECTS,
     DEFAULT_MAX_RESPONSE_SIZE, DEFAULT_TIMEOUT, DEFAULT_USER_AGENT, RedirectMode, Request, Session,
 };
+pub use connector::Proxy;
 pub use cookies::{
     Cookie, CookieJar, MAX_COOKIE_SIZE, MAX_COOKIES, MAX_COOKIES_PER_DOMAIN, SameSite,
 };
