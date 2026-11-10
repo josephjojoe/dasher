@@ -38,6 +38,17 @@ pub enum Stopped {
     Interrupted,
 }
 
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::DeadlineExceeded => "the JS deadline passed",
+            Self::Interrupted => "JS execution was interrupted",
+        })
+    }
+}
+
+impl std::error::Error for Stopped {}
+
 enum Queued {
     Timer(TimerId),
     Host(Task),
