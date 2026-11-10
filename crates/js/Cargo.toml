@@ -15,6 +15,7 @@ dasher-css.workspace = true
 dasher-dom.workspace = true
 rquickjs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+url = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }

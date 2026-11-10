@@ -19,6 +19,7 @@ use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stop
 use crate::heap::{self, HeapState};
 use crate::log::BoundedLog;
 use crate::remote::Remote;
+use crate::urls;
 
 /// Default cap on the JS heap of one page.
 pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
@@ -33,6 +34,7 @@ const PRELUDE: &str = include_str!("prelude.js");
 const GLUE: &[(&str, &str)] = &[
     ("dasher:events", include_str!("events.js")),
     ("dasher:encoding", include_str!("encoding.js")),
+    ("dasher:url", include_str!("url.js")),
 ];
 
 /// How a [`JsRuntime`] is set up.
@@ -516,6 +518,7 @@ fn install<'js>(
     event_loop::install(ctx, &native, shared)?;
     console::install(ctx, &native, shared, max_console_message_len)?;
     encoding::install(ctx, &native)?;
+    urls::install(ctx, &native)?;
 
     let prelude: Function<'js> = ctx.eval_with_options(PRELUDE, eval_options("dasher:prelude"))?;
     let hooks: Object<'js> = prelude.call((native.clone(),))?;
