@@ -6,7 +6,8 @@
 //!
 //! Byte counts are requested sizes; the system allocator adds its own
 //! per-allocation overhead (typically 8-16 bytes) on top, which is why live
-//! allocations are reported too.
+//! allocations are reported too. Short text and attribute values are stored
+//! inline, so most nodes cost their arena slot and nothing else.
 //!
 //! Everything runs in one test so that no other test allocates concurrently.
 
@@ -114,7 +115,7 @@ fn per_node_memory_cost() {
         "  10-byte text node:        {per_text:6.1} B/node, {:.2} allocations/node",
         allocs as f64 / N as f64
     );
-    assert!(per_text <= 67.0, "text node costs {per_text} B");
+    assert!(per_text <= 57.0, "text node costs {per_text} B");
     drop(doc);
 
     // Elements with two short attributes.
@@ -136,46 +137,35 @@ fn per_node_memory_cost() {
         allocs as f64 / N as f64
     );
     assert!(
-        per_attr_el <= 56.0 + 2.0 * 32.0 + 3.0 + 2.0,
+        per_attr_el <= 56.0 + 2.0 * 32.0 + 1.0,
         "attributed element costs {per_attr_el} B"
     );
     drop(doc);
 
-    // A parsed, listing-style page: what a scrape actually builds.
+    // A parsed, indented listing page: what a scrape actually builds,
+    // including the whitespace text nodes real markup is full of.
     let mut html =
-        String::from("<!DOCTYPE html><html><head><title>List</title></head><body><main>");
-    for i in 0..N / 5 {
+        String::from("<!DOCTYPE html>\n<html>\n<head><title>List</title></head>\n<body>\n<main>\n");
+    for i in 0..N / 10 {
         html.push_str(&format!(
-            "<div class=\"item\" id=\"i{i}\"><a href=\"/p/{i}\">Item {i}</a>\
-             <span class=\"price\">${i}.99</span></div>"
+            "  <div class=\"item\" id=\"i{i}\">\n    <a href=\"/p/{i}\">Item {i}</a>\n    \
+             <span class=\"price\">${i}.99</span>\n  </div>\n"
         ));
     }
-    html.push_str("</main></body></html>");
+    html.push_str("</main>\n</body>\n</html>\n");
     let (doc, bytes, allocs) = measure(|| Document::parse(&html));
     let nodes = doc.len();
-    let text_bytes: usize = doc
-        .descendants(doc.root())
-        .filter_map(|n| doc.text(n))
-        .map(str::len)
-        .sum();
-    let attr_bytes: usize = doc
-        .descendants(doc.root())
-        .flat_map(|n| doc.attrs(n))
-        .map(|a| a.value().len())
-        .sum();
     let per_node = bytes as f64 / nodes as f64;
-    let overhead = (bytes as usize - text_bytes - attr_bytes) as f64 / nodes as f64;
+    let allocs_per_node = allocs as f64 / nodes as f64;
     println!(
-        "  parsed listing page:      {per_node:6.1} B/node over {nodes} nodes \
-         ({overhead:.1} B/node excluding text and attribute values), \
-         {:.2} allocations/node; source HTML {} B, DOM {} B",
-        allocs as f64 / nodes as f64,
+        "  parsed listing page:      {per_node:6.1} B/node, {allocs_per_node:.2} allocations/node \
+         ({nodes} nodes; source HTML {} B, DOM {bytes} B)",
         html.len(),
-        bytes
     );
+    assert!(per_node <= 75.0, "parsed page costs {per_node} B/node");
     assert!(
-        overhead <= 90.0,
-        "parsed page costs {overhead} B/node of overhead"
+        allocs_per_node <= 0.35,
+        "parsed page makes {allocs_per_node} allocations/node"
     );
     drop(doc);
 

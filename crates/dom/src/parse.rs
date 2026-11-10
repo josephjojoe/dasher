@@ -98,7 +98,7 @@ impl Document {
         let context_attrs = self
             .attrs(context)
             .iter()
-            .filter(|a| a.ns == Name::EMPTY && a.local == Name::ENCODING)
+            .filter(|a| self.attr_namespace(a) == Name::EMPTY && a.local == Name::ENCODING)
             .map(|a| Attribute {
                 name: QualName::new(None, ns!(), LocalName::from("encoding")),
                 value: StrTendril::from(a.value()),
@@ -335,12 +335,7 @@ impl TreeSink for Sink<'_> {
             .iter()
             .map(|a| {
                 let (ns, prefix, local) = Self::intern_qual_name(&mut doc, &a.name);
-                Attr {
-                    local,
-                    ns,
-                    prefix,
-                    value: Box::from(&*a.value),
-                }
+                doc.new_attr(ns, prefix, local, &a.value)
             })
             .collect();
         let id = doc.create_element_with_attrs(ns, local, attrs);

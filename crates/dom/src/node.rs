@@ -3,6 +3,8 @@
 use std::fmt;
 use std::num::NonZeroU32;
 
+use compact_str::CompactString;
+
 use crate::name::Name;
 
 /// A node in a [`Document`](crate::Document), addressed by its arena slot.
@@ -68,13 +70,19 @@ impl NodeKind {
 /// An attribute: a namespaced name and a value.
 ///
 /// Attributes set from HTML or with `setAttribute` have no namespace and no
-/// prefix ([`Name::EMPTY`]).
+/// prefix. The namespace and prefix are kept in a small per-document table,
+/// so read them with [`Document::attr_namespace`] and
+/// [`Document::attr_prefix`].
+///
+/// [`Document::attr_namespace`]: crate::Document::attr_namespace
+/// [`Document::attr_prefix`]: crate::Document::attr_prefix
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Attr {
     pub(crate) local: Name,
-    pub(crate) ns: Name,
-    pub(crate) prefix: Name,
-    pub(crate) value: Box<str>,
+    pub(crate) ns: AttrNs,
+    /// Short values (up to 24 bytes) are stored inline, without a heap
+    /// allocation.
+    pub(crate) value: CompactString,
 }
 
 impl Attr {
@@ -83,19 +91,26 @@ impl Attr {
         self.local
     }
 
-    /// The namespace, or [`Name::EMPTY`].
-    pub fn ns(&self) -> Name {
-        self.ns
-    }
-
-    /// The prefix, or [`Name::EMPTY`].
-    pub fn prefix(&self) -> Name {
-        self.prefix
-    }
-
     /// The value.
     pub fn value(&self) -> &str {
         &self.value
+    }
+}
+
+/// Index of an attribute's (namespace, prefix) pair in its document's table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct AttrNs(u32);
+
+impl AttrNs {
+    /// No namespace, no prefix.
+    pub(crate) const NONE: AttrNs = AttrNs(0);
+
+    pub(crate) fn from_index(i: usize) -> Self {
+        AttrNs(u32::try_from(i).expect("too many attribute namespaces"))
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
@@ -130,8 +145,10 @@ pub(crate) enum NodeData {
     Document,
     Doctype(Box<Doctype>),
     Element(Element),
-    Text(String),
-    Comment(String),
+    /// Short text (up to 24 bytes, e.g. most inter-element whitespace) is
+    /// stored inline, without a heap allocation.
+    Text(CompactString),
+    Comment(CompactString),
     Fragment,
     /// A released slot, waiting on the free list.
     Free,

@@ -6,7 +6,9 @@ use std::fmt;
 
 use crate::error::DomError;
 use crate::name::{Name, Names};
-use crate::node::{Attr, Doctype, Element, Node, NodeData, NodeId, NodeKind, flags};
+use compact_str::CompactString;
+
+use crate::node::{Attr, AttrNs, Doctype, Element, Node, NodeData, NodeId, NodeKind, flags};
 
 /// The document's quirks mode, set by the parser from the doctype.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -39,6 +41,9 @@ pub struct Document {
     template_hosts: HashMap<NodeId, NodeId>,
     /// Element prefixes; only `createElementNS` with a prefix makes these.
     prefixes: HashMap<NodeId, Name>,
+    /// The (namespace, prefix) pairs attributes use, indexed by [`AttrNs`].
+    /// Entry 0 is "no namespace"; a document rarely has more than a few.
+    attr_namespaces: Vec<(Name, Name)>,
 }
 
 impl Default for Document {
@@ -69,6 +74,7 @@ impl Document {
             template_contents: HashMap::new(),
             template_hosts: HashMap::new(),
             prefixes: HashMap::new(),
+            attr_namespaces: vec![(Name::EMPTY, Name::EMPTY)],
         }
     }
 
@@ -253,12 +259,12 @@ impl Document {
 
     /// A new text node.
     pub fn create_text(&mut self, data: &str) -> NodeId {
-        self.alloc(NodeData::Text(data.to_owned()))
+        self.alloc(NodeData::Text(CompactString::from(data)))
     }
 
     /// A new comment node.
     pub fn create_comment(&mut self, data: &str) -> NodeId {
-        self.alloc(NodeData::Comment(data.to_owned()))
+        self.alloc(NodeData::Comment(CompactString::from(data)))
     }
 
     /// A new, empty document fragment.
@@ -408,7 +414,7 @@ impl Document {
         }
     }
 
-    pub(crate) fn text_mut(&mut self, id: NodeId) -> Option<&mut String> {
+    pub(crate) fn text_mut(&mut self, id: NodeId) -> Option<&mut CompactString> {
         match &mut self.node_mut(id).data {
             NodeData::Text(s) | NodeData::Comment(s) => Some(s),
             _ => None,
@@ -443,6 +449,28 @@ impl Document {
         self.element(id).map_or(&[], |e| &e.attrs)
     }
 
+    /// The namespace of an attribute of one of this document's elements.
+    pub fn attr_namespace(&self, attr: &Attr) -> Name {
+        self.attr_namespaces[attr.ns.index()].0
+    }
+
+    /// The prefix of an attribute of one of this document's elements, or
+    /// [`Name::EMPTY`].
+    pub fn attr_prefix(&self, attr: &Attr) -> Name {
+        self.attr_namespaces[attr.ns.index()].1
+    }
+
+    fn attr_ns_id(&mut self, ns: Name, prefix: Name) -> AttrNs {
+        let pair = (ns, prefix);
+        match self.attr_namespaces.iter().position(|&p| p == pair) {
+            Some(i) => AttrNs::from_index(i),
+            None => {
+                self.attr_namespaces.push(pair);
+                AttrNs::from_index(self.attr_namespaces.len() - 1)
+            }
+        }
+    }
+
     fn attr_index(&self, id: NodeId, qualified_name: &str) -> Option<usize> {
         let attrs = self.attrs(id);
         match qualified_name.split_once(':') {
@@ -450,16 +478,22 @@ impl Document {
                 let local = self.names.get(qualified_name)?;
                 attrs
                     .iter()
-                    .position(|a| a.local == local && a.prefix == Name::EMPTY)
+                    .position(|a| a.local == local && self.attr_prefix(a) == Name::EMPTY)
             }
             Some((prefix, local)) => {
                 let prefix = self.names.get(prefix)?;
                 let local = self.names.get(local)?;
                 attrs
                     .iter()
-                    .position(|a| a.local == local && a.prefix == prefix)
+                    .position(|a| a.local == local && self.attr_prefix(a) == prefix)
             }
         }
+    }
+
+    fn attr_index_ns(&self, id: NodeId, ns: Name, local: Name) -> Option<usize> {
+        self.attrs(id)
+            .iter()
+            .position(|a| a.local == local && self.attr_namespace(a) == ns)
     }
 
     /// The value of the first attribute with this qualified name, as in
@@ -472,15 +506,16 @@ impl Document {
 
     /// The value of the attribute with no namespace and this local name.
     pub fn attribute_named(&self, id: NodeId, local: Name) -> Option<&str> {
-        self.attribute_ns(id, Name::EMPTY, local)
+        self.attrs(id)
+            .iter()
+            .find(|a| a.local == local && a.ns == AttrNs::NONE)
+            .map(|a| &*a.value)
     }
 
     /// The value of the attribute with this namespace and local name.
     pub fn attribute_ns(&self, id: NodeId, ns: Name, local: Name) -> Option<&str> {
-        self.attrs(id)
-            .iter()
-            .find(|a| a.local == local && a.ns == ns)
-            .map(|a| &*a.value)
+        let i = self.attr_index_ns(id, ns, local)?;
+        Some(&self.attrs(id)[i].value)
     }
 
     pub fn has_attribute(&self, id: NodeId, qualified_name: &str) -> bool {
@@ -525,9 +560,8 @@ impl Document {
     }
 
     fn set_or_push_attr(&mut self, id: NodeId, ns: Name, prefix: Name, local: Name, value: &str) {
-        let e = self.element_mut(id);
-        match e.attrs.iter_mut().find(|a| a.ns == ns && a.local == local) {
-            Some(a) => a.value = value.into(),
+        match self.attr_index_ns(id, ns, local) {
+            Some(i) => self.element_mut(id).attrs[i].value = value.into(),
             None => self.push_attr(id, ns, prefix, local, value),
         }
     }
@@ -543,21 +577,26 @@ impl Document {
         local: Name,
         value: &str,
     ) {
-        if self.attribute_ns(id, ns, local).is_none() {
+        if self.attr_index_ns(id, ns, local).is_none() {
             self.push_attr(id, ns, prefix, local, value);
         }
     }
 
+    /// A new attribute record for one of this document's elements.
+    pub(crate) fn new_attr(&mut self, ns: Name, prefix: Name, local: Name, value: &str) -> Attr {
+        Attr {
+            local,
+            ns: self.attr_ns_id(ns, prefix),
+            value: CompactString::from(value),
+        }
+    }
+
     fn push_attr(&mut self, id: NodeId, ns: Name, prefix: Name, local: Name, value: &str) {
+        let attr = self.new_attr(ns, prefix, local, value);
         let e = self.element_mut(id);
         let mut attrs = std::mem::take(&mut e.attrs).into_vec();
         attrs.reserve_exact(1);
-        attrs.push(Attr {
-            local,
-            ns,
-            prefix,
-            value: value.into(),
-        });
+        attrs.push(attr);
         e.attrs = attrs.into_boxed_slice();
     }
 
@@ -576,11 +615,7 @@ impl Document {
     /// Removes the attribute with this namespace and local name. Returns
     /// whether there was one.
     pub fn remove_attribute_ns(&mut self, id: NodeId, ns: Name, local: Name) -> bool {
-        match self
-            .attrs(id)
-            .iter()
-            .position(|a| a.ns == ns && a.local == local)
-        {
+        match self.attr_index_ns(id, ns, local) {
             Some(i) => {
                 self.remove_attr_at(id, i);
                 true
@@ -1104,7 +1139,7 @@ impl Document {
     /// nodes, and `None` for documents and doctypes.
     pub fn text_content(&self, id: NodeId) -> Option<String> {
         match &self.node(id).data {
-            NodeData::Text(s) | NodeData::Comment(s) => Some(s.clone()),
+            NodeData::Text(s) | NodeData::Comment(s) => Some(s.to_string()),
             NodeData::Element(_) | NodeData::Fragment => {
                 let mut out = String::new();
                 for n in self.descendants(id) {

@@ -92,14 +92,15 @@ impl Document {
                 self.write_tag_name(id, out);
                 for a in &e.attrs {
                     out.push(' ');
-                    match a.ns {
+                    let prefix = self.attr_prefix(a);
+                    match self.attr_namespace(a) {
                         Name::EMPTY => {}
                         Name::NS_XML => out.push_str("xml:"),
                         Name::NS_XMLNS if a.local == Name::XMLNS => {}
                         Name::NS_XMLNS => out.push_str("xmlns:"),
                         Name::NS_XLINK => out.push_str("xlink:"),
-                        _ if a.prefix != Name::EMPTY => {
-                            out.push_str(self.name_str(a.prefix));
+                        _ if prefix != Name::EMPTY => {
+                            out.push_str(self.name_str(prefix));
                             out.push(':');
                         }
                         _ => {}
