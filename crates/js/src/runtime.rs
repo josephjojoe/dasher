@@ -14,6 +14,7 @@ use rquickjs::{
 use crate::clock::ClockMode;
 use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
+use crate::heap::{self, HeapState};
 use crate::log::BoundedLog;
 
 /// Default cap on the JS heap of one page.
@@ -84,18 +85,18 @@ pub(crate) struct Shared {
     kill: Arc<AtomicBool>,
     /// Set when the interrupt handler stopped JS since the last `begin`.
     interrupted: Cell<bool>,
-    memory_limit: Option<usize>,
+    heap: Rc<HeapState>,
     errors: RefCell<BoundedLog<ScriptError>>,
     pub(crate) event_loop: LoopState,
 }
 
 impl Shared {
-    fn new(options: &RuntimeOptions) -> Self {
+    fn new(options: &RuntimeOptions, heap: Rc<HeapState>) -> Self {
         Self {
             deadline: Cell::new(None),
             kill: Arc::new(AtomicBool::new(false)),
             interrupted: Cell::new(false),
-            memory_limit: options.memory_limit,
+            heap,
             errors: RefCell::new(BoundedLog::new(options.error_capacity)),
             event_loop: LoopState::new(options.clock, options.frame_interval),
         }
@@ -124,6 +125,7 @@ impl Shared {
     /// deadline has passed or an interrupt was requested.
     fn begin(&self) -> Result<(), ScriptError> {
         self.interrupted.set(false);
+        self.heap.clear_refused();
         if self.should_interrupt() {
             return Err(ScriptError::interrupted());
         }
@@ -146,7 +148,7 @@ impl Shared {
                 let value = ctx.catch();
                 // When QuickJS cannot even allocate the error object for an
                 // allocation failure, it throws `null` instead.
-                if value.is_null() && self.near_memory_limit(ctx) {
+                if value.is_null() && self.heap.take_refused() {
                     ScriptError::new(ErrorKind::OutOfMemory, "out of memory")
                 } else {
                     error_from_value(ctx, value, ErrorKind::Uncaught)
@@ -161,24 +163,6 @@ impl Shared {
             captured.kind = ErrorKind::Interrupted;
         }
         captured
-    }
-
-    /// Whether the heap is within an eighth of the memory limit. Walks the
-    /// heap, so only used on the rare paths that need it.
-    fn near_memory_limit(&self, ctx: &Ctx<'_>) -> bool {
-        let Some(limit) = self.memory_limit else {
-            return false;
-        };
-        // SAFETY: `JSMemoryUsage` is a plain C struct of integers, for which
-        // all-zero is a valid value.
-        let mut usage: qjs::JSMemoryUsage = unsafe { std::mem::zeroed() };
-        // SAFETY: `ctx` is a live context whose runtime is locked by the
-        // caller, and `usage` is a valid, writable `JSMemoryUsage`.
-        unsafe {
-            qjs::JS_ComputeMemoryUsage(qjs::JS_GetRuntime(ctx.as_raw().as_ptr()), &mut usage)
-        };
-        let used = usize::try_from(usage.malloc_size).unwrap_or(0);
-        used.saturating_add(limit / 8) >= limit
     }
 }
 
@@ -301,14 +285,13 @@ impl JsRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, ScriptError> {
         let internal = |e: rquickjs::Error| ScriptError::new(ErrorKind::Internal, e.to_string());
 
-        let runtime = Runtime::new().map_err(internal)?;
-        runtime.set_memory_limit(options.memory_limit.unwrap_or(0));
+        let (runtime, heap) = heap::new_runtime(options.memory_limit).map_err(internal)?;
         runtime.set_max_stack_size(options.max_stack_size);
         if let Some(threshold) = options.gc_threshold {
             runtime.set_gc_threshold(threshold);
         }
 
-        let shared = Rc::new(Shared::new(&options));
+        let shared = Rc::new(Shared::new(&options, heap));
         let handler_shared = Rc::clone(&shared);
         runtime.set_interrupt_handler(Some(Box::new(move || handler_shared.should_interrupt())));
         runtime.set_host_promise_rejection_tracker(Some(Box::new(track_rejection)));

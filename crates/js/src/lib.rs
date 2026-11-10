@@ -8,6 +8,7 @@
 mod clock;
 mod error;
 mod event_loop;
+mod heap;
 mod log;
 mod runtime;
 mod timers;

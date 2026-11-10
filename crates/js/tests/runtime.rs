@@ -196,14 +196,14 @@ fn memory_limit_raises_out_of_memory_instead_of_crashing() {
     .unwrap();
     let err = js
         .run_script(
-            "const a = []; for (;;) a.push('x'.repeat(1024) + a.length);",
+            "(function () { const a = []; for (;;) a.push('x'.repeat(1024) + a.length); })();",
             "hog.js",
         )
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::OutOfMemory, "{err:?}");
     assert!(js.memory_allocated() <= 8 * 1024 * 1024);
 
-    // Once the garbage is gone the runtime works again.
+    // The hog's array died with its frame, so the runtime works again.
     js.run_gc();
     assert_eq!(js.eval_json("[1, 2].length").unwrap().as_deref(), Some("2"));
 }
