@@ -113,6 +113,43 @@
     return /^[A-Za-z_$][\w$]*$/.test(key) ? key : JSONStringify(key);
   }
 
+  // Renders console arguments, applying format specifiers in a leading
+  // string. https://console.spec.whatwg.org/#formatter
+  function format(args) {
+    if (args.length === 0) return '';
+    try {
+      const first = args[0];
+      let next = 1;
+      let out;
+      if (typeof first === 'string' && first.includes('%')) {
+        out = first.replace(/%([sdifoOjc%])/g, (spec, c) => {
+          if (c === '%') return '%';
+          if (next >= args.length) return spec;
+          const arg = args[next++];
+          switch (c) {
+            case 's':
+              return typeof arg === 'string' ? arg : inspect(arg, 1, []);
+            case 'd':
+            case 'i':
+              return typeof arg === 'symbol' ? 'NaN' : String(Math.trunc(Number(arg)));
+            case 'f':
+              return typeof arg === 'symbol' ? 'NaN' : String(Number(arg));
+            case 'c':
+              return '';
+            default:
+              return inspect(arg, 1, []);
+          }
+        });
+      } else {
+        out = inspect(first, 0, []);
+      }
+      for (; next < args.length; next++) out += ' ' + inspect(args[next], 0, []);
+      return out;
+    } catch (_) {
+      return '[unformattable]';
+    }
+  }
+
   // https://html.spec.whatwg.org/#dom-reporterror
   globalThis.reportError = function reportError(error) {
     if (arguments.length === 0) {
@@ -248,6 +285,75 @@
   };
   NativeDate.prototype.constructor = PageDate;
   globalThis.Date = PageDate;
+
+  // Console output is captured into a log the host reads.
+  // https://console.spec.whatwg.org/
+
+  let groupIndent = '';
+  const counts = new Map();
+  const consoleTimers = new Map();
+
+  function emit(level, text) {
+    if (groupIndent) text = groupIndent + text.split('\n').join('\n' + groupIndent);
+    native.log(level, text);
+  }
+
+  function label(value) {
+    return value === undefined ? 'default' : String(value);
+  }
+
+  function timeLog(name, data, end) {
+    const start = consoleTimers.get(name);
+    if (start === undefined) {
+      emit('warn', "Timer '" + name + "' does not exist");
+      return;
+    }
+    if (end) consoleTimers.delete(name);
+    const extra = data.length ? ' ' + format(data) : '';
+    emit('log', name + ': ' + (pageNow() - start) + ' ms' + extra);
+  }
+
+  function group(args) {
+    if (args.length) emit('log', format(args));
+    groupIndent += '  ';
+  }
+
+  globalThis.console = {
+    log(...args) { emit('log', format(args)); },
+    info(...args) { emit('info', format(args)); },
+    warn(...args) { emit('warn', format(args)); },
+    error(...args) { emit('error', format(args)); },
+    debug(...args) { emit('debug', format(args)); },
+    dir(item) { emit('log', inspect(item, 1, [])); },
+    dirxml(...args) { emit('log', format(args)); },
+    table(...args) { emit('log', format(args)); },
+    trace(...args) {
+      const stack = String(new ErrorCtor().stack || '')
+        .split('\n')
+        .filter((line) => line.trim() && !line.includes('dasher:prelude'))
+        .join('\n');
+      const head = args.length ? 'Trace: ' + format(args) : 'Trace';
+      emit('log', stack ? head + '\n' + stack : head);
+    },
+    assert(condition, ...args) {
+      if (condition) return;
+      emit('error', args.length ? 'Assertion failed: ' + format(args) : 'Assertion failed');
+    },
+    count(name) {
+      name = label(name);
+      const n = (counts.get(name) || 0) + 1;
+      counts.set(name, n);
+      emit('log', name + ': ' + n);
+    },
+    countReset(name) { counts.delete(label(name)); },
+    time(name) { consoleTimers.set(label(name), pageNow()); },
+    timeLog(name, ...data) { timeLog(label(name), data, false); },
+    timeEnd(name) { timeLog(label(name), [], true); },
+    group(...args) { group(args); },
+    groupCollapsed(...args) { group(args); },
+    groupEnd() { groupIndent = groupIndent.slice(2); },
+    clear() {},
+  };
 
   return {
     inspect: (value) => inspect(value, 0, []),

@@ -12,6 +12,7 @@ use rquickjs::{
 };
 
 use crate::clock::ClockMode;
+use crate::console::{self, ConsoleMessage};
 use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::heap::{self, HeapState};
@@ -41,6 +42,10 @@ pub struct RuntimeOptions {
     pub gc_threshold: Option<usize>,
     /// How many script errors are kept before the oldest are dropped.
     pub error_capacity: usize,
+    /// How many console messages are kept before the oldest are dropped.
+    pub console_capacity: usize,
+    /// Console messages longer than this many bytes are cut short.
+    pub max_console_message_len: usize,
     /// How page time relates to the wall clock.
     pub clock: ClockMode,
     /// Spacing of the virtual frame clock that drives
@@ -55,6 +60,8 @@ impl Default for RuntimeOptions {
             max_stack_size: DEFAULT_MAX_STACK_SIZE,
             gc_threshold: None,
             error_capacity: 1000,
+            console_capacity: 1000,
+            max_console_message_len: 16 * 1024,
             clock: ClockMode::default(),
             frame_interval: DEFAULT_FRAME_INTERVAL,
         }
@@ -87,6 +94,7 @@ pub(crate) struct Shared {
     interrupted: Cell<bool>,
     heap: Rc<HeapState>,
     errors: RefCell<BoundedLog<ScriptError>>,
+    pub(crate) console: RefCell<BoundedLog<ConsoleMessage>>,
     pub(crate) event_loop: LoopState,
 }
 
@@ -98,6 +106,7 @@ impl Shared {
             interrupted: Cell::new(false),
             heap,
             errors: RefCell::new(BoundedLog::new(options.error_capacity)),
+            console: RefCell::new(BoundedLog::new(options.console_capacity)),
             event_loop: LoopState::new(options.clock, options.frame_interval),
         }
     }
@@ -302,7 +311,10 @@ impl JsRuntime {
             runtime,
             shared,
         };
-        js.with(|ctx| install(&ctx, &js.shared).map_err(|e| js.shared.capture(&ctx, e)))?;
+        let max_message_len = options.max_console_message_len;
+        js.with(|ctx| {
+            install(&ctx, &js.shared, max_message_len).map_err(|e| js.shared.capture(&ctx, e))
+        })?;
         Ok(js)
     }
 
@@ -469,7 +481,11 @@ impl Drop for JsRuntime {
 }
 
 /// Installs the host functions and evaluates the prelude.
-fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
+fn install<'js>(
+    ctx: &Ctx<'js>,
+    shared: &Rc<Shared>,
+    max_console_message_len: usize,
+) -> rquickjs::Result<()> {
     let native = Object::new(ctx.clone())?;
 
     let s = Rc::clone(shared);
@@ -481,6 +497,7 @@ fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
     )?;
 
     event_loop::install(ctx, &native, shared)?;
+    console::install(ctx, &native, shared, max_console_message_len)?;
 
     let prelude: Function<'js> = ctx.eval_with_options(PRELUDE, eval_options("dasher:prelude"))?;
     let hooks: Object<'js> = prelude.call((native,))?;

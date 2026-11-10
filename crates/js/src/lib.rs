@@ -6,6 +6,7 @@
 //! content gated on visibility or scrolling still loads.
 
 mod clock;
+mod console;
 mod error;
 mod event_loop;
 mod heap;
@@ -14,6 +15,7 @@ mod runtime;
 mod timers;
 
 pub use clock::ClockMode;
+pub use console::{ConsoleLevel, ConsoleMessage};
 pub use error::{ErrorKind, ScriptError};
 pub use event_loop::{DEFAULT_FRAME_INTERVAL, LoopHandle, Stopped, Task};
 pub use runtime::{
