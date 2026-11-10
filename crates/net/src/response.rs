@@ -4,14 +4,15 @@ use std::fmt;
 use std::future::Future;
 
 use bytes::{Bytes, BytesMut};
-use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::{HeaderMap, StatusCode, Version};
+use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 use url::Url;
 
 use crate::activity::InFlight;
+use crate::decode::{Decoder, Encoding, WireReader, body_error, content_encodings, decoder};
 use crate::error::{Error, ErrorKind, Result};
 
 /// A response to a request, after any redirects were followed.
@@ -118,13 +119,16 @@ impl fmt::Debug for Response {
     }
 }
 
-/// A response body that enforces the size limit and the deadline, and keeps
-/// the request in flight until it is finished.
+/// How much decoded data one [`Response::chunk`] call produces at most.
+const DECODED_CHUNK: usize = 16 * 1024;
+
+/// A response body that decodes it, enforces the size limit and the
+/// deadline, and keeps the request in flight until it is finished.
 pub(crate) struct Body {
-    source: Option<Incoming>,
-    /// The most body bytes that may be delivered.
+    state: State,
+    /// The most body bytes that may be delivered, and received.
     limit: u64,
-    /// Body bytes delivered so far.
+    /// Decoded bytes delivered so far.
     received: u64,
     /// The declared length, if the body is not content-encoded.
     content_length: Option<u64>,
@@ -132,21 +136,56 @@ pub(crate) struct Body {
     in_flight: Option<InFlight>,
 }
 
+enum State {
+    /// Not content-encoded: frames are passed through as they arrive.
+    Plain(WireReader),
+    /// Content-encoded, but nothing has arrived yet. Decoders are only set
+    /// up once there is data, so empty bodies (HEAD, 204, 304) that still
+    /// declare an encoding don't fail to decode.
+    Encoded(WireReader, Vec<Encoding>),
+    Decoding(Decoder, BytesMut),
+    Done,
+}
+
 impl Body {
+    /// Fails if the body has a `Content-Encoding` dasher can't decode.
     pub(crate) fn new(
         incoming: Incoming,
         headers: &HeaderMap,
         limit: u64,
         deadline: Option<Instant>,
         in_flight: InFlight,
-    ) -> Self {
-        Self {
-            source: Some(incoming),
+    ) -> Result<Self> {
+        let wire = WireReader::new(incoming, limit);
+        let encodings = content_encodings(headers)?;
+        let (state, content_length) = if wire.is_end_stream() {
+            (State::Done, None)
+        } else if encodings.is_empty() {
+            (State::Plain(wire), content_length(headers))
+        } else {
+            (State::Encoded(wire, encodings), None)
+        };
+        let mut body = Self {
+            state,
             limit,
             received: 0,
-            content_length: content_length(headers),
+            content_length,
             deadline,
             in_flight: Some(in_flight),
+        };
+        if matches!(body.state, State::Done) {
+            body.finish();
+        }
+        Ok(body)
+    }
+
+    /// Fails if a declared, unencoded length exceeds the limit.
+    pub(crate) fn check_declared_length(&self) -> Result<()> {
+        match self.content_length {
+            Some(length) if length > self.limit => {
+                Err(Error::new(ErrorKind::TooLarge { limit: self.limit }))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -175,30 +214,48 @@ impl Body {
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
-        let Some(incoming) = &mut self.source else {
-            return Ok(None);
-        };
+        let limit = self.limit;
         loop {
-            let Some(frame) = incoming.frame().await else {
-                return Ok(None);
-            };
-            let frame = frame.map_err(|e| Error::new(ErrorKind::Http).with_source(e))?;
-            // Trailers are ignored.
-            if let Ok(data) = frame.into_data()
-                && !data.is_empty()
-            {
-                self.received += data.len() as u64;
-                if self.received > self.limit {
-                    return Err(Error::new(ErrorKind::TooLarge { limit: self.limit }));
+            let chunk = match &mut self.state {
+                State::Done => return Ok(None),
+                State::Plain(wire) => wire.next_chunk().await.map_err(|e| body_error(e, limit))?,
+                State::Encoded(wire, _) => {
+                    let first = wire.fill().await.map_err(|e| body_error(e, limit))?;
+                    if first.is_empty() {
+                        return Ok(None);
+                    }
+                    let State::Encoded(wire, encodings) =
+                        std::mem::replace(&mut self.state, State::Done)
+                    else {
+                        unreachable!("matched above");
+                    };
+                    let reader = decoder(wire, &encodings, &first);
+                    self.state = State::Decoding(reader, BytesMut::new());
+                    continue;
                 }
-                return Ok(Some(data));
+                State::Decoding(reader, buf) => {
+                    buf.reserve(DECODED_CHUNK);
+                    let n = reader
+                        .read_buf(buf)
+                        .await
+                        .map_err(|e| body_error(e, limit))?;
+                    buf.split_to(n).freeze()
+                }
+            };
+            if chunk.is_empty() {
+                return Ok(None);
             }
+            self.received += chunk.len() as u64;
+            if self.received > limit {
+                return Err(Error::new(ErrorKind::TooLarge { limit }));
+            }
+            return Ok(Some(chunk));
         }
     }
 
     /// Releases the connection and stops counting the request as in flight.
     fn finish(&mut self) {
-        self.source = None;
+        self.state = State::Done;
         self.in_flight = None;
     }
 }
@@ -217,7 +274,7 @@ pub(crate) async fn with_deadline<T>(
 }
 
 /// The `Content-Length` header, if present and valid.
-pub(crate) fn content_length(headers: &HeaderMap) -> Option<u64> {
+fn content_length(headers: &HeaderMap) -> Option<u64> {
     headers
         .get(CONTENT_LENGTH)?
         .to_str()

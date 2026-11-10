@@ -8,6 +8,7 @@
 mod activity;
 mod client;
 mod cookies;
+mod decode;
 mod error;
 mod policy;
 mod response;

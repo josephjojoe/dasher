@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper::body::{Body as _, Incoming};
+use hyper::body::Incoming;
 use hyper::header::{
-    self, ACCEPT, AUTHORIZATION, COOKIE, HeaderName, HeaderValue, LOCATION, REFERER, SET_COOKIE,
-    USER_AGENT,
+    self, ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, COOKIE, HeaderName, HeaderValue, LOCATION,
+    REFERER, SET_COOKIE, USER_AGENT,
 };
 use hyper::{HeaderMap, Method, StatusCode, Uri};
 use hyper_rustls::HttpsConnector;
@@ -23,9 +23,10 @@ use url::{Origin, Url};
 
 use crate::activity::NetworkActivity;
 use crate::cookies::CookieJar;
+use crate::decode::ACCEPT_ENCODING as ACCEPT_ENCODING_VALUE;
 use crate::error::{Error, ErrorKind, Result};
 use crate::policy::{RequestInfo, RequestPolicy, ResourceType};
-use crate::response::{Body, Response, content_length, with_deadline};
+use crate::response::{Body, Response, with_deadline};
 
 /// The `User-Agent` sent when none is configured: a current desktop Chrome on
 /// Linux, so sites serve the same markup they would to a real browser.
@@ -589,7 +590,8 @@ impl Session {
                 match redirect {
                     RedirectMode::Follow => {}
                     RedirectMode::Manual => {
-                        let body = Body::new(incoming, &parts.headers, limit, deadline, in_flight);
+                        let body = Body::new(incoming, &parts.headers, limit, deadline, in_flight)
+                            .map_err(|e| e.with_url(&url))?;
                         return Ok(Response::new(parts, url, redirects > 0, body));
                     }
                     RedirectMode::Error => {
@@ -633,15 +635,10 @@ impl Session {
                 continue;
             }
 
-            // Fail early on a declared length over the limit (HEAD responses
-            // and the like declare one without having a body).
-            if !incoming.is_end_stream()
-                && let Some(length) = content_length(&parts.headers)
-                && length > limit
-            {
-                return Err(Error::new(ErrorKind::TooLarge { limit }).with_url(&url));
-            }
-            let body = Body::new(incoming, &parts.headers, limit, deadline, in_flight);
+            let body = Body::new(incoming, &parts.headers, limit, deadline, in_flight)
+                .map_err(|e| e.with_url(&url))?;
+            // Fail early on a declared length over the limit.
+            body.check_declared_length().map_err(|e| e.with_url(&url))?;
             return Ok(Response::new(parts, url, redirects > 0, body));
         }
     }
@@ -683,6 +680,10 @@ impl Session {
         let mut all = HeaderMap::with_capacity(8 + self.default_headers.len() + headers.len());
         all.insert(USER_AGENT, self.user_agent.clone());
         all.insert(ACCEPT, HeaderValue::from_static(resource_type.accept()));
+        all.insert(
+            ACCEPT_ENCODING,
+            HeaderValue::from_static(ACCEPT_ENCODING_VALUE),
+        );
         override_headers(&mut all, &self.default_headers);
         override_headers(&mut all, headers);
 
