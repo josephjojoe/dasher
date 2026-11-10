@@ -11,3 +11,23 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-compression = { version = "0.4", features = ["brotli", "deflate", "gzip", "tokio", "zlib", "zstd"] }
+bytes.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-roots"] }
+hyper-util = { workspace = true, features = ["client-legacy", "client-proxy", "http1", "http2", "tokio"] }
+percent-encoding = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tower-service = "0.3"
+url = "2"
+webpki-roots = "1"
+
+[dev-dependencies]
+dasher-test-server.workspace = true
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true, features = ["server-auto"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "test-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
