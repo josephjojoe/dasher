@@ -136,9 +136,7 @@ impl Document {
             self.reparent_children(html, fragment);
         }
         self.release(scratch);
-        if let Some(c) = context_copy
-            && self.parent(c).is_none()
-        {
+        if let Some(c) = context_copy.filter(|&c| self.parent(c).is_none()) {
             self.release(c);
         }
         fragment

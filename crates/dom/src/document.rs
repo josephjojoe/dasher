@@ -981,9 +981,7 @@ impl Document {
         child: Option<NodeId>,
     ) -> Result<(), DomError> {
         self.check_parent_and_node(node, parent)?;
-        if let Some(c) = child
-            && self.parent(c) != Some(parent)
-        {
+        if child.is_some_and(|c| self.parent(c) != Some(parent)) {
             return Err(DomError::NotFound);
         }
         self.check_node_kind(node, parent)?;
