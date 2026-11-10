@@ -14,28 +14,21 @@ use rquickjs::{
 
 use crate::clock::ClockMode;
 use crate::console::{self, ConsoleMessage};
+use crate::encoding;
 use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
+use crate::glue;
 use crate::heap::{self, HeapState};
 use crate::log::BoundedLog;
 use crate::net::{self, NetState};
+use crate::random;
 use crate::remote::Remote;
+use crate::urls;
 
 /// Default cap on the JS heap of one page.
 pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// Default cap on the native stack JS execution may use.
 pub const DEFAULT_MAX_STACK_SIZE: usize = 1024 * 1024;
-
-const PRELUDE: &str = include_str!("prelude.js");
-
-/// Glue scripts evaluated after the prelude, in order, as `(name, source)`.
-/// Each evaluates to a function taking `native` and the shared `internals`
-/// object the prelude returns, and installs its globals.
-const GLUE: &[(&str, &str)] = &[
-    ("dasher:events", include_str!("events.js")),
-    ("dasher:fetch", include_str!("fetch.js")),
-    ("dasher:xhr", include_str!("xhr.js")),
-];
 
 /// How a [`JsRuntime`] is set up.
 #[derive(Clone, Debug)]
@@ -530,12 +523,15 @@ fn install<'js>(
     event_loop::install(ctx, &native, shared)?;
     console::install(ctx, &native, shared, max_console_message_len)?;
     net::install(ctx, &native, shared)?;
+    encoding::install(ctx, &native)?;
+    urls::install(ctx, &native)?;
+    random::install(ctx, &native)?;
 
-    let prelude: Function<'js> = ctx.eval_with_options(PRELUDE, eval_options("dasher:prelude"))?;
+    let mut scripts = glue::load(ctx)?.into_iter().map(Function::from_value);
+    let prelude = scripts.next().ok_or(rquickjs::Error::Unknown)??;
     let hooks: Object<'js> = prelude.call((native.clone(),))?;
-    for &(name, source) in GLUE {
-        let glue: Function<'js> = ctx.eval_with_options(source, eval_options(name))?;
-        glue.call::<_, ()>((native.clone(), hooks.clone()))?;
+    for glue in scripts {
+        glue?.call::<_, ()>((native.clone(), hooks.clone()))?;
     }
     let data = JsData {
         inspect: hooks.get("inspect")?,

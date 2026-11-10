@@ -15,8 +15,10 @@ bytes.workspace = true
 dasher-css.workspace = true
 dasher-dom.workspace = true
 dasher-net.workspace = true
+getrandom = "0.2"
 rquickjs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+url = "2"
 
 [dev-dependencies]
 dasher-test-server.workspace = true
