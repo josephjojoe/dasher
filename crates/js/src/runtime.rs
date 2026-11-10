@@ -34,6 +34,7 @@ const PRELUDE: &str = include_str!("prelude.js");
 const GLUE: &[(&str, &str)] = &[
     ("dasher:events", include_str!("events.js")),
     ("dasher:fetch", include_str!("fetch.js")),
+    ("dasher:xhr", include_str!("xhr.js")),
 ];
 
 /// How a [`JsRuntime`] is set up.
