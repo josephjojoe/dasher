@@ -29,6 +29,12 @@
 //! whose output is captured (see [`JsRuntime::take_console`]). `Date` reads
 //! the same page clock as `performance.now()`.
 //!
+//! DOM events are implemented in JS glue evaluated after the prelude:
+//! `EventTarget`, `Event`, `CustomEvent`, `ErrorEvent`, `DOMException`,
+//! `AbortController` and `AbortSignal`. Each glue file receives the host
+//! functions and a shared `internals` object (trusted event dispatch, `on*`
+//! attributes, abort hooks, task queueing) for the glue that follows it.
+//!
 //! ```
 //! use std::time::Duration;
 //!

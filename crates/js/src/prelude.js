@@ -355,9 +355,32 @@
     clear() {},
   };
 
+  // Converts a value to a USVString: lone surrogates become U+FFFD. Strings
+  // must go through this before reaching Rust, which only takes valid UTF-8.
+  function usv(value) {
+    return String(value).toWellFormed();
+  }
+
+  // Installs interfaces and functions on the global object the way WebIDL
+  // does: writable and configurable, but not enumerable.
+  function expose(members) {
+    for (const name of Object.keys(members)) {
+      Object.defineProperty(globalThis, name, {
+        value: members[name],
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
+    }
+  }
+
+  // The `internals` object: hooks Rust calls back into, plus helpers shared
+  // with the glue files evaluated after this one.
   return {
     inspect: (value) => inspect(value, 0, []),
     runTimer,
     runFrame,
+    usv,
+    expose,
   };
 })

@@ -26,6 +26,11 @@ pub const DEFAULT_MAX_STACK_SIZE: usize = 1024 * 1024;
 
 const PRELUDE: &str = include_str!("prelude.js");
 
+/// Glue scripts evaluated after the prelude, in order, as `(name, source)`.
+/// Each evaluates to a function taking `native` and the shared `internals`
+/// object the prelude returns, and installs its globals.
+const GLUE: &[(&str, &str)] = &[("dasher:events", include_str!("events.js"))];
+
 /// How a [`JsRuntime`] is set up.
 #[derive(Clone, Debug)]
 pub struct RuntimeOptions {
@@ -508,7 +513,11 @@ fn install<'js>(
     console::install(ctx, &native, shared, max_console_message_len)?;
 
     let prelude: Function<'js> = ctx.eval_with_options(PRELUDE, eval_options("dasher:prelude"))?;
-    let hooks: Object<'js> = prelude.call((native,))?;
+    let hooks: Object<'js> = prelude.call((native.clone(),))?;
+    for &(name, source) in GLUE {
+        let glue: Function<'js> = ctx.eval_with_options(source, eval_options(name))?;
+        glue.call::<_, ()>((native.clone(), hooks.clone()))?;
+    }
     let data = JsData {
         inspect: hooks.get("inspect")?,
         hooks: LoopHooks::from_prelude(&hooks)?,
