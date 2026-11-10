@@ -12,6 +12,7 @@ mod document;
 mod error;
 mod name;
 mod node;
+mod serialize;
 
 pub use document::{Children, Descendants, Document, QuirksMode};
 pub use error::DomError;
