@@ -13,6 +13,7 @@ mod error;
 mod name;
 mod node;
 mod parse;
+mod query;
 mod serialize;
 
 pub use document::{Children, Descendants, Document, QuirksMode};
