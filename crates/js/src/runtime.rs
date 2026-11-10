@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use rquickjs::context::EvalOptions;
@@ -17,6 +17,7 @@ use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::heap::{self, HeapState};
 use crate::log::BoundedLog;
+use crate::remote::Remote;
 
 /// Default cap on the JS heap of one page.
 pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
@@ -73,15 +74,21 @@ impl Default for RuntimeOptions {
 /// Once [`interrupt`](Self::interrupt) is called, running JS is aborted with
 /// an uncatchable exception at its next interrupt check, and further JS on
 /// that runtime is refused until [`JsRuntime::clear_interrupt`] is called.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct InterruptHandle {
-    flag: Arc<AtomicBool>,
+    remote: Arc<Remote>,
+}
+
+impl std::fmt::Debug for InterruptHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InterruptHandle").finish_non_exhaustive()
+    }
 }
 
 impl InterruptHandle {
     /// Requests that the runtime stop running JS.
     pub fn interrupt(&self) {
-        self.flag.store(true, Ordering::SeqCst);
+        self.remote.interrupt();
     }
 }
 
@@ -89,7 +96,7 @@ impl InterruptHandle {
 /// exposes to JS. It holds no JS values, so it may outlive the context.
 pub(crate) struct Shared {
     deadline: Cell<Option<Instant>>,
-    kill: Arc<AtomicBool>,
+    pub(crate) remote: Arc<Remote>,
     /// Set when the interrupt handler stopped JS since the last `begin`.
     interrupted: Cell<bool>,
     heap: Rc<HeapState>,
@@ -102,7 +109,7 @@ impl Shared {
     fn new(options: &RuntimeOptions, heap: Rc<HeapState>) -> Self {
         Self {
             deadline: Cell::new(None),
-            kill: Arc::new(AtomicBool::new(false)),
+            remote: Arc::default(),
             interrupted: Cell::new(false),
             heap,
             errors: RefCell::new(BoundedLog::new(options.error_capacity)),
@@ -113,7 +120,7 @@ impl Shared {
 
     /// Why JS must not run right now, if it must not.
     pub(crate) fn stop_reason(&self) -> Option<Stopped> {
-        if self.kill.load(Ordering::Relaxed) {
+        if self.remote.kill.load(Ordering::Relaxed) {
             Some(Stopped::Interrupted)
         } else if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
             Some(Stopped::DeadlineExceeded)
@@ -436,14 +443,14 @@ impl JsRuntime {
     /// A handle that interrupts this runtime from any thread.
     pub fn interrupt_handle(&self) -> InterruptHandle {
         InterruptHandle {
-            flag: Arc::clone(&self.shared.kill),
+            remote: Arc::clone(&self.shared.remote),
         }
     }
 
     /// Withdraws a request made through an [`InterruptHandle`], allowing JS
     /// to run again.
     pub fn clear_interrupt(&self) {
-        self.shared.kill.store(false, Ordering::SeqCst);
+        self.shared.remote.kill.store(false, Ordering::SeqCst);
     }
 
     /// The script errors recorded so far, oldest first.
@@ -476,6 +483,7 @@ impl Drop for JsRuntime {
     fn drop(&mut self) {
         // Queued host tasks may own JS values; release them while the
         // runtime is still alive.
+        self.shared.remote.close();
         self.shared.event_loop.clear();
     }
 }

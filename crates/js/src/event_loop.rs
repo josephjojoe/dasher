@@ -10,11 +10,13 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rquickjs::{Ctx, Function, JsLifetime, Object};
 
 use crate::clock::{Clock, ClockMode};
+use crate::remote::TaskSender;
 use crate::runtime::{JsData, JsRuntime, Shared};
 use crate::timers::{TimerId, Timers};
 
@@ -180,6 +182,11 @@ impl LoopHandle {
     pub fn now(&self) -> Duration {
         self.shared.event_loop.clock.now()
     }
+
+    /// A sender for posting tasks from other threads.
+    pub fn task_sender(&self) -> TaskSender {
+        TaskSender::new(Arc::clone(&self.shared.remote))
+    }
 }
 
 impl JsRuntime {
@@ -203,6 +210,11 @@ impl JsRuntime {
         self.event_loop().clock.now()
     }
 
+    /// A sender for posting tasks to this runtime from other threads.
+    pub fn task_sender(&self) -> TaskSender {
+        TaskSender::new(Arc::clone(&self.shared().remote))
+    }
+
     /// How page time relates to the wall clock.
     pub fn clock_mode(&self) -> ClockMode {
         self.event_loop().clock.mode()
@@ -220,10 +232,14 @@ impl JsRuntime {
     }
 
     /// Whether there is nothing left to run: no queued tasks, timers,
-    /// animation frame callbacks or microtasks.
+    /// animation frame callbacks or microtasks, and no host operations in
+    /// progress.
     pub fn is_idle(&self) -> bool {
         let state = self.event_loop();
-        state.tasks.borrow().is_empty()
+        let remote = &self.shared().remote;
+        !remote.has_pending()
+            && !remote.has_queued()
+            && state.tasks.borrow().is_empty()
             && state.timers.borrow().is_empty()
             && state.frames.borrow().pending.is_empty()
             && !self.has_pending_microtasks()
@@ -264,6 +280,11 @@ impl JsRuntime {
     pub(crate) fn step(&self) -> Result<bool, Stopped> {
         self.check_stop()?;
         let state = self.event_loop();
+        let arrived = self.shared().remote.drain();
+        state
+            .tasks
+            .borrow_mut()
+            .extend(arrived.into_iter().map(|task| Queued::Host(task)));
         let now = state.clock.now();
         {
             let mut timers = state.timers.borrow_mut();
@@ -336,7 +357,7 @@ impl JsRuntime {
         }
     }
 
-    fn event_loop(&self) -> &LoopState {
+    pub(crate) fn event_loop(&self) -> &LoopState {
         &self.shared().event_loop
     }
 }
