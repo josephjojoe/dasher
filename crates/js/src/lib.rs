@@ -58,6 +58,7 @@ mod console;
 mod encoding;
 mod error;
 mod event_loop;
+mod glue;
 mod heap;
 mod log;
 mod random;
@@ -71,6 +72,7 @@ pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
 pub use error::{ErrorKind, ScriptError};
 pub use event_loop::{DEFAULT_FRAME_INTERVAL, LoopHandle, Stopped, Task};
+pub use glue::precompile;
 pub use remote::{PendingOperation, SendTask, TaskSender};
 pub use run::{RunLimits, RunOutcome};
 pub use runtime::{
