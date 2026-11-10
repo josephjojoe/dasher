@@ -31,7 +31,10 @@ const PRELUDE: &str = include_str!("prelude.js");
 /// Glue scripts evaluated after the prelude, in order, as `(name, source)`.
 /// Each evaluates to a function taking `native` and the shared `internals`
 /// object the prelude returns, and installs its globals.
-const GLUE: &[(&str, &str)] = &[("dasher:events", include_str!("events.js"))];
+const GLUE: &[(&str, &str)] = &[
+    ("dasher:events", include_str!("events.js")),
+    ("dasher:fetch", include_str!("fetch.js")),
+];
 
 /// How a [`JsRuntime`] is set up.
 #[derive(Clone, Debug)]
