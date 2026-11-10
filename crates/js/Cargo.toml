@@ -13,3 +13,4 @@ workspace = true
 [dependencies]
 dasher-css.workspace = true
 dasher-dom.workspace = true
+rquickjs.workspace = true
