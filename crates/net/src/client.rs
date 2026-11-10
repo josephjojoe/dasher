@@ -31,7 +31,7 @@ use crate::response::{Body, Response, with_deadline};
 /// The `User-Agent` sent when none is configured: a current desktop Chrome on
 /// Linux, so sites serve the same markup they would to a real browser.
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-     (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+     (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
 /// The default maximum response body size: 32 MiB.
 pub const DEFAULT_MAX_RESPONSE_SIZE: u64 = 32 * 1024 * 1024;
 /// The default timeout for a whole request, including reading the body.

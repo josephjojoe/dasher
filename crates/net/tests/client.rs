@@ -594,6 +594,26 @@ async fn tracks_requests_in_flight_until_the_body_is_done() {
 }
 
 #[tokio::test]
+async fn cancelling_a_request_ends_it() {
+    let server = FixtureServer::builder()
+        .route("/slow", |_| FixtureResponse::text("late"))
+        .path_latency("/slow", Duration::from_secs(5))
+        .start()
+        .unwrap();
+    let session = client().session();
+    let pending = tokio::spawn({
+        let session = session.clone();
+        let target = url(&server.url("/slow"));
+        async move { session.get(target, ResourceType::Fetch).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(session.activity().in_flight(), 1);
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    assert_eq!(session.activity().in_flight(), 0);
+}
+
+#[tokio::test]
 async fn http2_over_tls_with_connection_reuse() {
     let server = support::TlsServer::start();
     let client = Client::builder()
