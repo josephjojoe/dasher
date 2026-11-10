@@ -31,9 +31,11 @@
 //!
 //! DOM events are implemented in JS glue evaluated after the prelude:
 //! `EventTarget`, `Event`, `CustomEvent`, `ErrorEvent`, `DOMException`,
-//! `AbortController` and `AbortSignal`. Each glue file receives the host
-//! functions and a shared `internals` object (trusted event dispatch, `on*`
-//! attributes, abort hooks, task queueing) for the glue that follows it.
+//! `AbortController` and `AbortSignal`. Each glue file (listed in order in
+//! `src/glue.rs`) receives the host functions and a shared `internals`
+//! object for the glue that follows it. `internals` provides trusted event
+//! dispatch, `on*` attributes, abort hooks, task queueing, URL parsing,
+//! structured cloning and the document URL.
 //!
 //! ```
 //! use std::time::Duration;
@@ -49,6 +51,59 @@
 //! js.advance(Duration::from_secs(5))?;
 //! assert_eq!(js.take_console()[0].text, "later 42");
 //! assert_eq!(js.eval_json("performance.now()")?.as_deref(), Some("5000"));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Window and environment
+//!
+//! The global object is a `Window` (an `EventTarget`), aliased as `window`,
+//! `self`, `frames`, `parent` and `top`. [`RuntimeOptions::window`]
+//! configures what pages see:
+//!
+//! - `location`, which reads [`WindowOptions::url`]. Assigning to it or
+//!   calling `assign`, `replace` or `reload` does not navigate. It records
+//!   a [`NavigationRequest`] for the page layer, and [`JsRuntime::run`]
+//!   then returns [`RunOutcome::NavigationRequested`]. Fragment changes,
+//!   `history.pushState`/`replaceState` and history traversal stay in the
+//!   document, fire `hashchange`/`popstate`, and are tracked by
+//!   [`JsRuntime::url`].
+//! - `navigator`, `screen`, `innerWidth` and the rest of the viewport,
+//!   `devicePixelRatio` and `matchMedia`. These give static answers from
+//!   [`WindowOptions`] and [`Viewport`], and default to desktop Chrome on
+//!   Linux at 1920×1080. The scroll position moves when scripts scroll
+//!   and has no upper bound.
+//! - `localStorage` and `sessionStorage`, kept in memory per origin in a
+//!   [`StorageStore`] that pages of one session can share.
+//! - `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`,
+//!   `btoa`, `crypto.getRandomValues`/`randomUUID`, `structuredClone`,
+//!   `postMessage`, `MessageChannel` and `requestIdleCallback`.
+//!
+//! Everything that is only a stand-in (dialogs, `ResizeObserver`,
+//! `WebSocket`, `crypto.subtle`, navigator extras and so on) is defined in
+//! `src/stubs.js`. Its header lists every stub, plus the APIs left out on
+//! purpose (workers, `indexedDB`, `caches`, `Intl`).
+//!
+//! The JS side is compiled to bytecode once per process. Call
+//! [`precompile`] at start-up to keep that cost off the first page.
+//!
+//! ```
+//! use dasher_js::{JsRuntime, NavigationKind, RuntimeOptions, WindowOptions};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let js = JsRuntime::new(RuntimeOptions {
+//!     window: WindowOptions {
+//!         url: "https://example.com/list?page=1".into(),
+//!         ..WindowOptions::default()
+//!     },
+//!     ..RuntimeOptions::default()
+//! })?;
+//! js.run_script("history.pushState({}, '', '?page=2'); localStorage.seen = '1';", "app.js")?;
+//! assert_eq!(js.url(), "https://example.com/list?page=2");
+//! js.run_script("location.href = '/detail/7';", "app.js")?;
+//! let request = js.take_navigation_request().unwrap();
+//! assert_eq!(request.url, "https://example.com/detail/7");
+//! assert_eq!(request.kind, NavigationKind::Push);
 //! # Ok(())
 //! # }
 //! ```

@@ -5,7 +5,7 @@
 //! (light colour scheme, no reduced motion, a fine pointer that can hover
 //! unless the viewport is a touch device). Queries that fail to parse do
 //! not match, like `not all`.
-//! https://drafts.csswg.org/mediaqueries-4/
+//! <https://drafts.csswg.org/mediaqueries-4/>
 
 use rquickjs::{Ctx, Function, Object};
 
