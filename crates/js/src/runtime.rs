@@ -11,6 +11,7 @@ use rquickjs::context::EvalOptions;
 use rquickjs::{
     Coerced, Context, Ctx, Exception, FromJs, Function, JsLifetime, Object, Runtime, Value, qjs,
 };
+use url::Url;
 
 use crate::clock::ClockMode;
 use crate::console::{self, ConsoleMessage};
@@ -24,6 +25,7 @@ use crate::net::{self, NetState};
 use crate::random;
 use crate::remote::Remote;
 use crate::urls;
+use crate::window::{self, WindowOptions, WindowState};
 
 /// Default cap on the JS heap of one page.
 pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
@@ -56,6 +58,9 @@ pub struct RuntimeOptions {
     /// Spacing of the virtual frame clock that drives
     /// `requestAnimationFrame`.
     pub frame_interval: Duration,
+    /// The page URL and the environment behind `navigator`, `screen` and
+    /// the viewport.
+    pub window: WindowOptions,
     /// The browsing session `fetch()` and `XMLHttpRequest` send requests
     /// through, so they share the page's cookies, request policy and
     /// network-idle tracking. `None` makes every request fail as a network
@@ -77,6 +82,7 @@ impl Default for RuntimeOptions {
             max_console_message_len: 16 * 1024,
             clock: ClockMode::default(),
             frame_interval: DEFAULT_FRAME_INTERVAL,
+            window: WindowOptions::default(),
             network: None,
         }
     }
@@ -116,11 +122,12 @@ pub(crate) struct Shared {
     errors: RefCell<BoundedLog<ScriptError>>,
     pub(crate) console: RefCell<BoundedLog<ConsoleMessage>>,
     pub(crate) event_loop: LoopState,
+    pub(crate) window: WindowState,
     pub(crate) net: NetState,
 }
 
 impl Shared {
-    fn new(options: &RuntimeOptions, heap: Rc<HeapState>) -> Self {
+    fn new(options: &RuntimeOptions, heap: Rc<HeapState>, url: Url) -> Self {
         Self {
             deadline: Cell::new(None),
             remote: Arc::default(),
@@ -129,6 +136,7 @@ impl Shared {
             errors: RefCell::new(BoundedLog::new(options.error_capacity)),
             console: RefCell::new(BoundedLog::new(options.console_capacity)),
             event_loop: LoopState::new(options.clock, options.frame_interval),
+            window: WindowState::new(url),
             net: NetState::new(options.network.clone()),
         }
     }
@@ -315,6 +323,8 @@ impl JsRuntime {
     /// Creates a runtime and context and installs the globals.
     pub fn new(options: RuntimeOptions) -> Result<Self, ScriptError> {
         let internal = |e: rquickjs::Error| ScriptError::new(ErrorKind::Internal, e.to_string());
+        let url = window::parse_url(&options.window.url)
+            .map_err(|e| ScriptError::new(ErrorKind::Internal, e))?;
 
         let (runtime, heap) = heap::new_runtime(options.memory_limit).map_err(internal)?;
         runtime.set_max_stack_size(options.max_stack_size);
@@ -322,7 +332,7 @@ impl JsRuntime {
             runtime.set_gc_threshold(threshold);
         }
 
-        let shared = Rc::new(Shared::new(&options, heap));
+        let shared = Rc::new(Shared::new(&options, heap, url));
         let handler_shared = Rc::clone(&shared);
         runtime.set_interrupt_handler(Some(Box::new(move || handler_shared.should_interrupt())));
         runtime.set_host_promise_rejection_tracker(Some(Box::new(track_rejection)));
@@ -333,10 +343,7 @@ impl JsRuntime {
             runtime,
             shared,
         };
-        let max_message_len = options.max_console_message_len;
-        js.with(|ctx| {
-            install(&ctx, &js.shared, max_message_len).map_err(|e| js.shared.capture(&ctx, e))
-        })?;
+        js.with(|ctx| install(&ctx, &js.shared, &options).map_err(|e| js.shared.capture(&ctx, e)))?;
         Ok(js)
     }
 
@@ -508,7 +515,7 @@ impl Drop for JsRuntime {
 fn install<'js>(
     ctx: &Ctx<'js>,
     shared: &Rc<Shared>,
-    max_console_message_len: usize,
+    options: &RuntimeOptions,
 ) -> rquickjs::Result<()> {
     let native = Object::new(ctx.clone())?;
 
@@ -521,11 +528,12 @@ fn install<'js>(
     )?;
 
     event_loop::install(ctx, &native, shared)?;
-    console::install(ctx, &native, shared, max_console_message_len)?;
+    console::install(ctx, &native, shared, options.max_console_message_len)?;
     net::install(ctx, &native, shared)?;
     encoding::install(ctx, &native)?;
     urls::install(ctx, &native)?;
     random::install(ctx, &native)?;
+    window::install(ctx, &native, shared, &options.window)?;
 
     let mut scripts = glue::load(ctx)?.into_iter().map(Function::from_value);
     let prelude = scripts.next().ok_or(rquickjs::Error::Unknown)??;
