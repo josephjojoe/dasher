@@ -11,6 +11,11 @@
   const ArrayIsArray = Array.isArray;
   const JSONStringify = JSON.stringify;
   const ErrorCtor = Error;
+  const ReflectApply = Reflect.apply;
+  const ReflectConstruct = Reflect.construct;
+  const PromiseThen = Promise.prototype.then;
+  const resolvedPromise = Promise.resolve();
+  const indirectEval = eval;
 
   const MAX_DEPTH = 2;
   const MAX_ITEMS = 100;
@@ -116,7 +121,137 @@
     native.reportError(error);
   };
 
+  // Timers. Rust keeps ids and due times; the callbacks stay here.
+  // https://html.spec.whatwg.org/#timers
+
+  const timerCallbacks = new Map();
+
+  function addTimer(handler, timeout, args, repeat) {
+    // WebIDL `long`: ToInt32, so huge timeouts wrap like in browsers.
+    let ms = timeout | 0;
+    if (ms < 0) ms = 0;
+    const id = native.setTimer(ms, repeat);
+    timerCallbacks.set(id, { handler, args });
+    return id;
+  }
+
+  function clearTimer(id) {
+    const n = id >>> 0;
+    if (n !== 0 && timerCallbacks.delete(n)) native.clearTimer(n);
+  }
+
+  globalThis.setTimeout = function setTimeout(handler, timeout = 0, ...args) {
+    return addTimer(handler, timeout, args, false);
+  };
+  globalThis.setInterval = function setInterval(handler, timeout = 0, ...args) {
+    return addTimer(handler, timeout, args, true);
+  };
+  globalThis.clearTimeout = function clearTimeout(id) {
+    clearTimer(id);
+  };
+  globalThis.clearInterval = function clearInterval(id) {
+    clearTimer(id);
+  };
+
+  function runTimer(id, repeat) {
+    const entry = timerCallbacks.get(id);
+    if (entry === undefined) return;
+    if (!repeat) timerCallbacks.delete(id);
+    const handler = entry.handler;
+    if (typeof handler === 'function') {
+      ReflectApply(handler, globalThis, entry.args);
+    } else {
+      indirectEval(String(handler));
+    }
+  }
+
+  // Animation frames, driven by the virtual frame clock in Rust.
+
+  const frameCallbacks = new Map();
+
+  globalThis.requestAnimationFrame = function requestAnimationFrame(callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError("Failed to execute 'requestAnimationFrame': parameter 1 is not of type 'Function'.");
+    }
+    const id = native.requestFrame();
+    frameCallbacks.set(id, callback);
+    return id;
+  };
+  globalThis.cancelAnimationFrame = function cancelAnimationFrame(id) {
+    const n = id >>> 0;
+    if (frameCallbacks.delete(n)) native.cancelFrame(n);
+  };
+
+  function runFrame(id, timestamp) {
+    const callback = frameCallbacks.get(id);
+    if (callback === undefined) return;
+    frameCallbacks.delete(id);
+    ReflectApply(callback, globalThis, [timestamp]);
+  }
+
+  // Microtasks share QuickJS's promise job queue, so they interleave with
+  // promise reactions in order. Exceptions are reported, not rejected.
+  globalThis.queueMicrotask = function queueMicrotask(callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError("Failed to execute 'queueMicrotask': parameter 1 is not of type 'Function'.");
+    }
+    ReflectApply(PromiseThen, resolvedPromise, [() => {
+      try {
+        callback();
+      } catch (error) {
+        native.reportError(error);
+      }
+    }]);
+  };
+
+  // Page time. `performance.now()` and `Date` both follow the page clock, so
+  // when the event loop fast-forwards, scripts that measure elapsed time
+  // with either see the time pass.
+
+  const timeOrigin = native.timeOrigin;
+  const pageNow = native.now;
+  const empty = () => [];
+  const noop = () => undefined;
+
+  globalThis.performance = {
+    now() {
+      return pageNow();
+    },
+    get timeOrigin() {
+      return timeOrigin;
+    },
+    toJSON() {
+      return { timeOrigin };
+    },
+    mark: noop,
+    measure: noop,
+    clearMarks: noop,
+    clearMeasures: noop,
+    clearResourceTimings: noop,
+    getEntries: empty,
+    getEntriesByName: empty,
+    getEntriesByType: empty,
+  };
+
+  const NativeDate = Date;
+  const dateNow = () => Math.floor(timeOrigin + pageNow());
+  const PageDate = new Proxy(NativeDate, {
+    construct(target, args, newTarget) {
+      return ReflectConstruct(target, args.length === 0 ? [dateNow()] : args, newTarget);
+    },
+    apply() {
+      return new NativeDate(dateNow()).toString();
+    },
+  });
+  NativeDate.now = function now() {
+    return dateNow();
+  };
+  NativeDate.prototype.constructor = PageDate;
+  globalThis.Date = PageDate;
+
   return {
     inspect: (value) => inspect(value, 0, []),
+    runTimer,
+    runFrame,
   };
 })

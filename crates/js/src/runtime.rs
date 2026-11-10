@@ -4,14 +4,16 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rquickjs::context::EvalOptions;
 use rquickjs::{
     Coerced, Context, Ctx, Exception, FromJs, Function, JsLifetime, Object, Runtime, Value, qjs,
 };
 
+use crate::clock::ClockMode;
 use crate::error::{ErrorKind, ScriptError};
+use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::log::BoundedLog;
 
 /// Default cap on the JS heap of one page.
@@ -38,6 +40,11 @@ pub struct RuntimeOptions {
     pub gc_threshold: Option<usize>,
     /// How many script errors are kept before the oldest are dropped.
     pub error_capacity: usize,
+    /// How page time relates to the wall clock.
+    pub clock: ClockMode,
+    /// Spacing of the virtual frame clock that drives
+    /// `requestAnimationFrame`.
+    pub frame_interval: Duration,
 }
 
 impl Default for RuntimeOptions {
@@ -47,6 +54,8 @@ impl Default for RuntimeOptions {
             max_stack_size: DEFAULT_MAX_STACK_SIZE,
             gc_threshold: None,
             error_capacity: 1000,
+            clock: ClockMode::default(),
+            frame_interval: DEFAULT_FRAME_INTERVAL,
         }
     }
 }
@@ -77,6 +86,7 @@ pub(crate) struct Shared {
     interrupted: Cell<bool>,
     memory_limit: Option<usize>,
     errors: RefCell<BoundedLog<ScriptError>>,
+    pub(crate) event_loop: LoopState,
 }
 
 impl Shared {
@@ -87,12 +97,23 @@ impl Shared {
             interrupted: Cell::new(false),
             memory_limit: options.memory_limit,
             errors: RefCell::new(BoundedLog::new(options.error_capacity)),
+            event_loop: LoopState::new(options.clock, options.frame_interval),
+        }
+    }
+
+    /// Why JS must not run right now, if it must not.
+    pub(crate) fn stop_reason(&self) -> Option<Stopped> {
+        if self.kill.load(Ordering::Relaxed) {
+            Some(Stopped::Interrupted)
+        } else if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
+            Some(Stopped::DeadlineExceeded)
+        } else {
+            None
         }
     }
 
     fn should_interrupt(&self) -> bool {
-        let stop = self.kill.load(Ordering::Relaxed)
-            || self.deadline.get().is_some_and(|d| Instant::now() >= d);
+        let stop = self.stop_reason().is_some();
         if stop {
             self.interrupted.set(true);
         }
@@ -165,6 +186,7 @@ impl Shared {
 /// runtime userdata, which rquickjs drops before freeing the runtime.
 pub(crate) struct JsData<'js> {
     inspect: Function<'js>,
+    hooks: LoopHooks<'js>,
     /// Rejected promises that had no handler when they were rejected, with
     /// their reasons. Reported at the end of the next microtask checkpoint
     /// unless a handler is attached first.
@@ -175,6 +197,15 @@ pub(crate) struct JsData<'js> {
 // struct with the lifetime substituted, so the layouts are identical.
 unsafe impl<'js> JsLifetime<'js> for JsData<'js> {
     type Changed<'to> = JsData<'to>;
+}
+
+impl<'js> JsData<'js> {
+    /// The event loop's JS hooks.
+    pub(crate) fn hooks(ctx: &Ctx<'js>) -> rquickjs::Result<LoopHooks<'js>> {
+        ctx.userdata::<JsData<'js>>()
+            .map(|d| d.hooks.clone())
+            .ok_or(rquickjs::Error::Unknown)
+    }
 }
 
 /// Renders a JS value as text the way the console would.
@@ -290,6 +321,10 @@ impl JsRuntime {
         };
         js.with(|ctx| install(&ctx, &js.shared).map_err(|e| js.shared.capture(&ctx, e)))?;
         Ok(js)
+    }
+
+    pub(crate) fn shared(&self) -> &Rc<Shared> {
+        &self.shared
     }
 
     /// Runs `f` with direct access to the engine context, for host bindings.
@@ -442,6 +477,14 @@ impl JsRuntime {
     }
 }
 
+impl Drop for JsRuntime {
+    fn drop(&mut self) {
+        // Queued host tasks may own JS values; release them while the
+        // runtime is still alive.
+        self.shared.event_loop.clear();
+    }
+}
+
 /// Installs the host functions and evaluates the prelude.
 fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
     let native = Object::new(ctx.clone())?;
@@ -454,10 +497,13 @@ fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
         })?,
     )?;
 
+    event_loop::install(ctx, &native, shared)?;
+
     let prelude: Function<'js> = ctx.eval_with_options(PRELUDE, eval_options("dasher:prelude"))?;
     let hooks: Object<'js> = prelude.call((native,))?;
     let data = JsData {
         inspect: hooks.get("inspect")?,
+        hooks: LoopHooks::from_prelude(&hooks)?,
         rejections: RefCell::default(),
     };
     if ctx.store_userdata(data).is_err() {
