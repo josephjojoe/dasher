@@ -81,9 +81,10 @@ async fn until_bounds_page_time_and_leaves_later_work() {
     let js = runtime(ClockMode::Realtime);
     js.run_script("setTimeout(() => {}, 60_000)", "a.js")
         .unwrap();
+    // Page time starts when the runtime is created, so measure from now.
     let started = Instant::now();
     assert_eq!(
-        js.run(RunLimits::until(ms(50))).await,
+        js.run(RunLimits::until(js.now() + ms(50))).await,
         RunOutcome::ReachedTime
     );
     assert!(started.elapsed() >= ms(40));

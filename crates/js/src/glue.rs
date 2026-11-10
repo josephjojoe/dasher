@@ -34,6 +34,8 @@ pub(crate) const GLUE: &[(&str, &str)] = &[
     ("dasher:media", include_str!("media.js")),
     // Every stub is in this one file, which lists them all.
     ("dasher:stubs", include_str!("stubs.js")),
+    ("dasher:fetch", include_str!("fetch.js")),
+    ("dasher:xhr", include_str!("xhr.js")),
 ];
 
 /// Compiles the glue now rather than when the first runtime is created.

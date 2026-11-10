@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use dasher_net::Session;
 use rquickjs::context::EvalOptions;
 use rquickjs::{
     Coerced, Context, Ctx, Exception, FromJs, Function, JsLifetime, Object, Runtime, Value, qjs,
@@ -20,6 +21,7 @@ use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stop
 use crate::glue;
 use crate::heap::{self, HeapState};
 use crate::log::BoundedLog;
+use crate::net::{self, NetState};
 use crate::random;
 use crate::remote::Remote;
 use crate::urls;
@@ -59,6 +61,14 @@ pub struct RuntimeOptions {
     /// The page URL and the environment behind `navigator`, `screen` and
     /// the viewport.
     pub window: WindowOptions,
+    /// The browsing session `fetch()` and `XMLHttpRequest` send requests
+    /// through, so they share the page's cookies, request policy and
+    /// network-idle tracking. `None` makes every request fail as a network
+    /// error (`data:` URLs still work).
+    ///
+    /// Requests run as Tokio tasks: on the runtime the request is started
+    /// from, or else on the one current when the `JsRuntime` was created.
+    pub network: Option<Session>,
 }
 
 impl Default for RuntimeOptions {
@@ -73,6 +83,7 @@ impl Default for RuntimeOptions {
             clock: ClockMode::default(),
             frame_interval: DEFAULT_FRAME_INTERVAL,
             window: WindowOptions::default(),
+            network: None,
         }
     }
 }
@@ -112,6 +123,7 @@ pub(crate) struct Shared {
     pub(crate) console: RefCell<BoundedLog<ConsoleMessage>>,
     pub(crate) event_loop: LoopState,
     pub(crate) window: WindowState,
+    pub(crate) net: NetState,
 }
 
 impl Shared {
@@ -125,6 +137,7 @@ impl Shared {
             console: RefCell::new(BoundedLog::new(options.console_capacity)),
             event_loop: LoopState::new(options.clock, options.frame_interval),
             window: WindowState::new(url),
+            net: NetState::new(options.network.clone()),
         }
     }
 
@@ -494,6 +507,7 @@ impl Drop for JsRuntime {
         // runtime is still alive.
         self.shared.remote.close();
         self.shared.event_loop.clear();
+        self.shared.net.abort_all();
     }
 }
 
@@ -515,6 +529,7 @@ fn install<'js>(
 
     event_loop::install(ctx, &native, shared)?;
     console::install(ctx, &native, shared, options.max_console_message_len)?;
+    net::install(ctx, &native, shared)?;
     encoding::install(ctx, &native)?;
     urls::install(ctx, &native)?;
     random::install(ctx, &native)?;
