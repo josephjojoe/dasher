@@ -618,8 +618,7 @@ impl Session {
                     next.set_fragment(url.fragment());
                 }
                 redirects += 1;
-                self.check_policy(&method, &next, resource_type, redirects)
-                    .map_err(|e| e.with_url(&next))?;
+                self.check_policy(&method, &next, resource_type, redirects)?;
 
                 // Let the connection go back to the pool if that's cheap.
                 let _ = with_deadline(deadline, drain(incoming)).await;
