@@ -52,6 +52,43 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Network
+//!
+//! `fetch()` (with `Headers`, `Request`, `Response`, `Blob`, `File`,
+//! `FormData` and `AbortSignal` support) and `XMLHttpRequest` send their
+//! requests through the [`dasher_net::Session`] given as
+//! [`RuntimeOptions::network`]. That way they share the page's cookie jar
+//! and request policy, and they count towards the session's network-idle
+//! tracking. Requests run as Tokio tasks and are cancelled when the runtime
+//! is dropped. While one is in progress the event loop does not report
+//! itself idle, and the virtual clock does not skip ahead. Relative URLs
+//! resolve against the document's URL when they are sent, and the default
+//! `same-origin` credentials mode sends cookies only to the document's own
+//! origin. Without a session every request fails as a network error, except
+//! `data:` URLs, which are always answered locally. Failed loads are logged
+//! to the console with the reason.
+//!
+//! ```no_run
+//! use dasher_js::{JsRuntime, RunLimits, RuntimeOptions};
+//! use dasher_net::Client;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let session = Client::new()?.session();
+//! let js = JsRuntime::new(RuntimeOptions {
+//!     network: Some(session.clone()),
+//!     ..RuntimeOptions::default()
+//! })?;
+//! js.run_script(
+//!     "fetch('https://example.com/api').then((r) => r.json()).then((d) => globalThis.data = d);",
+//!     "page.js",
+//! )?;
+//! js.run(RunLimits::default()).await;
+//! let data = js.eval_json("data")?;
+//! # let _ = data;
+//! # Ok(())
+//! # }
+//! ```
 
 mod clock;
 mod console;

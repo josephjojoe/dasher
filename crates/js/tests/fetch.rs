@@ -625,3 +625,30 @@ async fn dropping_the_page_cancels_requests() {
     tokio::task::yield_now().await;
     assert_eq!(session.activity().in_flight(), 0);
 }
+
+#[tokio::test]
+async fn url_search_params_bodies_are_form_encoded() {
+    let server = server();
+    let js = page(Some(session()));
+    run(
+        &js,
+        &format!(
+            r#"
+            const params = new URLSearchParams({{ q: 'a b', n: '1' }});
+            fetch({url:?}, {{ method: 'POST', body: params }});
+            fetch(new URL('?x=1', {url:?}));
+            "#,
+            url = server.url("/echo")
+        ),
+    )
+    .await;
+    let requests = server.requests();
+    let post = requests.iter().find(|r| r.method == "POST").unwrap();
+    assert_eq!(
+        post.header("content-type"),
+        Some("application/x-www-form-urlencoded;charset=UTF-8")
+    );
+    assert_eq!(&post.body[..], b"q=a+b&n=1");
+    let get = requests.iter().find(|r| r.method == "GET").unwrap();
+    assert_eq!(get.query.as_deref(), Some("x=1"));
+}
