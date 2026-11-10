@@ -29,6 +29,7 @@ pub(crate) const GLUE: &[(&str, &str)] = &[
     ("dasher:url", include_str!("url.js")),
     ("dasher:clone", include_str!("clone.js")),
     ("dasher:crypto", include_str!("crypto.js")),
+    ("dasher:window", include_str!("window.js")),
 ];
 
 /// Compiles the glue now rather than when the first runtime is created.

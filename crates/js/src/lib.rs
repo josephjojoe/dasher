@@ -67,6 +67,7 @@ mod run;
 mod runtime;
 mod timers;
 mod urls;
+mod window;
 
 pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
@@ -78,6 +79,7 @@ pub use run::{RunLimits, RunOutcome};
 pub use runtime::{
     DEFAULT_MAX_STACK_SIZE, DEFAULT_MEMORY_LIMIT, InterruptHandle, JsRuntime, RuntimeOptions,
 };
+pub use window::{DEFAULT_USER_AGENT, NavigationKind, NavigationRequest, Viewport, WindowOptions};
 
 /// The rquickjs version dasher is built against, for host bindings.
 pub use rquickjs;

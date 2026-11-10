@@ -43,6 +43,11 @@ pub enum RunOutcome {
     DeadlineExceeded,
     /// An [`InterruptHandle`](crate::InterruptHandle) asked it to stop.
     Interrupted,
+    /// The page asked to load another document (see
+    /// [`JsRuntime::navigation_request`]). The loop stops after the task
+    /// that asked, since the current document is about to be replaced, and
+    /// returns this straight away while the request is pending.
+    NavigationRequested,
 }
 
 impl From<Stopped> for RunOutcome {
@@ -77,6 +82,9 @@ impl JsRuntime {
             loop {
                 if limits.max_tasks.is_some_and(|max| ran >= max) {
                     return RunOutcome::TaskLimit;
+                }
+                if self.shared().window.has_navigation() {
+                    return RunOutcome::NavigationRequested;
                 }
                 match self.step() {
                     Ok(true) => {}
