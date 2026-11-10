@@ -31,3 +31,19 @@ todo = "warn"
 unimplemented = "warn"
 undocumented_unsafe_blocks = "warn"
 mem_forget = "warn"
+
+# Release builds target small, static binaries for Cloud Run and Lambda:
+# binary size and cold-start time matter more than raw throughput.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+# Release optimisations with symbols kept, for profiling and benchmarks.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
