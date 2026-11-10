@@ -13,6 +13,7 @@ use rquickjs::{
 
 use crate::clock::ClockMode;
 use crate::console::{self, ConsoleMessage};
+use crate::encoding;
 use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::heap::{self, HeapState};
@@ -29,7 +30,10 @@ const PRELUDE: &str = include_str!("prelude.js");
 /// Glue scripts evaluated after the prelude, in order, as `(name, source)`.
 /// Each evaluates to a function taking `native` and the shared `internals`
 /// object the prelude returns, and installs its globals.
-const GLUE: &[(&str, &str)] = &[("dasher:events", include_str!("events.js"))];
+const GLUE: &[(&str, &str)] = &[
+    ("dasher:events", include_str!("events.js")),
+    ("dasher:encoding", include_str!("encoding.js")),
+];
 
 /// How a [`JsRuntime`] is set up.
 #[derive(Clone, Debug)]
@@ -511,6 +515,7 @@ fn install<'js>(
 
     event_loop::install(ctx, &native, shared)?;
     console::install(ctx, &native, shared, max_console_message_len)?;
+    encoding::install(ctx, &native)?;
 
     let prelude: Function<'js> = ctx.eval_with_options(PRELUDE, eval_options("dasher:prelude"))?;
     let hooks: Object<'js> = prelude.call((native.clone(),))?;

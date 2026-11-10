@@ -55,6 +55,7 @@
 
 mod clock;
 mod console;
+mod encoding;
 mod error;
 mod event_loop;
 mod heap;
