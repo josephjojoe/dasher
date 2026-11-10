@@ -168,7 +168,7 @@ impl Document {
         if self.kind(parent) == NodeKind::Document {
             return Err(DomError::NoModificationAllowed);
         }
-        let fragment = self.parse_fragment_in(parent, html);
+        let fragment = self.parse_fragment_in(parent, html, false);
         let before = self.next_sibling(id);
         self.detach(id);
         self.insert(fragment, parent, before);
@@ -199,17 +199,18 @@ impl Document {
             AdjacentPosition::AfterBegin => (id, id, self.first_child(id)),
             AdjacentPosition::BeforeEnd => (id, id, None),
         };
-        let fragment = self.parse_fragment_in(context, html);
+        let fragment = self.parse_fragment_in(context, html, true);
         self.insert(fragment, parent, before);
         self.release(fragment);
         Ok(())
     }
 
     /// Fragment parsing in the context of `context`, substituting a `<body>`
-    /// context when `context` is not an element or is the `<html>` element,
-    /// as `outerHTML` and `insertAdjacentHTML` do.
-    fn parse_fragment_in(&mut self, context: NodeId, html: &str) -> NodeId {
-        if self.is_element(context) && !self.is_html(context, Name::HTML) {
+    /// context when `context` is not an element, or (if `html_means_body`)
+    /// is the `<html>` element. `outerHTML` substitutes only for fragment
+    /// parents; `insertAdjacentHTML` for `<html>` too.
+    fn parse_fragment_in(&mut self, context: NodeId, html: &str, html_means_body: bool) -> NodeId {
+        if self.is_element(context) && !(html_means_body && self.is_html(context, Name::HTML)) {
             return self.parse_fragment(context, html);
         }
         let body = self.create_element_named(Name::NS_HTML, Name::BODY);

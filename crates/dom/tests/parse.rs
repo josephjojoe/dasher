@@ -293,6 +293,17 @@ fn outer_html_replaces_the_element() {
         Err(DomError::NoModificationAllowed)
     );
 
+    // A child of <html> is parsed in the <html> context, where body
+    // content gets an implied <head> and <body>.
+    let mut doc2 = Document::parse("<head></head><body></body>");
+    let body = doc2.body().unwrap();
+    doc2.set_outer_html(body, "<p>x</p>").unwrap();
+    let html2 = doc2.document_element().unwrap();
+    assert_eq!(
+        doc2.inner_html(html2),
+        "<head></head><head></head><body><p>x</p></body>"
+    );
+
     // Inside a fragment, a <body> context is used.
     let frag = doc.create_fragment();
     let x = doc.create_element("x");
