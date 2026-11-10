@@ -8,6 +8,7 @@ use rquickjs::{Ctx, Function, Object};
 use url::Url;
 
 use crate::runtime::{JsRuntime, Shared};
+use crate::storage::{self, StorageStore};
 
 /// The `navigator.userAgent` used when none is configured: a current desktop
 /// Chrome on Linux, matching dasher-net's default `User-Agent` header.
@@ -68,6 +69,12 @@ pub struct WindowOptions {
     pub device_memory: u32,
     /// Window and screen dimensions.
     pub viewport: Viewport,
+    /// Backs `localStorage`. Pass the same store to several pages to share
+    /// items between them, as a browser profile would.
+    pub local_storage: StorageStore,
+    /// Backs `sessionStorage`. Pages of one browsing session (a tab) share
+    /// it in browsers; by default each page gets its own.
+    pub session_storage: StorageStore,
 }
 
 impl Default for WindowOptions {
@@ -80,6 +87,8 @@ impl Default for WindowOptions {
             hardware_concurrency: 8,
             device_memory: 8,
             viewport: Viewport::default(),
+            local_storage: StorageStore::new(),
+            session_storage: StorageStore::new(),
         }
     }
 }
@@ -157,6 +166,13 @@ pub(crate) fn install<'js>(
     env.set("screenHeight", viewport.screen_height)?;
     env.set("touch", viewport.touch)?;
     native.set("env", env)?;
+    storage::install(
+        ctx,
+        native,
+        &shared.window.url.borrow(),
+        &options.local_storage,
+        &options.session_storage,
+    )?;
 
     let s = Rc::clone(shared);
     native.set(

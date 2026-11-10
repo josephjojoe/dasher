@@ -65,6 +65,7 @@ mod random;
 mod remote;
 mod run;
 mod runtime;
+mod storage;
 mod timers;
 mod urls;
 mod window;
@@ -79,6 +80,7 @@ pub use run::{RunLimits, RunOutcome};
 pub use runtime::{
     DEFAULT_MAX_STACK_SIZE, DEFAULT_MEMORY_LIMIT, InterruptHandle, JsRuntime, RuntimeOptions,
 };
+pub use storage::{DEFAULT_STORAGE_QUOTA, QuotaExceeded, StorageStore};
 pub use window::{DEFAULT_USER_AGENT, NavigationKind, NavigationRequest, Viewport, WindowOptions};
 
 /// The rquickjs version dasher is built against, for host bindings.
