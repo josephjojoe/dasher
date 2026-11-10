@@ -17,3 +17,17 @@ dasher-dom = { path = "crates/dom" }
 dasher-js = { path = "crates/js" }
 dasher-net = { path = "crates/net" }
 dasher-page = { path = "crates/page" }
+
+# Shared lints; every crate opts in with `[lints] workspace = true`.
+# CI runs clippy with `-D warnings`, so anything at "warn" fails the build.
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+mem_forget = "warn"
