@@ -17,6 +17,14 @@ dasher-dom = { path = "crates/dom" }
 dasher-js = { path = "crates/js" }
 dasher-net = { path = "crates/net" }
 dasher-page = { path = "crates/page" }
+dasher-test-server = { path = "crates/test-server" }
+
+# Third-party crates shared across the workspace.
+bytes = "1"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = "0.1"
+tokio = "1"
 
 # Shared lints; every crate opts in with `[lints] workspace = true`.
 # CI runs clippy with `-D warnings`, so anything at "warn" fails the build.
