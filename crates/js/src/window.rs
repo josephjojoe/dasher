@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use rquickjs::{Ctx, Function, Object};
 use url::Url;
@@ -177,6 +178,18 @@ impl WindowState {
     pub(crate) fn has_navigation(&self) -> bool {
         self.navigation.borrow().is_some()
     }
+
+    /// Requests the navigation a declarative refresh asks for when it
+    /// comes due, unless the page has already asked to go elsewhere.
+    pub(crate) fn request_refresh(&self, url: String) {
+        let mut navigation = self.navigation.borrow_mut();
+        if navigation.is_none() {
+            *navigation = Some(NavigationRequest {
+                url,
+                kind: NavigationKind::Replace,
+            });
+        }
+    }
 }
 
 /// Parses the configured document URL.
@@ -264,5 +277,30 @@ impl JsRuntime {
     /// Removes and returns the pending navigation request.
     pub fn take_navigation_request(&self) -> Option<NavigationRequest> {
         self.shared().window.navigation.borrow_mut().take()
+    }
+
+    /// Schedules a declarative refresh, as `<meta http-equiv="refresh">`
+    /// or a `Refresh` header asks for: once `delay` of page time has
+    /// passed, the page requests a navigation to `url` (with
+    /// [`NavigationKind::Replace`]), unless it has already requested one.
+    ///
+    /// Until then the refresh counts as a timer: [`run`](Self::run) waits
+    /// for it, or skips ahead to it under the virtual clock, and the page
+    /// is not [idle](Self::is_idle). Replaces any refresh scheduled
+    /// before. The URL is not checked; the host decides whether to follow
+    /// the request.
+    pub fn schedule_refresh(&self, url: &str, delay: Duration) {
+        let due = self.now().saturating_add(delay);
+        *self.event_loop().refresh.borrow_mut() = Some((due, url.to_owned()));
+    }
+
+    /// When the scheduled [refresh](Self::schedule_refresh) comes due, in
+    /// page time, if one is scheduled and has not come due yet.
+    pub fn refresh_due(&self) -> Option<Duration> {
+        self.event_loop()
+            .refresh
+            .borrow()
+            .as_ref()
+            .map(|&(due, _)| due)
     }
 }
