@@ -157,9 +157,13 @@ async fn response_types() {
         ),
     )
     .await;
+    // The requests finish in any order, so compare with sorted keys.
     assert_eq!(
-        json(&js, "out"),
-        r#"{"ignored":"","json":{"items":["a","b"]},"textError":"InvalidStateError","badJson":null,"buffer":[true,19,true],"blob":[true,"application/json",19],"text":19,"document":null}"#
+        json(
+            &js,
+            "Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : 1)))"
+        ),
+        r#"{"badJson":null,"blob":[true,"application/json",19],"buffer":[true,19,true],"document":null,"ignored":"","json":{"items":["a","b"]},"text":19,"textError":"InvalidStateError"}"#
     );
 }
 
