@@ -30,6 +30,15 @@
 //! point. It borrows the document only while it parses, so scripts can
 //! change the tree between steps.
 //!
+//! # Extra documents
+//!
+//! Scripts can make documents besides the page's (`DOMParser`,
+//! `createHTMLDocument`). They live in the same arena, each as a tree under
+//! a document node of its own from [`Document::create_document`], so nodes
+//! move between them without copying. [`Document::parse_document_into`]
+//! fills one from HTML and [`Document::parse_xml_into`] from XML, with a
+//! small non-validating parser of dasher's own.
+//!
 //! # Memory
 //!
 //! Footprint matters more than speed here, so the layout is deliberately
@@ -67,6 +76,7 @@ mod parse;
 mod query;
 mod serialize;
 mod stream;
+mod xml;
 
 pub use document::{Children, Descendants, Document, QuirksMode};
 pub use error::DomError;
@@ -74,3 +84,4 @@ pub use name::{Name, Names};
 pub use node::{Attr, Doctype, NodeId, NodeKind};
 pub use parse::{AdjacentPosition, ParseOptions};
 pub use stream::{DocumentParser, ParseStep};
+pub use xml::XmlError;
