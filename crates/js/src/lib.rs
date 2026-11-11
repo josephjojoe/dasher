@@ -148,6 +148,7 @@
 mod clock;
 mod console;
 mod data_url;
+mod dom;
 mod encoding;
 mod error;
 mod event_loop;

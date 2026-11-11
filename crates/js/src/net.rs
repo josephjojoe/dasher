@@ -16,13 +16,15 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use dasher_net::header::{HeaderName, HeaderValue, ORIGIN};
 use dasher_net::url::Origin;
 use dasher_net::{
-    Credentials, HeaderMap, Method, RedirectMode, Request, ResourceType, Response, Session, Url,
+    CookieJar, Credentials, HeaderMap, Method, RedirectMode, Request, ResourceType, Response,
+    Session, Url,
 };
 use rquickjs::{ArrayBuffer, Ctx, Exception, Function, JsLifetime, Object, TypedArray};
 use tokio::runtime::Handle;
@@ -37,6 +39,9 @@ use crate::runtime::Shared;
 /// requests in flight.
 pub(crate) struct NetState {
     session: Option<Session>,
+    /// The cookies `document.cookie` reads and writes: the session's, or a
+    /// jar of the page's own when there is no session.
+    cookies: Arc<CookieJar>,
     /// Where requests are spawned when they are not started from inside a
     /// Tokio runtime.
     runtime: Option<Handle>,
@@ -46,12 +51,21 @@ pub(crate) struct NetState {
 
 impl NetState {
     pub(crate) fn new(session: Option<Session>) -> Self {
+        let cookies = session
+            .as_ref()
+            .map_or_else(Arc::default, |s| Arc::clone(s.cookies()));
         Self {
             session,
+            cookies,
             runtime: Handle::try_current().ok(),
             last_id: Cell::new(0),
             in_flight: RefCell::default(),
         }
+    }
+
+    /// The cookie jar behind `document.cookie`.
+    pub(crate) fn cookies(&self) -> &Arc<CookieJar> {
+        &self.cookies
     }
 
     fn next_id(&self) -> u32 {
@@ -388,7 +402,7 @@ fn send(shared: &Rc<Shared>, outgoing: Outgoing) -> u32 {
         return id;
     };
 
-    let sender = TaskSender::new(std::sync::Arc::clone(&shared.remote));
+    let sender = TaskSender::new(Arc::clone(&shared.remote));
     let operation = sender.begin_operation();
     let task = runtime.spawn(fetch(session, outgoing, sender, operation, id, method, url));
     net.in_flight.borrow_mut().insert(id, task.abort_handle());

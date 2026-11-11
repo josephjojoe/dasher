@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use dasher_dom::Document;
 use dasher_net::Session;
 use rquickjs::context::EvalOptions;
 use rquickjs::{
@@ -15,6 +16,7 @@ use url::Url;
 
 use crate::clock::ClockMode;
 use crate::console::{self, ConsoleMessage};
+use crate::dom::{self, DomState};
 use crate::encoding;
 use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
@@ -124,6 +126,7 @@ pub(crate) struct Shared {
     pub(crate) event_loop: LoopState,
     pub(crate) window: WindowState,
     pub(crate) net: NetState,
+    pub(crate) dom: Rc<DomState>,
 }
 
 impl Shared {
@@ -138,6 +141,7 @@ impl Shared {
             event_loop: LoopState::new(options.clock, options.frame_interval),
             window: WindowState::new(url),
             net: NetState::new(options.network.clone()),
+            dom: Rc::new(DomState::new(Document::parse(""))),
         }
     }
 
@@ -495,9 +499,11 @@ impl JsRuntime {
         usize::try_from(self.runtime.memory_usage().malloc_size).unwrap_or(0)
     }
 
-    /// Runs the cycle collector now.
+    /// Runs the cycle collector now, then frees the detached DOM nodes
+    /// that are no longer reachable from JS.
     pub fn run_gc(&self) {
         self.runtime.run_gc();
+        drop(self.shared.dom.doc_mut());
     }
 }
 
@@ -534,6 +540,7 @@ fn install<'js>(
     urls::install(ctx, &native)?;
     random::install(ctx, &native)?;
     window::install(ctx, &native, shared, &options.window)?;
+    dom::install(ctx, &native, shared)?;
 
     let mut scripts = glue::load(ctx)?.into_iter().map(Function::from_value);
     let prelude = scripts.next().ok_or(rquickjs::Error::Unknown)??;

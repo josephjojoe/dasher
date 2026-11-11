@@ -134,6 +134,11 @@ impl WindowState {
         }
     }
 
+    /// The document's current URL.
+    pub(crate) fn url(&self) -> Url {
+        self.url.borrow().clone()
+    }
+
     pub(crate) fn has_navigation(&self) -> bool {
         self.navigation.borrow().is_some()
     }
