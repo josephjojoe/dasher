@@ -181,7 +181,7 @@ error, so typos don't go unnoticed.
 | `headers` | | Headers for every request, as an object. |
 | `cookies` | | Cookies set for `url` first, in `Set-Cookie` syntax. |
 | `block` | | URL patterns to refuse, `*` as a wildcard: `"*://*.doubleclick.net/*"`. |
-| `proxy` | | An `http://user:pass@host:port` proxy. |
+| `proxy` | | An `http://user:pass@host:port` proxy. It resolves host names itself, so the private address check sees less; see [Security](#security). |
 | `realtime` | `false` | Run timers in real time instead of skipping ahead when the page only waits on them. |
 
 Each `extract` entry is either a CSS selector, giving the text of the
@@ -226,7 +226,7 @@ Failures have an `error` message and these statuses:
 | `401` | `DASHER_AUTH_TOKEN` is set and the request lacks it. |
 | `413` | The job is over 1 MiB. |
 | `422` | The page went over its JS heap or DOM node limit and was stopped. |
-| `502` | The page could not be fetched (DNS, connection, TLS, blocked URL). |
+| `502` | The page could not be fetched (DNS, connection, TLS, blocked URL or private address). |
 | `503` | Too many jobs, or shutting down; retry. |
 | `504` | No response for the document in time. |
 
@@ -253,9 +253,33 @@ scripts, which can fetch more. Treat it as an open proxy into wherever it
 runs:
 
 - Keep it private: IAM on Cloud Run and Lambda, or `DASHER_AUTH_TOKEN`.
-- Requests to the cloud metadata endpoints (`169.254.*`,
-  `metadata.google.internal`, AWS's IPv6 endpoint) and, on Lambda, to the
-  Runtime API are always refused. This matches URLs only, not what a
-  host name resolves to, so also limit egress if it can reach private
-  networks (a VPC connector with no private routes, or a Lambda outside
-  a VPC).
+- Pages may not connect to private addresses: loopback (`127.0.0.0/8`,
+  `::1`), link-local (`169.254.0.0/16`, where the cloud metadata servers
+  are, and `fe80::/10`), private (`10/8`, `172.16/12`, `192.168/16` and
+  IPv6 unique local `fc00::/7`, which holds AWS's IPv6 metadata
+  endpoint), CGNAT (`100.64/10`), unspecified (`0.0.0.0`, `::`),
+  multicast and reserved. That includes the Lambda Runtime API, which is
+  on localhost. The check is made on the address dasher connects to,
+  after DNS, for the page, its scripts, `fetch`/XHR and every redirect,
+  so a public name that resolves or rebinds to one of these is refused
+  too. A job whose page is refused gets `502` with an error saying which
+  address was refused; a refused script or `fetch()` fails inside the
+  page like a network error.
+- On top of that, URLs for the metadata endpoints (`169.254.*`,
+  `metadata.google.internal`, AWS's IPv6 endpoint) and, on Lambda, the
+  Runtime API are always refused by pattern, even with the check above
+  turned off.
+- A job's `proxy` changes what can be checked: the proxy resolves host
+  names and connects to them, out of dasher's sight. dasher still
+  refuses a proxy on a private address and target URLs whose host is a
+  private IP literal, but a name that the proxy resolves to a private
+  address gets through. Use proxies that refuse private destinations
+  themselves.
+- Turning the check off (`--allow-private-addresses` or
+  `DASHER_ALLOW_PRIVATE_ADDRESSES=true`, read by both `dasher serve`
+  and `dasher lambda`) is for scraping servers on localhost or a private
+  network, such as when testing. Don't do it where callers aren't
+  trusted.
+- Still limit egress if the service can reach private networks (a VPC
+  connector with no private routes, or a Lambda outside a VPC), as a
+  second line of defence.
