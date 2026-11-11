@@ -121,7 +121,7 @@ impl Document {
         // html5ever builds the fragment under an <html> element appended to
         // a scratch document node, and makes its own copy of the context
         // element. Both are thrown away once the result is moved out.
-        let scratch = self.create_document_node();
+        let scratch = self.create_document();
         let context_copy = html5ever::parse_fragment(
             Sink::new(self, scratch, true),
             opts,
