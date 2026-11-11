@@ -143,6 +143,42 @@ async fn script_load_failures_fire_error_and_parsing_goes_on() {
 }
 
 #[tokio::test]
+async fn inline_handler_attributes_run() {
+    let server = FixtureServer::builder()
+        // The body's attribute replaces the handler a head script set.
+        .route("/body-onload", |_| {
+            bytes_page(
+                "text/html",
+                b"<script>window.log = []; window.onload = () => log.push('head script');</script>\
+                  <body onload=\"log.push('attr', document.readyState)\">\
+                  <button onclick=\"log.push('click', this.tagName)\"></button>",
+            )
+        })
+        // A script after the body replaces the attribute's handler.
+        .route("/script-after-body", |_| {
+            bytes_page(
+                "text/html",
+                b"<script>window.log = [];</script><body onload=\"log.push('attr')\">\
+                  <script>window.onload = () => log.push('body script');</script>",
+            )
+        })
+        .start()
+        .unwrap();
+
+    let page = load(&server, "/body-onload").await;
+    page.js()
+        .run_script("document.querySelector('button').click()", "test.js")
+        .unwrap();
+    assert_eq!(
+        json(&page, "log"),
+        r#"["attr","complete","click","BUTTON"]"#
+    );
+
+    let page = load(&server, "/script-after-body").await;
+    assert_eq!(json(&page, "log"), r#"["body script"]"#);
+}
+
+#[tokio::test]
 async fn honours_the_declared_or_sniffed_charset() {
     let server = FixtureServer::builder()
         .route("/latin1-header", |_| {

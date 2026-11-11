@@ -395,8 +395,10 @@ impl Page {
         });
         parser.push(&charset::decode_chunk(&mut decoder, &head, eof));
         drop(head);
+        let mut body_seen = false;
         loop {
             let step = self.js.with_document_mut(|doc| parser.resume(doc));
+            self.note_body(&mut body_seen);
             // Parsing alone can build too many nodes.
             if let Some(limit) = self.js.limit_exceeded() {
                 return Err(Stop::Limit(limit));
@@ -416,6 +418,7 @@ impl Page {
             }
         }
         self.js.with_document_mut(|doc| parser.finish(doc));
+        self.note_body(&mut body_seen);
         drop(parser);
         self.js.hold_detached_nodes(false);
         self.preload_links(true);
@@ -439,6 +442,19 @@ impl Page {
             .fire_event(EventTarget::Window, "pageshow", false, false);
         self.js.set_document_write(DocumentWrite::Insert);
         self.check_navigation()
+    }
+
+    /// Tells scripts once the parser has inserted the body, so
+    /// `<body onload>` and its kin set the window's handlers before any
+    /// later script runs.
+    fn note_body(&self, seen: &mut bool) {
+        if *seen {
+            return;
+        }
+        if let Some(body) = self.js.with_document(|doc| doc.body()) {
+            *seen = true;
+            self.js.body_inserted(body);
+        }
     }
 
     /// Prepares a script element the parser just closed and, if the parser
