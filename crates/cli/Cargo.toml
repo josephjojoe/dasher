@@ -12,6 +12,12 @@ workspace = true
 
 [dependencies]
 dasher.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+dasher-test-server.workspace = true
+serde_json.workspace = true
 
 [[bin]]
 name = "dasher"

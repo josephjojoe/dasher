@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+  <title>Loading…</title>
+  <style>.product { color: red }</style>
+</head>
+<body>
+  <h1>Products</h1>
+  <ul id="products"></ul>
+  <p id="footer">Made   with
+     <b>care</b><br>in   2026</p>
+  <script>
+    console.log('rendering', 2, 'pages');
+    // Render after a timer and an API call, as a client-rendered page would.
+    setTimeout(async () => {
+      const response = await fetch('/api/products');
+      const products = await response.json();
+      const list = document.getElementById('products');
+      for (const p of products) {
+        const li = document.createElement('li');
+        li.className = 'product';
+        li.innerHTML = `<a href="/p/${p.id}">  ${p.name}  </a> <span class="price">${p.price}</span>`;
+        list.appendChild(li);
+      }
+      document.title = `${products.length} products`;
+      console.warn('rendered', products.length);
+    }, 300);
+    setTimeout(() => { throw new Error('widget failed'); }, 10);
+  </script>
+</body>
+</html>

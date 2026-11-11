@@ -223,6 +223,13 @@ impl CookieJar {
         self.serialize(url, Api::Script, unix_now())
     }
 
+    /// The cookies a request to `url` would carry, `HttpOnly` ones
+    /// included, in the order the `Cookie` header lists them: longer paths
+    /// first, then older cookies first.
+    pub fn cookies_for(&self, url: &Url) -> Vec<Cookie> {
+        self.matching(url, Api::Http, unix_now())
+    }
+
     /// Every unexpired cookie in the jar, in creation order.
     pub fn cookies(&self) -> Vec<Cookie> {
         let now = unix_now();
@@ -343,9 +350,11 @@ impl CookieJar {
         true
     }
 
-    fn serialize(&self, url: &Url, api: Api, now: i64) -> String {
+    /// The unexpired cookies a request to `url` would carry through `api`,
+    /// in `Cookie` header order: longer paths first, then older cookies.
+    fn matching(&self, url: &Url, api: Api, now: i64) -> Vec<Cookie> {
         let Some(host) = canonical_host(url) else {
-            return String::new();
+            return Vec::new();
         };
         let secure_url = is_secure(url);
         let path = match url.path() {
@@ -355,7 +364,7 @@ impl CookieJar {
 
         let mut store = self.lock();
         store.cookies.retain(|c| !c.is_expired(now));
-        let mut matching: Vec<&Cookie> = store
+        let mut matching: Vec<Cookie> = store
             .cookies
             .iter()
             .filter(|c| {
@@ -369,15 +378,19 @@ impl CookieJar {
                     && (!c.secure || secure_url)
                     && (api == Api::Http || !c.http_only)
             })
+            .cloned()
             .collect();
-        // Longer paths first, then older cookies first.
         matching.sort_by(|a, b| {
             b.path
                 .len()
                 .cmp(&a.path.len())
                 .then(a.created.cmp(&b.created))
         });
+        matching
+    }
 
+    fn serialize(&self, url: &Url, api: Api, now: i64) -> String {
+        let matching = self.matching(url, api, now);
         let mut out = String::new();
         for (i, cookie) in matching.iter().enumerate() {
             if i > 0 {
@@ -1031,6 +1044,26 @@ mod tests {
         assert!(cookies[0].expires().unwrap() > SystemTime::now());
         assert_eq!(cookies[0].path(), "/a");
         assert_eq!(cookies[1].expires(), None);
+    }
+
+    #[test]
+    fn cookies_for_lists_what_a_request_would_send() {
+        let jar = CookieJar::new();
+        let page = url("https://example.com/a/b");
+        assert!(jar.set_from_header(&page, "h=1; HttpOnly"));
+        assert!(jar.set_from_header(&page, "root=2; Path=/"));
+        assert!(jar.set_from_header(&url("https://other.test/"), "x=3"));
+        assert!(jar.set_from_header(&page, "sec=4; Secure; Path=/"));
+        let names = |u: &str| -> Vec<String> {
+            jar.cookies_for(&url(u))
+                .iter()
+                .map(|c| c.name().to_owned())
+                .collect()
+        };
+        assert_eq!(names("https://example.com/a/b"), ["h", "root", "sec"]);
+        assert_eq!(names("http://example.com/"), ["root"]);
+        assert_eq!(names("https://other.test/"), ["x"]);
+        assert!(names("data:text/plain,x").is_empty());
     }
 
     #[test]

@@ -1,27 +1,30 @@
-//! The `dasher` command-line tool.
+//! The `dasher` command-line tool: loads a page and prints its final HTML,
+//! or the value of a JavaScript expression.
+
+mod args;
+mod run;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "\
-usage: dasher [--help | --version]
-
-dasher is a minimal headless browser for scraping. Page loading is not
-implemented yet.";
+use args::{Command, USAGE};
 
 fn main() -> ExitCode {
-    let arg = std::env::args().nth(1);
-    match arg.as_deref() {
-        Some("-V" | "--version") => {
-            println!("dasher {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
+    let command = match args::parse(std::env::args().skip(1)) {
+        Ok(command) => command,
+        Err(message) => {
+            eprintln!("dasher: {message}\n\n{USAGE}");
+            return ExitCode::from(2);
         }
-        Some("-h" | "--help") => {
+    };
+    match command {
+        Command::Help => {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        _ => {
-            eprintln!("{USAGE}");
-            ExitCode::from(2)
+        Command::Version => {
+            println!("dasher {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
         }
+        Command::Run(options) => run::main(&options),
     }
 }

@@ -175,7 +175,7 @@ impl Shared {
 
     /// Called before handing control to JS: refuses to start once the
     /// deadline has passed or an interrupt was requested.
-    fn begin(&self) -> Result<(), ScriptError> {
+    pub(crate) fn begin(&self) -> Result<(), ScriptError> {
         self.interrupted.set(false);
         self.heap.clear_refused();
         if self.should_interrupt() {

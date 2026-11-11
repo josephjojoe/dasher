@@ -1,0 +1,12 @@
+<!doctype html>
+<title>Late</title>
+<div id="root"></div>
+<script>
+  setTimeout(() => {
+    const el = document.createElement('div');
+    el.id = 'late';
+    el.textContent = 'here at last';
+    document.getElementById('root').appendChild(el);
+    window.ready = true;
+  }, 3000);
+</script>
