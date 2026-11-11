@@ -45,6 +45,10 @@ pub struct Config {
     /// URL patterns every job refuses; the cloud metadata endpoints by
     /// default.
     pub blocked: Vec<String>,
+    /// Whether pages are refused connections to private, loopback and
+    /// link-local addresses; see [`RunOptions::block_private_addresses`].
+    /// On by default.
+    pub block_private_addresses: bool,
     /// Whether to log a line to stderr per job.
     pub log: bool,
 }
@@ -58,6 +62,7 @@ impl Default for Config {
             auth_token: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             blocked: RunOptions::default().blocked,
+            block_private_addresses: true,
             log: true,
         }
     }
@@ -125,6 +130,7 @@ impl Service {
             max_timeout: self.config.max_timeout,
             deadline: None,
             blocked: self.config.blocked.clone(),
+            block_private_addresses: self.config.block_private_addresses,
         };
         let log = self.config.log;
         let running = Arc::clone(&self.running);

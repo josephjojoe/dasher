@@ -45,6 +45,10 @@ pub struct LambdaConfig {
     /// URL patterns every job refuses; the cloud metadata endpoints by
     /// default. The Runtime API is always refused too.
     pub blocked: Vec<String>,
+    /// Whether pages are refused connections to private, loopback and
+    /// link-local addresses, the Runtime API's among them; see
+    /// [`RunOptions::block_private_addresses`]. On by default.
+    pub block_private_addresses: bool,
     /// Whether to log a line to stderr per job.
     pub log: bool,
 }
@@ -55,6 +59,7 @@ impl Default for LambdaConfig {
             // Lambda's own limit.
             max_timeout: Duration::from_secs(15 * 60),
             blocked: RunOptions::default().blocked,
+            block_private_addresses: true,
             log: true,
         }
     }
@@ -72,6 +77,7 @@ pub async fn run_lambda(api: &str, config: LambdaConfig) -> io::Result<()> {
         max_timeout: config.max_timeout,
         deadline: None,
         blocked: config.blocked,
+        block_private_addresses: config.block_private_addresses,
     };
     // Pages must not reach the Runtime API and answer for us.
     options.blocked.push(format!("*://{api}/*"));

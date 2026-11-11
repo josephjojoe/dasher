@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use dasher_serve::{Config, LambdaConfig, RUNTIME_API_ENV, Server};
 
+/// Set to `true` to let pages reach private addresses.
+const ALLOW_PRIVATE_ADDRESSES_ENV: &str = "DASHER_ALLOW_PRIVATE_ADDRESSES";
+
 pub const USAGE: &str = "\
 usage: dasher serve [options]
        dasher lambda
@@ -34,7 +37,13 @@ Options for serve (environment variables in brackets):
                                  SIGTERM [default: 8]
       --auth-token <token>       require 'Authorization: Bearer <token>'
                                  [$DASHER_AUTH_TOKEN]
-  -h, --help                     print this help";
+      --allow-private-addresses  let pages connect to loopback, link-local
+                                 and private addresses, which are refused
+                                 by default; for testing against local
+                                 servers [$DASHER_ALLOW_PRIVATE_ADDRESSES]
+  -h, --help                     print this help
+
+lambda reads $DASHER_ALLOW_PRIVATE_ADDRESSES too.";
 
 /// Options for `dasher serve`.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +55,7 @@ pub struct ServeOptions {
     pub max_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub auth_token: Option<String>,
+    pub allow_private_addresses: bool,
 }
 
 impl Default for ServeOptions {
@@ -58,6 +68,7 @@ impl Default for ServeOptions {
             max_timeout: dasher_serve::DEFAULT_MAX_TIMEOUT,
             shutdown_timeout: dasher_serve::DEFAULT_SHUTDOWN_TIMEOUT,
             auth_token: None,
+            allow_private_addresses: false,
         }
     }
 }
@@ -83,6 +94,7 @@ pub fn parse_serve(
         options.max_timeout = seconds("$DASHER_MAX_TIMEOUT", &secs)?;
     }
     options.auth_token = from_env("DASHER_AUTH_TOKEN");
+    options.allow_private_addresses = allow_private_addresses(env)?;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -110,6 +122,7 @@ pub fn parse_serve(
             "--max-timeout" => options.max_timeout = seconds(&name, &value("seconds")?)?,
             "--shutdown-timeout" => options.shutdown_timeout = seconds(&name, &value("seconds")?)?,
             "--auth-token" => options.auth_token = Some(value("a token")?),
+            "--allow-private-addresses" => options.allow_private_addresses = true,
             _ => return Err(format!("unknown serve option {name}")),
         }
         if inline.is_some() {
@@ -117,6 +130,21 @@ pub fn parse_serve(
         }
     }
     Ok(Some(options))
+}
+
+/// Whether `$DASHER_ALLOW_PRIVATE_ADDRESSES` turns off the private
+/// address guard.
+fn allow_private_addresses(env: &dyn Fn(&str) -> Option<String>) -> Result<bool, String> {
+    let Some(value) = env(ALLOW_PRIVATE_ADDRESSES_ENV) else {
+        return Ok(false);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" | "off" => Ok(false),
+        "1" | "true" | "yes" | "on" => Ok(true),
+        _ => Err(format!(
+            "${ALLOW_PRIVATE_ADDRESSES_ENV} expects true or false, not {value:?}"
+        )),
+    }
 }
 
 fn number<T: std::str::FromStr>(name: &str, s: &str) -> Result<T, String> {
@@ -149,6 +177,7 @@ pub fn serve(options: &ServeOptions) -> ExitCode {
         max_timeout: options.max_timeout,
         auth_token: options.auth_token.clone(),
         shutdown_timeout: options.shutdown_timeout,
+        block_private_addresses: !options.allow_private_addresses,
         ..Config::default()
     };
     let addr = SocketAddr::new(options.host, options.port);
@@ -172,8 +201,20 @@ pub fn lambda() -> ExitCode {
         eprintln!("dasher: ${RUNTIME_API_ENV} is not set; `dasher lambda` runs inside AWS Lambda");
         return ExitCode::from(2);
     };
+    let env = |name: &str| std::env::var(name).ok();
+    let allow_private = match allow_private_addresses(&env) {
+        Ok(allow) => allow,
+        Err(message) => {
+            eprintln!("dasher: {message}");
+            return ExitCode::from(2);
+        }
+    };
+    let config = LambdaConfig {
+        block_private_addresses: !allow_private,
+        ..LambdaConfig::default()
+    };
     block_on(async move {
-        dasher_serve::run_lambda(&api, LambdaConfig::default())
+        dasher_serve::run_lambda(&api, config)
             .await
             .map_err(|e| format!("the Lambda Runtime API failed: {e}"))
     })
@@ -233,6 +274,7 @@ mod tests {
             ("DASHER_AUTH_TOKEN", "tok"),
         ];
         let options = parse(&[], &env).unwrap().unwrap();
+        assert!(!options.allow_private_addresses);
         assert_eq!(options.port, 9000);
         assert_eq!(options.max_concurrency, 2);
         assert_eq!(options.max_queue, 0);
@@ -266,6 +308,19 @@ mod tests {
         assert_eq!(options.max_timeout, Duration::from_secs(90));
         assert_eq!(options.shutdown_timeout, Duration::from_millis(2500));
         assert_eq!(options.auth_token.as_deref(), Some("other"));
+        assert!(!options.allow_private_addresses);
+
+        let allowed = |args: &[&str], value: &str| {
+            parse(args, &[("DASHER_ALLOW_PRIVATE_ADDRESSES", value)])
+                .unwrap()
+                .unwrap()
+                .allow_private_addresses
+        };
+        assert!(allowed(&["--allow-private-addresses"], ""));
+        assert!(allowed(&[], "true"));
+        assert!(allowed(&[], "1"));
+        assert!(!allowed(&[], "false"));
+        assert!(!allowed(&[], ""));
     }
 
     #[test]
@@ -279,5 +334,10 @@ mod tests {
         assert!(err(&["--max-concurrency", "0"], &[]).contains("positive"));
         assert!(err(&["--max-timeout", "0"], &[]).contains("seconds"));
         assert!(err(&[], &[("PORT", "http")]).contains("$PORT"));
+        assert!(
+            err(&[], &[("DASHER_ALLOW_PRIVATE_ADDRESSES", "maybe")])
+                .contains("$DASHER_ALLOW_PRIVATE_ADDRESSES")
+        );
+        assert!(err(&["--allow-private-addresses=yes"], &[]).contains("takes no value"));
     }
 }

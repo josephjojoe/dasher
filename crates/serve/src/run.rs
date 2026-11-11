@@ -14,8 +14,10 @@ use crate::report;
 /// URL patterns every job refuses: the cloud metadata endpoints, which
 /// hand out the instance's credentials.
 ///
-/// This is a guard against the obvious requests only; it does not see
-/// what a host name resolves to.
+/// These match URLs only, not what a host name resolves to. The check
+/// that does, [`RunOptions::block_private_addresses`], covers these
+/// addresses and more; the patterns stay as a second line, and for when
+/// that check is turned off.
 pub const METADATA_BLOCKS: &[&str] = &[
     // AWS, GCP and Azure instance metadata, and ECS task metadata.
     "*://169.254.*",
@@ -45,6 +47,13 @@ pub struct RunOptions {
     pub deadline: Option<Instant>,
     /// URL patterns refused on top of the job's own `block` list.
     pub blocked: Vec<String>,
+    /// Whether pages may not connect to loopback, link-local, private,
+    /// CGNAT and other non-public addresses, checked after DNS on every
+    /// connection (see
+    /// [`BrowserBuilder::block_private_addresses`](dasher::BrowserBuilder::block_private_addresses)).
+    /// On by default; turn it off only to scrape servers on a private
+    /// network or localhost, such as test fixtures.
+    pub block_private_addresses: bool,
 }
 
 impl Default for RunOptions {
@@ -53,6 +62,7 @@ impl Default for RunOptions {
             max_timeout: Duration::from_secs(300),
             deadline: None,
             blocked: METADATA_BLOCKS.iter().map(|&s| s.to_owned()).collect(),
+            block_private_addresses: true,
         }
     }
 }
@@ -215,7 +225,7 @@ async fn run_page(
 }
 
 fn browser(job: &Job, options: &RunOptions) -> dasher::Result<Browser> {
-    let mut builder = Browser::builder();
+    let mut builder = Browser::builder().block_private_addresses(options.block_private_addresses);
     if let Some(user_agent) = &job.user_agent {
         builder = builder.user_agent(user_agent);
     }
