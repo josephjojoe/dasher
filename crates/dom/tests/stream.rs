@@ -1,6 +1,8 @@
 //! Incremental parsing with `DocumentParser`.
 
-use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep};
+use std::collections::HashMap;
+
+use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep, TreeChange};
 
 const PAGE: &str = r#"<!DOCTYPE html>
 <html lang=en><head><meta charset=utf-8><title>Stream &amp; test</title>
@@ -197,4 +199,174 @@ fn plain_text_is_shown_verbatim_in_a_pre() {
         doc.text_content(pre).as_deref(),
         Some("{\"html\": \"<b>not bold</b>\",\n\"script\": \"<script>x</script>\"}")
     );
+}
+
+/// Children per parent, as rebuilt from nothing but the logged changes.
+#[derive(Default)]
+struct Replay(HashMap<NodeId, Vec<NodeId>>);
+
+impl Replay {
+    fn apply(&mut self, change: TreeChange) {
+        match change {
+            TreeChange::Inserted {
+                parent,
+                node,
+                prev,
+                next,
+            } => {
+                let kids = self.0.entry(parent).or_default();
+                let at = prev.map_or(0, |p| {
+                    kids.iter().position(|&k| k == p).expect("prev is a child") + 1
+                });
+                assert_eq!(kids.get(at).copied(), next, "next sibling of {node:?}");
+                kids.insert(at, node);
+            }
+            TreeChange::Removed {
+                parent,
+                node,
+                prev,
+                next,
+            } => {
+                let kids = self.0.get_mut(&parent).expect("parent has children");
+                let at = kids.iter().position(|&k| k == node).expect("is a child");
+                assert_eq!(at.checked_sub(1).map(|i| kids[i]), prev);
+                assert_eq!(kids.get(at + 1).copied(), next);
+                kids.remove(at);
+            }
+            TreeChange::TextAppended { .. } | TreeChange::AttributeAdded { .. } => {}
+        }
+    }
+
+    /// Checks the replayed tree under `node` against the real one.
+    fn check(&self, doc: &Document, node: NodeId) {
+        let real: Vec<NodeId> = doc.children(node).collect();
+        let replayed = self.0.get(&node).cloned().unwrap_or_default();
+        assert_eq!(replayed, real, "children of {node:?}");
+        for child in real {
+            self.check(doc, child);
+            if let Some(contents) = doc.template_contents(child) {
+                self.check(doc, contents);
+            }
+        }
+    }
+}
+
+/// Streams `chunks` with change logging on, replaying the changes taken
+/// after each step.
+fn stream_logged(chunks: &[&str]) -> (Document, Replay) {
+    let mut doc = Document::new();
+    let mut parser = DocumentParser::new(&mut doc, ParseOptions::default());
+    parser.log_changes(true);
+    let mut replay = Replay::default();
+    for chunk in chunks {
+        parser.push(chunk);
+        loop {
+            let step = parser.resume(&mut doc);
+            parser
+                .take_changes()
+                .into_iter()
+                .for_each(|c| replay.apply(c));
+            if step == ParseStep::NeedInput {
+                break;
+            }
+        }
+    }
+    parser.finish(&mut doc);
+    parser
+        .take_changes()
+        .into_iter()
+        .for_each(|c| replay.apply(c));
+    (doc, replay)
+}
+
+#[test]
+fn logged_changes_rebuild_the_tree() {
+    // PAGE has foster parenting and misnested formatting elements, which
+    // move nodes after inserting them.
+    let (doc, replay) = stream_logged(&[PAGE]);
+    replay.check(&doc, doc.root());
+
+    let chars: Vec<String> = PAGE.chars().map(String::from).collect();
+    let refs: Vec<&str> = chars.iter().map(String::as_str).collect();
+    let (doc, replay) = stream_logged(&refs);
+    replay.check(&doc, doc.root());
+    assert_eq!(html(&doc), html(&Document::parse(PAGE)));
+}
+
+#[test]
+fn text_added_to_an_earlier_text_node_is_logged_once() {
+    let mut doc = Document::new();
+    let mut parser = DocumentParser::new(&mut doc, ParseOptions::default());
+    parser.log_changes(true);
+    parser.push("<p>ab");
+    parser.resume(&mut doc);
+    let changes = parser.take_changes();
+    // html, head, body, p and the text, which grew while it was new.
+    assert_eq!(changes.len(), 5);
+    assert!(
+        changes
+            .iter()
+            .all(|c| matches!(c, TreeChange::Inserted { .. }))
+    );
+    let p = doc.first_child(doc.body().unwrap()).unwrap();
+    let text = doc.first_child(p).unwrap();
+
+    // Character references split the text into several appends.
+    parser.push("c&amp;d");
+    parser.resume(&mut doc);
+    assert_eq!(
+        parser.take_changes(),
+        [TreeChange::TextAppended {
+            node: text,
+            old_len: 2
+        }]
+    );
+    parser.push("e<p>");
+    parser.resume(&mut doc);
+    let changes = parser.take_changes();
+    assert_eq!(
+        changes[0],
+        TreeChange::TextAppended {
+            node: text,
+            old_len: 5
+        }
+    );
+    assert_eq!(doc.text(text), Some("abc&de"));
+
+    // Nothing is logged once logging stops.
+    parser.log_changes(false);
+    parser.push("more");
+    parser.finish(&mut doc);
+    assert!(parser.take_changes().is_empty());
+}
+
+#[test]
+fn attributes_from_a_repeated_body_tag_are_logged() {
+    let mut doc = Document::new();
+    let mut parser = DocumentParser::new(&mut doc, ParseOptions::default());
+    parser.push("<body class=a>");
+    parser.resume(&mut doc);
+    parser.log_changes(true);
+    parser.push("<body class=b id=x>");
+    parser.resume(&mut doc);
+    let body = doc.body().unwrap();
+    let id = doc.intern("id");
+    assert_eq!(
+        parser.take_changes(),
+        [TreeChange::AttributeAdded {
+            node: body,
+            namespace: Name::EMPTY,
+            local: id,
+        }]
+    );
+    assert_eq!(doc.attribute(body, "class"), Some("a"));
+}
+
+#[test]
+fn logging_is_off_by_default() {
+    let mut doc = Document::new();
+    let mut parser = DocumentParser::new(&mut doc, ParseOptions::default());
+    parser.push("<p>text");
+    parser.finish(&mut doc);
+    assert!(parser.take_changes().is_empty());
 }
