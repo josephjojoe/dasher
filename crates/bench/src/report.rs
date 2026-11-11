@@ -10,6 +10,10 @@ use crate::fixtures::Scenario;
 
 const MIB: f64 = 1024.0 * 1024.0;
 
+/// Sequential jobs left out of the growth check, while pools and caches
+/// fill up.
+const WARMUP_JOBS: usize = 10;
+
 /// What one scenario cost, over all its runs: memory is the worst run,
 /// time the median.
 #[derive(Debug)]
@@ -102,19 +106,22 @@ impl Results {
             .unwrap_or_default()
     }
 
-    /// RSS after the 10th job (or the last, if there were fewer).
-    pub fn rss_after_warmup(&self) -> Option<u64> {
+    /// The highest RSS between jobs, over the first and the second half of
+    /// the jobs after the first [`WARMUP_JOBS`]. RSS swings with the mix of
+    /// pages, so halves are compared by their peaks rather than by single
+    /// samples.
+    pub fn job_halves(&self) -> Option<(u64, u64)> {
         let rss = self.job_rss();
-        rss.get(9).or(rss.last()).copied()
+        let measured = rss.get(WARMUP_JOBS..).filter(|r| r.len() >= 2)?;
+        let (first, second) = measured.split_at(measured.len() / 2);
+        Some((*first.iter().max()?, *second.iter().max()?))
     }
 
-    /// How much RSS grew from the 10th job to the last: what a long-lived
-    /// process keeps that it should have given back.
+    /// How much more RSS the second half of the jobs needed than the first:
+    /// what a long-lived process keeps that it should have given back.
     pub fn job_growth(&self) -> Option<i64> {
-        let rss = self.job_rss();
-        let last = *rss.last()?;
-        let warm = self.rss_after_warmup()?;
-        Some(last as i64 - warm as i64)
+        let (first, second) = self.job_halves()?;
+        Some(second as i64 - first as i64)
     }
 
     pub fn markdown(&self) -> String {
@@ -154,16 +161,15 @@ impl Results {
             "| idle RSS (ready, no page) | {:.1} MiB |",
             mib(self.idle_rss())
         );
-        if let (Some(jobs), Some(warm), Some(growth)) =
-            (&self.jobs, self.rss_after_warmup(), self.job_growth())
+        if let (Some(jobs), Some((first, second)), Some(growth)) =
+            (&self.jobs, self.job_halves(), self.job_growth())
         {
             let n = jobs["jobs"].as_u64().unwrap_or(0);
-            let last = self.job_rss().last().copied().unwrap_or(0);
             let _ = writeln!(
                 s,
-                "| {n} sequential jobs: RSS after job 10 → after job {n} | {:.1} → {:.1} MiB ({:+.2} MiB) |",
-                mib(warm),
-                mib(last),
+                "| {n} sequential jobs: highest RSS between jobs, first half → second half | {:.1} → {:.1} MiB ({:+.2} MiB) |",
+                mib(first),
+                mib(second),
                 growth as f64 / MIB,
             );
             let _ = writeln!(
@@ -344,8 +350,13 @@ mod tests {
     }
 
     #[test]
-    fn job_growth_is_measured_from_the_tenth_job() {
-        assert_eq!(results().job_growth(), Some(90 * 1024));
+    fn job_growth_compares_the_peaks_of_each_half() {
+        // RSS rises 1 KiB a job: jobs 11-55 peak at job 55, 56-100 at 100.
+        assert_eq!(results().job_growth(), Some(45 * 1024));
+        let mut flat = results();
+        let rss: Vec<u64> = (0..100).map(|i| (20 << 20) + (i % 4) * 4096).collect();
+        flat.jobs = Some(json!({ "jobs": 100, "rss": rss }));
+        assert_eq!(flat.job_growth(), Some(0));
     }
 
     #[test]
