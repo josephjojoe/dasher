@@ -73,46 +73,46 @@ an Apple M2 Pro, 3 runs per page, 2026-11-10:
 
 | page | time to settle | peak RSS | page RSS | JS heap | DOM nodes | HTML out |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| static | 11 ms | 6.4 MiB | 2.8 MiB | 1.6 MiB | 289 | 11 KiB |
-| large | 53 ms | 16.8 MiB | 9.8 MiB | 1.6 MiB | 75,194 | 1698 KiB |
-| spa | 92 ms | 11.4 MiB | 7.4 MiB | 5.1 MiB | 2,291 | 76 KiB |
-| feed | 132 ms | 8.9 MiB | 4.8 MiB | 2.5 MiB | 8,830 | 271 KiB |
+| static | 11 ms | 6.5 MiB | 2.8 MiB | 1.7 MiB | 289 | 11 KiB |
+| large | 53 ms | 16.8 MiB | 9.9 MiB | 1.7 MiB | 75,194 | 1698 KiB |
+| spa | 92 ms | 11.3 MiB | 7.3 MiB | 5.1 MiB | 2,291 | 76 KiB |
+| feed | 128 ms | 9.1 MiB | 4.8 MiB | 2.5 MiB | 8,830 | 271 KiB |
 
 | measure | value |
 | --- | ---: |
-| idle RSS (ready, no page) | 3.7 MiB |
-| 100 sequential jobs: highest RSS between jobs, first half → second half | 6.0 → 6.1 MiB (+0.01 MiB) |
-| 100 sequential jobs: peak RSS, total time | 17.7 MiB, 7.9 s |
-| process start (`dasher --version`) | 0.4 ms |
-| cold start to static page loaded | 37.5 ms |
-| `dasher` binary size | 4.63 MiB |
+| idle RSS (ready, no page) | 3.8 MiB |
+| 100 sequential jobs: highest RSS between jobs, first half → second half | 6.0 → 6.0 MiB (+0.00 MiB) |
+| 100 sequential jobs: peak RSS, total time | 17.6 MiB, 7.8 s |
+| process start (`dasher --version`) | 0.3 ms |
+| cold start to static page loaded | 43.0 ms |
+| `dasher` binary size (CLI, HTTP service and Lambda runtime) | 5.00 MiB |
 
 On macOS (aarch64, release build, system allocator) the same suite gives
 6.6 MiB idle, peak RSS of 9.8, 24.0, 14.8 and 12.2 MiB for the four pages,
-and a 4.33 MiB binary. Those numbers also fit the budgets, so the check can
+and a binary of about 4.5 MiB. Those numbers also fit the budgets, so the check can
 be run locally.
 
 ### Targets
 
 The initial targets were under 15 MB RSS idle and under 80 MB peak for a
-typical SPA page. Both are met by a wide margin: 3.7 MiB idle, and
-11.4 MiB peak for the React shop. The targets stay as the product
+typical SPA page. Both are met by a wide margin: 3.8 MiB idle, and
+11.3 MiB peak for the React shop. The targets stay as the product
 promise. The CI budgets in `budgets.json` sit much closer to the
 measurements, at about 1.3 to 2 times each one, so a regression shows up
 long before the targets are at risk:
 
 | budget | value | measured |
 | --- | ---: | ---: |
-| idle RSS | 8 MiB | 3.7 MiB (6.7 MiB with glibc) |
-| peak RSS: static, large, spa, feed | 12, 28, 20, 16 MiB | 6.4, 16.8, 11.4, 8.9 MiB |
-| RSS growth over sequential jobs | 0.75 MiB | 0.01 to 0.07 MiB |
-| binary size | 6 MiB | 4.63 MiB |
+| idle RSS | 8 MiB | 3.8 MiB (6.7 MiB with glibc) |
+| peak RSS: static, large, spa, feed | 12, 28, 20, 16 MiB | 6.5, 16.8, 11.3, 9.1 MiB |
+| RSS growth over sequential jobs | 0.75 MiB | 0.00 to 0.07 MiB |
+| binary size | 6 MiB | 5.00 MiB |
 
 Times are reported but not budgeted, because they depend too much on the
 runner.
 
 Real SPAs are heavier than the fixture: bigger bundles and more data. The
-fixture needs a 5 MiB JS heap and 11 MiB of RSS in all, which leaves room
+fixture needs a 5 MiB JS heap and about 11 MiB of RSS in all, which leaves room
 for several times its script and state within 80 MB. Pages that go far
 beyond that are what the per-page limits below guard against.
 
@@ -129,7 +129,8 @@ with `unprefixed_malloc_on_supported_platforms`. Each also ran tuned for
 low RSS. For mimalloc that meant `MIMALLOC_PURGE_DELAY=0`,
 `MIMALLOC_ARENA_EAGER_COMMIT=0` and `MIMALLOC_ALLOW_LARGE_OS_PAGES=0`. For
 jemalloc it meant `MALLOC_CONF=narenas:1,tcache:false,dirty_decay_ms:0,muzzy_decay_ms:0`.
-Results, on aarch64 Linux:
+Results, on aarch64 Linux, measured before the HTTP service joined the
+binary. The service added 0.4 MiB to the musl build's size.
 
 | allocator | idle RSS | peak RSS static / large / spa / feed | RSS between jobs (highest) | cold start | binary |
 | --- | ---: | ---: | ---: | ---: | ---: |
