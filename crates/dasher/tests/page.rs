@@ -501,3 +501,21 @@ async fn goto_timeout_bounds_the_whole_navigation() {
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(page.count("#root").unwrap(), 1);
 }
+
+#[tokio::test]
+async fn memory_usage_covers_the_current_document() {
+    let server = server();
+    let mut page = browser().new_page();
+    assert_eq!(page.memory_usage(), dasher::MemoryUsage::default());
+
+    page.goto(&server.url("/spa.html")).await.unwrap();
+    let usage = page.memory_usage();
+    assert!(usage.js_heap > 100_000, "{usage:?}");
+    // The document, doctype, html, head, body, the products and their text.
+    assert!(usage.dom_nodes > 30, "{usage:?}");
+
+    page.evaluate("globalThis.big = 'x'.repeat(1 << 20); 0")
+        .await
+        .unwrap();
+    assert!(page.memory_usage().js_heap >= usage.js_heap + (1 << 20));
+}

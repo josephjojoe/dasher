@@ -106,6 +106,19 @@ pub struct Navigation {
     pub elapsed: Duration,
 }
 
+/// What [`Page::memory_usage`] reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemoryUsage {
+    /// Bytes allocated by the page's JS heap, which
+    /// [`BrowserBuilder::memory_limit`](crate::BrowserBuilder::memory_limit)
+    /// caps.
+    pub js_heap: usize,
+    /// Nodes in the page's DOM, the document node and nodes scripts hold
+    /// outside the tree included.
+    pub dom_nodes: usize,
+}
+
 /// A browser tab: it loads one document at a time, runs its scripts, and
 /// hands back its HTML or values pulled out of it.
 ///
@@ -525,6 +538,18 @@ impl Page {
             .as_ref()
             .map(|p| p.js().errors())
             .unwrap_or_default()
+    }
+
+    /// How much memory the current document holds: its JS heap and its
+    /// DOM. A page with no document uses none.
+    pub fn memory_usage(&self) -> MemoryUsage {
+        self.inner.as_ref().map_or_else(MemoryUsage::default, |p| {
+            let js = p.js();
+            MemoryUsage {
+                js_heap: js.memory_allocated(),
+                dom_nodes: js.with_document(Document::len),
+            }
+        })
     }
 
     // -----------------------------------------------------------------

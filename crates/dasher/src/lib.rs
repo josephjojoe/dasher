@@ -104,11 +104,11 @@ mod text;
 
 pub use browser::{Browser, BrowserBuilder, DEFAULT_TIMEOUT};
 pub use error::{Error, Result};
-pub use page::{GotoOptions, Navigation, Page};
+pub use page::{GotoOptions, MemoryUsage, Navigation, Page};
 
 pub use dasher_js::{
     ClockMode, ConsoleLevel, ConsoleMessage, ErrorKind as ScriptErrorKind, LayoutMode, ScriptError,
-    Viewport,
+    Viewport, precompile,
 };
 pub use dasher_net::{Cookie, SameSite};
 pub use dasher_page::{
