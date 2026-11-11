@@ -52,6 +52,12 @@
 //!
 //! Nodes removed from the tree stay allocated, because script may still
 //! hold them, until [`Document::release`] frees them.
+//!
+//! [`Document::set_node_limit`] caps how many nodes a document should
+//! hold. Crossing it is recorded rather than refused, since node creation
+//! cannot fail, and bulk operations (fragment parsing, deep clones) stop
+//! early once over, so the page driving the document can stop it with a
+//! bounded overshoot.
 
 mod document;
 mod error;

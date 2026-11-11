@@ -20,6 +20,9 @@ use crate::error::DomError;
 use crate::name::Name;
 use crate::node::{Attr, NodeId, NodeKind, flags};
 
+/// How much fragment input is parsed between checks of the node limit.
+const FRAGMENT_SLICE: usize = 16 * 1024;
+
 /// Options for parsing a whole document.
 #[derive(Clone, Copy, Debug)]
 pub struct ParseOptions {
@@ -122,14 +125,36 @@ impl Document {
         // a scratch document node, and makes its own copy of the context
         // element. Both are thrown away once the result is moved out.
         let scratch = self.create_document_node();
-        let context_copy = html5ever::parse_fragment(
+        let mut parser = html5ever::parse_fragment(
             Sink::new(self, scratch, true),
             opts,
             context_name,
             context_attrs,
             scripting,
-        )
-        .one(html);
+        );
+        // In slices, so that input that would build far more nodes than
+        // the document may hold is not parsed in full.
+        let mut rest = html;
+        while !rest.is_empty() {
+            let mut end = rest.len().min(FRAGMENT_SLICE);
+            while !rest.is_char_boundary(end) {
+                end += 1;
+            }
+            let (slice, tail) = rest.split_at(end);
+            parser.process(StrTendril::from(slice));
+            rest = tail;
+            if parser
+                .tokenizer
+                .sink
+                .sink
+                .doc
+                .borrow()
+                .node_limit_exceeded()
+            {
+                break;
+            }
+        }
+        let context_copy = parser.finish();
 
         let fragment = self.create_fragment();
         if let Some(html) = self.first_child(scratch) {

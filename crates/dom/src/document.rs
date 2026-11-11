@@ -44,6 +44,10 @@ pub struct Document {
     /// The (namespace, prefix) pairs attributes use, indexed by [`AttrNs`].
     /// Entry 0 is "no namespace"; a document rarely has more than a few.
     attr_namespaces: Vec<(Name, Name)>,
+    /// See [`set_node_limit`](Self::set_node_limit); `usize::MAX` for none.
+    node_limit: usize,
+    /// Whether the document has held more than `node_limit` nodes.
+    over_node_limit: bool,
 }
 
 impl Default for Document {
@@ -75,6 +79,8 @@ impl Document {
             template_hosts: HashMap::new(),
             prefixes: HashMap::new(),
             attr_namespaces: vec![(Name::EMPTY, Name::EMPTY)],
+            node_limit: usize::MAX,
+            over_node_limit: false,
         }
     }
 
@@ -96,6 +102,34 @@ impl Document {
     /// The number of arena slots, including released ones awaiting reuse.
     pub fn capacity(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Caps the number of live nodes (see [`len`](Self::len)) the document
+    /// should hold, or lifts the cap with `None`.
+    ///
+    /// The DOM API cannot fail where nodes are created, so going over the
+    /// limit does not stop the node being made. Instead the document
+    /// remembers it: [`node_limit_exceeded`](Self::node_limit_exceeded)
+    /// stays true from then on, and whoever drives the document (the page)
+    /// is expected to stop. Bulk operations stop early once over: fragment
+    /// parsing (`innerHTML` and friends) feeds its input in 16 KiB slices
+    /// and leaves the rest unparsed, and a deep clone stops copying. So one
+    /// operation overshoots by a bounded amount, not by whatever its input
+    /// would have built.
+    pub fn set_node_limit(&mut self, limit: Option<usize>) {
+        self.node_limit = limit.unwrap_or(usize::MAX);
+        self.over_node_limit |= self.len() > self.node_limit;
+    }
+
+    /// The cap set with [`set_node_limit`](Self::set_node_limit).
+    pub fn node_limit(&self) -> Option<usize> {
+        (self.node_limit != usize::MAX).then_some(self.node_limit)
+    }
+
+    /// Whether the document has held more nodes than its
+    /// [limit](Self::set_node_limit) allows, at any point.
+    pub fn node_limit_exceeded(&self) -> bool {
+        self.over_node_limit
     }
 
     pub fn quirks_mode(&self) -> QuirksMode {
@@ -153,6 +187,9 @@ impl Document {
     }
 
     fn alloc(&mut self, data: NodeData) -> NodeId {
+        if self.len() >= self.node_limit {
+            self.over_node_limit = true;
+        }
         match self.free_head {
             Some(id) => {
                 let slot = &mut self.nodes[id.index()];
@@ -1102,6 +1139,11 @@ impl Document {
                 }
                 let mut child = self.first_child(src);
                 while let Some(c) = child {
+                    if self.over_node_limit {
+                        // The copy is cut short; whoever enforces the
+                        // limit throws the page away anyway.
+                        return copy;
+                    }
                     let c_copy = self.clone_one(c);
                     self.insert_unchecked(dst, c_copy, None);
                     work.push((c, c_copy));
