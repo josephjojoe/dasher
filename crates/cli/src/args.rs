@@ -2,11 +2,16 @@
 
 use std::time::Duration;
 
+use crate::service::{self, ServeOptions};
+
 pub const USAGE: &str = "\
 usage: dasher [options] <url>
+       dasher serve [options]   run the HTTP service
+       dasher lambda            run as an AWS Lambda custom runtime
 
 Loads <url> in a headless browser, runs its JavaScript until the page
-settles, and prints the resulting HTML.
+settles, and prints the resulting HTML. See `dasher serve --help` for
+the service modes.
 
 Waiting:
       --wait <strategy>     when the page counts as ready [default: settled]
@@ -63,6 +68,10 @@ pub enum Command {
     Help,
     Version,
     Run(Box<Options>),
+    /// Help for `serve` and `lambda`.
+    ServiceHelp,
+    Serve(ServeOptions),
+    Lambda,
 }
 
 /// Options for loading a page.
@@ -113,9 +122,31 @@ impl Options {
     }
 }
 
-/// Parses the arguments after the program name.
-pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> {
-    let mut args = args.into_iter();
+/// Parses the arguments after the program name, with `env` for the
+/// service's environment variables.
+pub fn parse(
+    args: impl IntoIterator<Item = String>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Command, String> {
+    let mut args = args.into_iter().peekable();
+    match args.peek().map(String::as_str) {
+        Some("serve") => {
+            args.next();
+            return Ok(match service::parse_serve(args, env)? {
+                Some(options) => Command::Serve(options),
+                None => Command::ServiceHelp,
+            });
+        }
+        Some("lambda") => {
+            args.next();
+            return match args.next().as_deref() {
+                None => Ok(Command::Lambda),
+                Some("-h" | "--help") => Ok(Command::ServiceHelp),
+                Some(other) => Err(format!("lambda takes no arguments, not {other:?}")),
+            };
+        }
+        _ => {}
+    }
     let mut url = None;
     let mut options = Options::new(String::new());
     let mut only_positional = false;
@@ -223,8 +254,12 @@ fn header(s: &str) -> Result<(String, String), String> {
 mod tests {
     use super::*;
 
+    fn parse(args: &[&str]) -> Result<Command, String> {
+        super::parse(args.iter().map(|s| s.to_string()), &|_| None)
+    }
+
     fn run(args: &[&str]) -> Result<Options, String> {
-        match parse(args.iter().map(|s| s.to_string()))? {
+        match parse(args)? {
             Command::Run(options) => Ok(*options),
             other => panic!("{other:?}"),
         }
@@ -238,7 +273,6 @@ mod tests {
 
     #[test]
     fn help_and_version_win() {
-        let parse = |args: &[&str]| parse(args.iter().map(|s| s.to_string()));
         assert_eq!(parse(&["-h"]), Ok(Command::Help));
         assert_eq!(parse(&["https://x/", "--help"]), Ok(Command::Help));
         assert_eq!(parse(&["--version"]), Ok(Command::Version));
@@ -304,6 +338,21 @@ mod tests {
         assert_eq!(options.block, ["*ads*", "*track*"]);
         assert!(options.realtime && options.json && options.verbose);
         assert_eq!(options.eval.as_deref(), Some("document.title"));
+    }
+
+    #[test]
+    fn service_modes_are_subcommands() {
+        assert!(matches!(parse(&["serve"]), Ok(Command::Serve(_))));
+        assert_eq!(parse(&["serve", "--help"]), Ok(Command::ServiceHelp));
+        assert_eq!(parse(&["lambda"]), Ok(Command::Lambda));
+        assert_eq!(parse(&["lambda", "-h"]), Ok(Command::ServiceHelp));
+        assert!(
+            parse(&["lambda", "x"])
+                .unwrap_err()
+                .contains("no arguments")
+        );
+        // Anywhere else, they are URLs.
+        assert_eq!(run(&["--json", "serve"]).unwrap().url, "serve");
     }
 
     #[test]
