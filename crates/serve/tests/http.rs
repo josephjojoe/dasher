@@ -90,6 +90,8 @@ impl Drop for Running {
 fn quiet() -> Config {
     Config {
         log: false,
+        // The fixtures are on localhost.
+        block_private_addresses: false,
         ..Config::default()
     }
 }
