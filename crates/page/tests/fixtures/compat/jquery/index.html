@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Classifieds</title>
+<script type="text/javascript" src="vendor/jquery-3.7.1.min.js"></script>
+<script type="text/javascript" src="js/site.js"></script>
+</head>
+<body>
+<div id="header"><h1>Classifieds</h1><span id="weather">…</span></div>
+<div id="sidebar">Loading…</div>
+<form id="filters" action="api/search" method="get">
+  <input type="text" name="q" value="bike">
+  <select name="sort"><option value="new" selected>Newest</option><option value="price">Price</option></select>
+  <input type="checkbox" name="photos" value="1" checked>
+</form>
+<table id="listings" class="data">
+  <thead><tr><th>Item</th><th>Price</th><th>Posted</th></tr></thead>
+  <tbody><tr class="placeholder"><td colspan="3">Loading listings…</td></tr></tbody>
+</table>
+<div id="pager"></div>
+<div id="stats" style="display:none"></div>
+</body>
+</html>

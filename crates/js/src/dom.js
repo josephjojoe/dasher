@@ -31,6 +31,8 @@
   }
 
   const KEY = Symbol('dom');
+  // Set once createHTMLDocument has made a second document.
+  let otherDocuments = false;
   function illegal(key) {
     if (key !== KEY) throw new TypeError('Illegal constructor');
   }
@@ -313,14 +315,27 @@
       return internals.baseURL();
     }
     get isConnected() {
-      return N.isConnected(this);
+      if (N.isConnected(this)) return true;
+      // A shadow tree is connected when its host is.
+      const shadow = shadowState.get(N.rootNode(this));
+      return shadow !== undefined && shadow.host.isConnected;
     }
     get ownerDocument() {
-      return N.nodeType(this) === 9 ? null : documentNode;
+      if (N.nodeType(this) === 9) return null;
+      if (!otherDocuments) return documentNode;
+      // Nodes in a document made by createHTMLDocument belong to it.
+      // Detached nodes are taken to belong to the page's document.
+      const root = N.rootNode(this);
+      return N.nodeType(root) === 9 ? root : documentNode;
     }
     getRootNode(options) {
-      void options;
-      return N.rootNode(this);
+      let root = N.rootNode(this);
+      if (options !== null && typeof options === 'object' && options.composed) {
+        for (let shadow = shadowState.get(root); shadow !== undefined; shadow = shadowState.get(root)) {
+          root = N.rootNode(shadow.host);
+        }
+      }
+      return root;
     }
     get parentNode() {
       return N.nav(this, 0);
@@ -648,8 +663,116 @@
   mixin(DocumentFragment, ParentNode);
   tag(DocumentFragment, 'DocumentFragment');
 
-  class ShadowRoot extends DocumentFragment {}
+  // Shadow roots. A shadow root is a document fragment in the arena that
+  // holds the shadow tree; its wrapper gets ShadowRoot.prototype, and the
+  // maps below tie it to its host (keeping each alive while the other is).
+  // Nothing is rendered, so shadow DOM only matters to script: components
+  // build their content in a shadow root and find it again through
+  // `host.shadowRoot`. Not supported: slot assignment, retargeting events
+  // that leave a shadow tree, declarative shadow roots in markup, and
+  // serializing shadow trees into the document's HTML.
+  const shadowOf = new WeakMap();
+  const shadowState = new WeakMap();
+  const SHADOW_HOSTS = new Set(['article', 'aside', 'blockquote', 'body', 'div', 'footer', 'h1', 'h2',
+    'h3', 'h4', 'h5', 'h6', 'header', 'main', 'nav', 'p', 'section', 'span']);
+  const RESERVED_CUSTOM_NAMES = new Set(['annotation-xml', 'color-profile', 'font-face',
+    'font-face-src', 'font-face-uri', 'font-face-format', 'font-face-name', 'missing-glyph']);
+
+  function isValidCustomElementName(name) {
+    return /^[a-z][^A-Z\s/>]*-[^A-Z\s/>]*$/.test(name) && !RESERVED_CUSTOM_NAMES.has(name);
+  }
+
+  function shadowRootState(root) {
+    const s = shadowState.get(root);
+    if (s === undefined) throw new TypeError('Illegal invocation');
+    return s;
+  }
+
+  class ShadowRoot extends DocumentFragment {
+    // eslint-disable-next-line constructor-super
+    constructor() {
+      throw new TypeError('Illegal constructor');
+    }
+    get mode() {
+      return shadowRootState(this).mode;
+    }
+    get host() {
+      return shadowRootState(this).host;
+    }
+    get delegatesFocus() {
+      return shadowRootState(this).delegatesFocus;
+    }
+    get slotAssignment() {
+      return shadowRootState(this).slotAssignment;
+    }
+    get clonable() {
+      return shadowRootState(this).clonable;
+    }
+    get serializable() {
+      return shadowRootState(this).serializable;
+    }
+    get activeElement() {
+      return null;
+    }
+    get innerHTML() {
+      return N.innerHTML(this);
+    }
+    set innerHTML(value) {
+      setShadowHTML(this, value === null ? '' : str(value));
+    }
+    setHTMLUnsafe(html) {
+      setShadowHTML(this, str(html));
+    }
+    getHTML() {
+      return N.innerHTML(this);
+    }
+    get adoptedStyleSheets() {
+      const s = shadowRootState(this);
+      return s.adoptedStyleSheets || (s.adoptedStyleSheets = []);
+    }
+    set adoptedStyleSheets(v) {
+      shadowRootState(this).adoptedStyleSheets = Array.from(v);
+    }
+  }
   tag(ShadowRoot, 'ShadowRoot');
+
+  // Parses `html` as a template's contents would be, then moves the result
+  // into the shadow root.
+  function setShadowHTML(root, html) {
+    shadowRootState(root);
+    const template = N.createElement('template');
+    N.setInnerHTML(template, html);
+    N.replaceAll(root, template.content);
+  }
+
+  function attachShadow(host, init) {
+    const what = "Failed to execute 'attachShadow' on 'Element': ";
+    const mode = init === null || init === undefined ? undefined : init.mode;
+    if (mode !== 'open' && mode !== 'closed') {
+      throw new TypeError(what + "Failed to read the 'mode' property from 'ShadowRootInit': The provided value '" +
+        mode + "' is not a valid enum value of type ShadowRootMode.");
+    }
+    const name = host.localName;
+    if (host.namespaceURI !== HTML_NS || !(SHADOW_HOSTS.has(name) || isValidCustomElementName(name))) {
+      throw domException('NotSupportedError', what + 'This element does not support attachShadow');
+    }
+    if (shadowOf.has(host)) {
+      throw domException('NotSupportedError', what + 'Shadow root cannot be created on a host which already hosts a shadow tree.');
+    }
+    const root = N.createFragment();
+    setPrototypeOf(root, ShadowRoot.prototype);
+    shadowState.set(root, {
+      host,
+      mode,
+      delegatesFocus: !!init.delegatesFocus,
+      slotAssignment: init.slotAssignment === 'manual' ? 'manual' : 'named',
+      clonable: !!init.clonable,
+      serializable: !!init.serializable,
+      adoptedStyleSheets: null,
+    });
+    shadowOf.set(host, root);
+    return root;
+  }
 
   // ---------------------------------------------------------------------
   // Attributes: Attr and NamedNodeMap.
@@ -1673,7 +1796,8 @@
       return N.closest(this, str(selectors));
     }
     get shadowRoot() {
-      return null;
+      const root = shadowOf.get(this);
+      return root !== undefined && shadowState.get(root).mode === 'open' ? root : null;
     }
     get assignedSlot() {
       return null;
@@ -1730,8 +1854,8 @@
       scrollIntoView(this, center ? 'center' : 'nearest', true);
     }
     attachShadow(init) {
-      void init;
-      throw domException('NotSupportedError', 'Shadow DOM is not supported.');
+      requireArgs(arguments, 1, "'attachShadow' on 'Element'");
+      return attachShadow(this, init);
     }
     requestFullscreen() {
       return Promise.reject(domException('NotSupportedError', 'Fullscreen is not supported.'));
@@ -3526,6 +3650,27 @@
   // What the page loader knows about the document (see setDocumentInfo).
   const documentInfo = { characterSet: 'UTF-8', contentType: 'text/html', referrer: '' };
 
+  // A document's document element (0), head (1), body (2) or doctype (3).
+  // Documents made by createHTMLDocument share the page's arena, as trees
+  // of their own, so their parts are found here rather than natively.
+  function docPart(doc, which) {
+    if (doc === documentNode) return N.docPart(which);
+    if (which === 3) {
+      for (let n = N.nav(doc, 1); n !== null; n = N.nav(n, 4)) if (N.nodeType(n) === 10) return n;
+      return null;
+    }
+    const root = N.nav(doc, 6);
+    if (which === 0 || root === null) return root;
+    const name = N.elementName(root);
+    if (name[1] !== HTML_NS || name[0] !== 'html') return null;
+    for (let el = N.nav(root, 6); el !== null; el = N.nav(el, 9)) {
+      const [local, ns] = N.elementName(el);
+      if (ns !== HTML_NS) continue;
+      if (which === 1 ? local === 'head' : local === 'body' || local === 'frameset') return el;
+    }
+    return null;
+  }
+
   class Document extends Node {
     constructor() {
       throw domException('NotSupportedError', 'dasher has a single document per page; new documents cannot be created.');
@@ -3534,13 +3679,13 @@
       return implementation;
     }
     get URL() {
-      return internals.documentURL();
+      return this === documentNode ? internals.documentURL() : 'about:blank';
     }
     get documentURI() {
-      return internals.documentURL();
+      return this.URL;
     }
     get location() {
-      return globalThis.location;
+      return this === documentNode ? globalThis.location : null;
     }
     set location(v) {
       globalThis.location.href = v;
@@ -3555,10 +3700,10 @@
       return documentInfo.referrer;
     }
     get cookie() {
-      return N.cookie();
+      return this === documentNode ? N.cookie() : '';
     }
     set cookie(v) {
-      N.setCookie(str(v));
+      if (this === documentNode) N.setCookie(str(v));
     }
     get lastModified() {
       const d = new Date();
@@ -3585,40 +3730,44 @@
       return documentInfo.contentType;
     }
     get doctype() {
-      return N.docPart(3);
+      return docPart(this, 3);
     }
     get documentElement() {
-      return N.docPart(0);
+      return docPart(this, 0);
     }
     get head() {
-      return N.docPart(1);
+      return docPart(this, 1);
     }
     get body() {
-      return N.docPart(2);
+      return docPart(this, 2);
     }
     set body(value) {
       if (!(value instanceof I.HTMLBodyElement) && !(value instanceof I.HTMLFrameSetElement)) {
         throw domException('HierarchyRequestError', "Failed to set the 'body' property on 'Document': The new body element is of type '" + (value && value.tagName) + "'. It must be either a 'BODY' or 'FRAMESET' element.");
       }
-      const old = N.docPart(2);
+      const old = docPart(this, 2);
       if (old === value) return;
-      const root = N.docPart(0);
+      const root = docPart(this, 0);
       if (root === null) throw domException('HierarchyRequestError', 'There is no document element.');
       if (old !== null) connected(N.replaceChild(root, value, old));
       else connected(N.insert(root, value, null));
     }
     get title() {
-      const root = N.docPart(0);
+      const root = docPart(this, 0);
       if (root !== null && N.elementName(root)[1] === SVG_NS) {
         const t = N.query(root, ':scope > title');
         return t === null ? '' : N.textContent(t);
+      }
+      if (this !== documentNode) {
+        const t = N.query(this, 'title');
+        return t === null ? '' : N.textContent(t).replace(/[\t\n\f\r ]+/g, ' ').trim();
       }
       return N.title();
     }
     set title(value) {
       let title = N.query(this, 'title');
       if (title === null) {
-        const head = N.docPart(1);
+        const head = docPart(this, 1);
         if (head === null) return;
         title = N.createElement('title');
         N.insert(head, title, null);
@@ -3626,19 +3775,19 @@
       N.setTextContent(title, str(value));
     }
     get dir() {
-      const root = N.docPart(0);
+      const root = docPart(this, 0);
       return root === null ? '' : root.dir;
     }
     set dir(v) {
-      const root = N.docPart(0);
+      const root = docPart(this, 0);
       if (root !== null) root.dir = v;
     }
     get defaultView() {
-      return globalThis;
+      return this === documentNode ? globalThis : null;
     }
     get activeElement() {
       if (focused !== null && N.isConnected(focused)) return focused;
-      return N.docPart(2) || N.docPart(0);
+      return docPart(this, 2) || docPart(this, 0);
     }
     hasFocus() {
       return true;
@@ -3684,7 +3833,7 @@
       return null;
     }
     get scrollingElement() {
-      return N.docPart(0);
+      return docPart(this, 0);
     }
     get designMode() {
       return 'off';
@@ -3841,10 +3990,10 @@
       return node;
     }
     elementFromPoint() {
-      return N.docPart(2) || N.docPart(0);
+      return docPart(this, 2) || docPart(this, 0);
     }
     elementsFromPoint() {
-      return [N.docPart(2), N.docPart(0)].filter((x) => x !== null);
+      return [docPart(this, 2), docPart(this, 0)].filter((x) => x !== null);
     }
     caretRangeFromPoint() {
       return null;
@@ -3915,8 +4064,26 @@
     createDocumentType(qualifiedName, publicId, systemId) {
       return N.createDoctype(str(qualifiedName), str(publicId), str(systemId));
     }
-    createHTMLDocument() {
-      throw domException('NotSupportedError', 'dasher has a single document per page; new documents cannot be created.');
+    // A document with no browsing context, for parsing and building markup
+    // off the page (jQuery parses HTML strings in one). It lives in the
+    // page's arena as a tree of its own: its scripts never run, it has no
+    // URL, location, cookies or window, and nodes moved between it and the
+    // page need no adopting.
+    createHTMLDocument(title = undefined) {
+      const doc = N.createDocument();
+      otherDocuments = true;
+      N.insert(doc, N.createDoctype('html', '', ''), null);
+      const html = N.createElement('html');
+      N.insert(doc, html, null);
+      const head = N.createElement('head');
+      N.insert(html, head, null);
+      if (title !== undefined) {
+        const titleElement = N.createElement('title');
+        N.insert(titleElement, N.createText(str(title)), null);
+        N.insert(head, titleElement, null);
+      }
+      N.insert(html, N.createElement('body'), null);
+      return doc;
     }
     createDocument() {
       throw domException('NotSupportedError', 'dasher has a single document per page; new documents cannot be created.');
@@ -3988,6 +4155,9 @@
     const parent = N.nav(target, 0);
     if (parent !== null) return parent;
     if (target === documentNode) return event.type === 'load' ? null : globalThis;
+    // Composed events leave a shadow tree for its host.
+    const shadow = shadowState.get(target);
+    if (shadow !== undefined && event.composed) return shadow.host;
     return null;
   };
   internals.scrollTarget = () => documentNode;

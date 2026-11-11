@@ -1,0 +1,8 @@
+{
+  "items": [
+    { "id": 101, "title": "Road bike, 56cm", "price": 450, "posted": "today" },
+    { "id": 102, "title": "Kids' bike <with stabilisers>", "price": 35.5, "posted": "yesterday" },
+    { "id": 103, "title": "Bike rack", "price": 20, "posted": "2 days ago" }
+  ],
+  "more": 2
+}

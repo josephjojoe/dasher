@@ -1,0 +1,4 @@
+node_modules/
+apps/next/.next/
+apps/next/out/
+apps/next/next-env.d.ts

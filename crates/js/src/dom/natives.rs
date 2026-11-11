@@ -1042,6 +1042,15 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     let d = Rc::clone(dom);
     def(
         obj,
+        "createDocument",
+        move |ctx: Ctx<'js>| -> Result<Node<'js>> {
+            let n = d.doc_mut().create_document();
+            wrap(&ctx, &d, n)
+        },
+    )?;
+    let d = Rc::clone(dom);
+    def(
+        obj,
         "createDoctype",
         move |ctx: Ctx<'js>,
               name: String,

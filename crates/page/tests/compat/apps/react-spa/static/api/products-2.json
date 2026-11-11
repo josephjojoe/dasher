@@ -1,0 +1,7 @@
+{
+  "items": [
+    { "sku": "B-200", "name": "Pour-over Kettle", "price": 5499, "tags": ["coffee", "tea"] },
+    { "sku": "B-201", "name": "Digital Scale", "price": 2999, "tags": ["kitchen"] }
+  ],
+  "next": null
+}
