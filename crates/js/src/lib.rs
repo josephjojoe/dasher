@@ -253,6 +253,7 @@ mod heap;
 mod loader;
 mod log;
 mod media;
+mod modules;
 mod net;
 mod random;
 mod remote;
