@@ -23,6 +23,7 @@ use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::glue;
 use crate::heap::{self, HeapState};
+use crate::limits::{DEFAULT_MAX_DOM_NODES, ResourceLimit};
 use crate::loader::{self, LoaderHooks, LoaderState};
 use crate::log::BoundedLog;
 use crate::modules::{self, ModuleState};
@@ -41,9 +42,14 @@ pub const DEFAULT_MAX_STACK_SIZE: usize = 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct RuntimeOptions {
     /// Upper bound on memory the JS heap may allocate, in bytes. Allocations
-    /// past it fail with an out-of-memory error inside the script. `None`
-    /// means unlimited.
+    /// past it fail with an out-of-memory error inside the script, and one
+    /// refused once more than half the limit is in use stops the page (see
+    /// [`ResourceLimit::JsHeap`]). `None` means unlimited.
     pub memory_limit: Option<usize>,
+    /// Upper bound on the nodes the page's document may hold, attached or
+    /// not. Going over it stops the page (see [`ResourceLimit::DomNodes`]).
+    /// `None` means unlimited.
+    pub max_dom_nodes: Option<usize>,
     /// Upper bound on native stack used by JS execution, in bytes. Deep
     /// recursion past it throws a `RangeError` instead of overflowing the host
     /// thread's stack, so keep it well below the stack of the thread that
@@ -80,6 +86,7 @@ impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
             memory_limit: Some(DEFAULT_MEMORY_LIMIT),
+            max_dom_nodes: Some(DEFAULT_MAX_DOM_NODES),
             max_stack_size: DEFAULT_MAX_STACK_SIZE,
             gc_threshold: None,
             error_capacity: 1000,
@@ -137,7 +144,11 @@ pub(crate) struct Shared {
 impl Shared {
     fn new(options: &RuntimeOptions, heap: Rc<HeapState>, url: Url) -> Self {
         let event_loop = LoopState::new(options.clock, options.frame_interval);
-        let dom = DomState::new(Document::parse(""), Rc::clone(&event_loop.clock));
+        let dom = DomState::new(
+            Document::parse(""),
+            options.max_dom_nodes,
+            Rc::clone(&event_loop.clock),
+        );
         Self {
             deadline: Cell::new(None),
             remote: Arc::default(),
@@ -154,9 +165,24 @@ impl Shared {
         }
     }
 
+    /// The resource limit the page went over, if any.
+    pub(crate) fn limit_exceeded(&self) -> Option<ResourceLimit> {
+        if self.heap.exhausted() {
+            let limit = self.heap.limit().unwrap_or(usize::MAX);
+            Some(ResourceLimit::JsHeap { limit })
+        } else if self.dom.node_limit_exceeded() {
+            let limit = self.dom.node_limit().unwrap_or(usize::MAX);
+            Some(ResourceLimit::DomNodes { limit })
+        } else {
+            None
+        }
+    }
+
     /// Why JS must not run right now, if it must not.
     pub(crate) fn stop_reason(&self) -> Option<Stopped> {
-        if self.remote.kill.load(Ordering::Relaxed) {
+        if let Some(limit) = self.limit_exceeded() {
+            Some(Stopped::LimitExceeded(limit))
+        } else if self.remote.kill.load(Ordering::Relaxed) {
             Some(Stopped::Interrupted)
         } else if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
             Some(Stopped::DeadlineExceeded)
@@ -179,9 +205,30 @@ impl Shared {
         self.interrupted.set(false);
         self.heap.clear_refused();
         if self.should_interrupt() {
-            return Err(ScriptError::interrupted());
+            return Err(self.stopped_error());
         }
         Ok(())
+    }
+
+    /// Turns the result of JS that ran without a hitch into an error if
+    /// it took the page over a resource limit (with its last statement,
+    /// say, before any interrupt check could stop it).
+    pub(crate) fn check_limits<T>(&self, result: Result<T, ScriptError>) -> Result<T, ScriptError> {
+        match (result, self.limit_exceeded()) {
+            (Ok(_), Some(limit)) => {
+                Err(ScriptError::new(ErrorKind::OutOfMemory, limit.to_string()))
+            }
+            (result, _) => result,
+        }
+    }
+
+    /// The error for JS that was stopped (or refused to start) because the
+    /// interrupt handler said so.
+    fn stopped_error(&self) -> ScriptError {
+        match self.limit_exceeded() {
+            Some(limit) => ScriptError::new(ErrorKind::OutOfMemory, limit.to_string()),
+            None => ScriptError::interrupted(),
+        }
     }
 
     pub(crate) fn interrupted(&self) -> bool {
@@ -255,7 +302,12 @@ impl Shared {
             ),
         };
         if self.interrupted.get() {
-            captured.kind = ErrorKind::Interrupted;
+            let stopped = self.stopped_error();
+            captured.kind = stopped.kind;
+            if stopped.kind == ErrorKind::OutOfMemory {
+                captured.message = stopped.message;
+                captured.stack = None;
+            }
         }
         (captured, thrown)
     }
@@ -548,7 +600,7 @@ impl JsRuntime {
             run().map_err(|e| self.shared.capture(&ctx, e))
         });
         self.perform_microtask_checkpoint();
-        result
+        self.shared.check_limits(result)
     }
 
     /// Evaluates `source` and returns whether its completion value is
@@ -569,7 +621,7 @@ impl JsRuntime {
             run().map_err(|e| self.shared.capture(&ctx, e))
         });
         self.perform_microtask_checkpoint();
-        result
+        self.shared.check_limits(result)
     }
 
     /// Runs `f` as a task: refuses to start past the deadline, and reports
@@ -579,7 +631,13 @@ impl JsRuntime {
         f: impl for<'js> FnOnce(&Ctx<'js>) -> rquickjs::Result<()>,
     ) -> Result<(), ScriptError> {
         self.shared.begin()?;
-        self.with(|ctx| f(&ctx).map_err(|e| self.shared.report_uncaught(&ctx, e)))
+        let result = self.with(|ctx| f(&ctx).map_err(|e| self.shared.report_uncaught(&ctx, e)));
+        if let (Ok(()), Some(limit)) = (&result, self.shared.limit_exceeded()) {
+            let error = ScriptError::new(ErrorKind::OutOfMemory, limit.to_string());
+            self.shared.report(error.clone());
+            return Err(error);
+        }
+        result
     }
 
     /// Runs promise jobs and queued microtasks until none are left, then
@@ -708,6 +766,14 @@ impl JsRuntime {
     /// How many errors were discarded because the error log was full.
     pub fn dropped_errors(&self) -> u64 {
         self.shared.errors.borrow().dropped()
+    }
+
+    /// The resource limit the page went over, if it did. A page over a
+    /// limit runs no more JS: [`run`](Self::run) returns
+    /// [`RunOutcome::LimitExceeded`](crate::RunOutcome::LimitExceeded) and
+    /// the methods that run JS fail with [`ErrorKind::OutOfMemory`].
+    pub fn limit_exceeded(&self) -> Option<ResourceLimit> {
+        self.shared.limit_exceeded()
     }
 
     /// Bytes currently allocated by the JS heap.

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::clock::ClockMode;
 use crate::event_loop::Stopped;
+use crate::limits::ResourceLimit;
 use crate::runtime::JsRuntime;
 
 /// Tasks run between yields to the async executor, so other futures on the
@@ -43,6 +44,9 @@ pub enum RunOutcome {
     DeadlineExceeded,
     /// An [`InterruptHandle`](crate::InterruptHandle) asked it to stop.
     Interrupted,
+    /// The page went over a resource limit and is stopped for good (see
+    /// [`JsRuntime::limit_exceeded`]).
+    LimitExceeded(ResourceLimit),
     /// The page asked to load another document (see
     /// [`JsRuntime::navigation_request`]). The loop stops after the task
     /// that asked, since the current document is about to be replaced, and
@@ -55,6 +59,7 @@ impl From<Stopped> for RunOutcome {
         match stopped {
             Stopped::DeadlineExceeded => Self::DeadlineExceeded,
             Stopped::Interrupted => Self::Interrupted,
+            Stopped::LimitExceeded(limit) => Self::LimitExceeded(limit),
         }
     }
 }

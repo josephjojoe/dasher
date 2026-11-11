@@ -625,7 +625,10 @@ async fn evaluate_on(
                 return pending.poll().map_or(Err(Error::NavigatedAway), |o| Ok(o?));
             }
             // Nothing left that could settle it, or out of time.
-            RunOutcome::Idle | RunOutcome::DeadlineExceeded | RunOutcome::Interrupted => {
+            RunOutcome::Idle
+            | RunOutcome::DeadlineExceeded
+            | RunOutcome::Interrupted
+            | RunOutcome::LimitExceeded(_) => {
                 return pending.poll().map_or(Err(Error::Timeout), |o| Ok(o?));
             }
         }

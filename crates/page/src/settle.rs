@@ -229,7 +229,9 @@ impl Page {
             }
             match wait.outcome {
                 Some(RunOutcome::DeadlineExceeded) => return SettleOutcome::TimedOut,
-                Some(RunOutcome::Interrupted) => return SettleOutcome::Interrupted,
+                Some(RunOutcome::Interrupted | RunOutcome::LimitExceeded(_)) => {
+                    return SettleOutcome::Interrupted;
+                }
                 Some(RunOutcome::Idle) => {
                     // Nothing left to run. Let page time pass until the next
                     // look: skip ahead unless page time follows the wall

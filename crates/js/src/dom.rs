@@ -104,11 +104,15 @@ pub(crate) struct DomState {
     layout_watch: Cell<bool>,
     /// The version the layout hook last saw.
     layout_seen: Cell<u32>,
+    /// The node limit every document of the page gets.
+    node_limit: Option<usize>,
 }
 
 impl DomState {
-    pub(crate) fn new(doc: Document, clock: Rc<Clock>) -> Self {
+    pub(crate) fn new(mut doc: Document, node_limit: Option<usize>, clock: Rc<Clock>) -> Self {
+        doc.set_node_limit(node_limit);
         Self {
+            node_limit,
             doc: RefCell::new(doc),
             wrappers: RefCell::default(),
             candidates: RefCell::default(),
@@ -135,6 +139,19 @@ impl DomState {
         let mut doc = self.doc.borrow_mut();
         self.sweep(&mut doc);
         doc
+    }
+
+    pub(crate) fn node_limit(&self) -> Option<usize> {
+        self.node_limit
+    }
+
+    /// Whether the document has gone over its node limit. Called from the
+    /// interrupt handler, so it must not panic if the document is borrowed;
+    /// it then reports no (the next check will see it).
+    pub(crate) fn node_limit_exceeded(&self) -> bool {
+        self.doc
+            .try_borrow()
+            .is_ok_and(|doc| doc.node_limit_exceeded())
     }
 
     pub(crate) fn version(&self) -> u32 {
@@ -311,8 +328,9 @@ impl JsRuntime {
     /// of nodes from the old document stay usable as objects, but DOM
     /// operations on them throw an `InvalidStateError`. Call this before
     /// running the page's scripts.
-    pub fn set_document(&self, document: Document) {
+    pub fn set_document(&self, mut document: Document) {
         let dom = &self.shared().dom;
+        document.set_node_limit(dom.node_limit);
         self.with(|ctx| wrapper::detach_all(&ctx, dom));
         let old = std::mem::replace(&mut *dom.doc.borrow_mut(), document);
         dom.candidates.borrow_mut().clear();

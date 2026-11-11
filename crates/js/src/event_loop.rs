@@ -16,6 +16,7 @@ use std::time::Duration;
 use rquickjs::{Ctx, Function, JsLifetime, Object, Persistent};
 
 use crate::clock::{Clock, ClockMode};
+use crate::limits::ResourceLimit;
 use crate::remote::TaskSender;
 use crate::runtime::{JsData, JsRuntime, Shared};
 use crate::timers::{TimerId, Timers};
@@ -37,14 +38,17 @@ pub enum Stopped {
     DeadlineExceeded,
     /// An [`InterruptHandle`](crate::InterruptHandle) asked it to stop.
     Interrupted,
+    /// The page went over a resource limit, and is stopped for good.
+    LimitExceeded(ResourceLimit),
 }
 
 impl std::fmt::Display for Stopped {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::DeadlineExceeded => "the JS deadline passed",
-            Self::Interrupted => "JS execution was interrupted",
-        })
+        match self {
+            Self::DeadlineExceeded => f.write_str("the JS deadline passed"),
+            Self::Interrupted => f.write_str("JS execution was interrupted"),
+            Self::LimitExceeded(limit) => limit.fmt(f),
+        }
     }
 }
 

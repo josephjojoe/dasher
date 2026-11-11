@@ -93,7 +93,7 @@ impl JsRuntime {
             Ok::<_, ScriptError>(())
         });
         self.perform_microtask_checkpoint();
-        started?;
+        self.shared().check_limits(started)?;
         let pending = PendingEvaluation { slot };
         match pending.poll() {
             Some(outcome) => outcome.map(Evaluation::Ready),

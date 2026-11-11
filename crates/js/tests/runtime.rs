@@ -223,9 +223,10 @@ fn memory_limit_raises_out_of_memory_instead_of_crashing() {
     assert_eq!(err.kind, ErrorKind::OutOfMemory, "{err:?}");
     assert!(js.memory_allocated() <= 8 * 1024 * 1024);
 
-    // The hog's array died with its frame, so the runtime works again.
-    js.run_gc();
-    assert_eq!(js.eval_json("[1, 2].length").unwrap().as_deref(), Some("2"));
+    // The page filled its heap, so it is stopped for good (see
+    // tests/limits.rs).
+    let err = js.eval_json("[1, 2].length").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::OutOfMemory, "{err:?}");
 }
 
 #[test]

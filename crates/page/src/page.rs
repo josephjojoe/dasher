@@ -720,7 +720,9 @@ impl Page {
                 () = js.module_graph_settled() => {}
                 outcome = js.run(limits), if loop_active => match outcome {
                     RunOutcome::NavigationRequested => {}
-                    RunOutcome::DeadlineExceeded | RunOutcome::Interrupted => {
+                    RunOutcome::DeadlineExceeded
+                    | RunOutcome::Interrupted
+                    | RunOutcome::LimitExceeded(_) => {
                         if let Until::Run(_) = until {
                             wait.outcome = Some(outcome);
                             return Ok(None);

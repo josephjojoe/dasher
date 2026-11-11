@@ -18,6 +18,10 @@ pub(crate) struct HeapState {
     used: Cell<usize>,
     limit: usize,
     refused: Cell<bool>,
+    /// Set for good once an allocation is refused with the heap more than
+    /// half full: the page has filled its heap, as opposed to asking for
+    /// one absurd block.
+    exhausted: Cell<bool>,
 }
 
 impl HeapState {
@@ -26,7 +30,18 @@ impl HeapState {
             used: Cell::new(0),
             limit: limit.filter(|&l| l > 0).unwrap_or(usize::MAX),
             refused: Cell::new(false),
+            exhausted: Cell::new(false),
         }
+    }
+
+    /// The limit, if there is one.
+    pub(crate) fn limit(&self) -> Option<usize> {
+        (self.limit != usize::MAX).then_some(self.limit)
+    }
+
+    /// Whether the page has filled its heap (see `exhausted`).
+    pub(crate) fn exhausted(&self) -> bool {
+        self.exhausted.get()
     }
 
     /// Whether an allocation was refused for exceeding the limit since the
@@ -57,6 +72,9 @@ impl HeapState {
             .is_some_and(|total| total <= self.limit);
         if !fits {
             self.refused.set(true);
+            if self.used.get() > self.limit / 2 {
+                self.exhausted.set(true);
+            }
         }
         fits
     }
@@ -203,6 +221,19 @@ mod tests {
         assert!(heap.take_refused());
         assert!(!heap.take_refused());
         assert!(!heap.admit(usize::MAX));
+        assert!(heap.exhausted(), "refused with the heap 90% full");
+    }
+
+    #[test]
+    fn one_huge_request_does_not_exhaust_a_roomy_heap() {
+        let heap = HeapState::new(Some(100));
+        heap.used.set(40);
+        assert!(!heap.admit(1000));
+        assert!(heap.take_refused());
+        assert!(!heap.exhausted());
+        heap.used.set(51);
+        assert!(!heap.admit(50));
+        assert!(heap.exhausted());
     }
 
     #[test]

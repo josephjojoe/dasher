@@ -13,7 +13,8 @@ pub enum ErrorKind {
     /// microtask checkpoint that followed, and no listener canceled the
     /// `unhandledrejection` event fired for it at the global.
     UnhandledRejection,
-    /// The runtime hit its memory limit.
+    /// The runtime hit a memory limit: an allocation failed, or the page
+    /// went over one of its [resource limits](crate::ResourceLimit).
     OutOfMemory,
     /// Execution was cut off by the deadline or an [`InterruptHandle`].
     ///
