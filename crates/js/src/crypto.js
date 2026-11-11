@@ -1,5 +1,5 @@
-// The `crypto` global: getRandomValues and randomUUID. `crypto.subtle` is
-// a stub defined in stubs.js.
+// The `crypto` global: getRandomValues and randomUUID, and the digest()
+// behind `crypto.subtle`, whose other methods are stubs (stubs.js).
 // https://w3c.github.io/webcrypto/#crypto-interface
 (function (native, internals) {
   'use strict';
@@ -52,6 +52,42 @@
     }
   }
   Object.defineProperty(Crypto.prototype, Symbol.toStringTag, { value: 'Crypto', configurable: true });
+
+  // SubtleCrypto.digest: SHA-1 and the SHA-2 family, resolving with an
+  // ArrayBuffer. https://w3c.github.io/webcrypto/#SubtleCrypto-method-digest
+  const DIGESTS = new Map([['sha-1', 'SHA-1'], ['sha-256', 'SHA-256'], ['sha-384', 'SHA-384'],
+    ['sha-512', 'SHA-512']]);
+  internals.digest = function digest(algorithm, data, argc) {
+    const what = "Failed to execute 'digest' on 'SubtleCrypto': ";
+    try {
+      if (argc < 2) {
+        throw new TypeError(what + '2 arguments required, but only ' + argc + ' present.');
+      }
+      let name = algorithm;
+      if (algorithm !== null && typeof algorithm === 'object') {
+        if (algorithm.name === undefined) {
+          throw new TypeError(what + "Failed to read the 'name' property from 'Algorithm': Required member is undefined.");
+        }
+        name = algorithm.name;
+      }
+      const normalized = DIGESTS.get(String(name).toLowerCase());
+      if (normalized === undefined) {
+        throw domException('NotSupportedError', what + 'Algorithm: Unrecognized name');
+      }
+      let bytes;
+      if (data instanceof ArrayBuffer) {
+        bytes = new Uint8Array(data);
+      } else if (ArrayBuffer.isView(data)) {
+        bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      } else {
+        throw new TypeError(what + "parameter 2 is not of type '(ArrayBuffer or ArrayBufferView)'.");
+      }
+      // Hashed now: the spec copies the data before returning.
+      return Promise.resolve(native.digest(normalized, bytes));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  };
 
   const crypto = new Crypto(KEY);
   internals.expose({ Crypto });

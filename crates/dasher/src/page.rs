@@ -484,6 +484,18 @@ impl Page {
         self.query_first(selector, Document::outer_html)
     }
 
+    /// The `innerHTML` of every element matching `selector`, in document
+    /// order.
+    pub fn inner_htmls(&self, selector: &str) -> Result<Vec<String>> {
+        self.query_each(selector, Document::inner_html)
+    }
+
+    /// The `outerHTML` of every element matching `selector`, in document
+    /// order.
+    pub fn outer_htmls(&self, selector: &str) -> Result<Vec<String>> {
+        self.query_each(selector, Document::outer_html)
+    }
+
     fn query_first<R>(
         &self,
         selector: &str,

@@ -96,3 +96,40 @@ fn crypto_random_values_and_uuids() {
         r#"{"same":true,"nonzero":true,"head":true,"errs":["TypeMismatchError","QuotaExceededError","TypeError","TypeError"],"unique":100,"shape":true,"tag":"[object Crypto]"}"#
     );
 }
+
+#[tokio::test]
+async fn subtle_digest_hashes_buffer_sources() {
+    use dasher_js::{RunLimits, RunOutcome};
+
+    let js = runtime();
+    js.run_script(
+        r#"
+        var out = {};
+        const hex = (buffer) => [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        const abc = new TextEncoder().encode('abc');
+        (async () => {
+            out.sha1 = hex(await crypto.subtle.digest('SHA-1', abc));
+            const sha256 = await crypto.subtle.digest({ name: 'sha-256' }, abc.buffer);
+            out.sha256 = [Object.prototype.toString.call(sha256), hex(sha256)];
+            out.lengths = [
+                (await crypto.subtle.digest('SHA-384', new DataView(abc.buffer))).byteLength,
+                (await crypto.subtle.digest('SHA-512', new Uint16Array(2))).byteLength,
+            ];
+            // A view hashes only its own bytes.
+            out.view = hex(await crypto.subtle.digest('SHA-256', new Uint8Array([0, 97, 98, 99, 0]).subarray(1, 4)));
+            const errors = [];
+            for (const args of [['MD5', abc], ['SHA-256', 'abc'], ['SHA-256'], [{}, abc]]) {
+                await crypto.subtle.digest(...args).catch((e) => errors.push(e.name));
+            }
+            out.errors = errors;
+        })();
+        "#,
+        "digest.js",
+    )
+    .unwrap();
+    assert_eq!(js.run(RunLimits::default()).await, RunOutcome::Idle);
+    assert_eq!(
+        eval(&js, "out"),
+        r#"{"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","sha256":["[object ArrayBuffer]","ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"],"lengths":[48,64],"view":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","errors":["NotSupportedError","TypeError","TypeError","TypeError"]}"#
+    );
+}

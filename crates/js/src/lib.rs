@@ -82,8 +82,15 @@
 //! - `localStorage` and `sessionStorage`, kept in memory per origin in a
 //!   [`StorageStore`] that pages of one session can share.
 //! - `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`,
-//!   `btoa`, `crypto.getRandomValues`/`randomUUID`, `structuredClone`,
-//!   `postMessage`, `MessageChannel` and `requestIdleCallback`.
+//!   `btoa`, `crypto.getRandomValues`/`randomUUID`/`subtle.digest`,
+//!   `structuredClone`, `postMessage`, `MessageChannel` and
+//!   `requestIdleCallback`.
+//! - Streams: `ReadableStream`, `WritableStream`, `TransformStream`, their
+//!   readers, writers and controllers, the queuing strategies,
+//!   `TextEncoderStream` and `TextDecoderStream`. Byte streams work as
+//!   default streams of `Uint8Array` chunks; BYOB readers are not
+//!   supported. `response.body` and `blob.stream()` are readable streams.
+//!   Like `Intl`, streams are evaluated on first use.
 //! - `Intl` (`NumberFormat`, `DateTimeFormat`, `PluralRules`, `Collator`,
 //!   `RelativeTimeFormat`, `ListFormat`), which QuickJS lacks, and the
 //!   `toLocaleString`/`localeCompare` methods built on it. Every locale
@@ -92,9 +99,9 @@
 //!   never format anything don't carry it in their heap.
 //!
 //! Everything that is only a stand-in (dialogs, `ResizeObserver`,
-//! `WebSocket`, `crypto.subtle`, navigator extras and so on) is defined in
-//! `src/stubs.js`. Its header lists every stub, plus the APIs left out on
-//! purpose (workers, `indexedDB`, `caches`).
+//! `WebSocket`, the rest of `crypto.subtle`, navigator extras and so on) is
+//! defined in `src/stubs.js`. Its header lists every stub, plus the APIs
+//! left out on purpose (workers, `indexedDB`, `caches`).
 //!
 //! The JS side is compiled to bytecode once per process. Call
 //! [`precompile`] at start-up to keep that cost off the first page.
@@ -140,6 +147,18 @@
 //! `document` to `window`. Inline `style` is parsed from and written back to
 //! the `style` attribute; `getComputedStyle` reports it over per-element
 //! defaults, with no cascade.
+//!
+//! `attachShadow` gives open and closed shadow roots that scripts can fill
+//! and query, reached again through `shadowRoot`; composed events cross
+//! from the shadow tree to its host. Shadow trees are not part of the
+//! document's HTML, slots are never assigned, events are not retargeted,
+//! and `<template shadowrootmode>` stays an ordinary template.
+//!
+//! `document.implementation.createHTMLDocument()` makes a second, inert
+//! document in the page's arena for building markup off the page (jQuery
+//! parses HTML strings in one). Its scripts never run and it has no URL,
+//! window or cookies. Nodes move between it and the page freely; a
+//! detached node's `ownerDocument` is always the page's document.
 //!
 //! Geometry is synthetic, chosen so content gated on visibility or
 //! scrolling still loads; [`WindowOptions::layout`] picks how (see

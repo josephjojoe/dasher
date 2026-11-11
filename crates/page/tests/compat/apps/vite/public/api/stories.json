@@ -1,0 +1,7 @@
+{
+  "stories": [
+    { "id": 1, "title": "A browser without pixels", "url": "https://example.com/1", "points": 312, "date": "2026-11-01T12:00:00Z" },
+    { "id": 2, "title": "Arenas for DOM trees", "url": "https://example.com/2", "points": 198, "date": "2026-11-02T08:30:00Z" },
+    { "id": 3, "title": "QuickJS in production", "url": "https://example.com/3", "points": 87, "date": "2026-11-03T17:45:00Z" }
+  ]
+}

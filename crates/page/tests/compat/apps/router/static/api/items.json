@@ -1,0 +1,7 @@
+{
+  "items": [
+    { "id": 1, "name": "Teapot", "price": 24 },
+    { "id": 2, "name": "Cafetière", "price": 18 },
+    { "id": 3, "name": "Kettle", "price": 35 }
+  ]
+}

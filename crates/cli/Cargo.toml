@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 dasher.workspace = true
+dasher-serve.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 

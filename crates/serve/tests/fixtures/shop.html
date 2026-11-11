@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head><title>Loading…</title></head>
+<body>
+  <h1>Products</h1>
+  <ul id="products"></ul>
+  <a class="next" href="/shop.html?page=2">Next</a>
+  <script>
+    console.log('rendering');
+    // Render after a timer and an API call, as a client-rendered page would.
+    setTimeout(async () => {
+      const products = await (await fetch('/api/products')).json();
+      const list = document.getElementById('products');
+      for (const p of products) {
+        const li = document.createElement('li');
+        li.className = 'product';
+        li.innerHTML = `<a href="/p/${p.id}">${p.name}</a> <span class="price">${p.price}</span>`;
+        list.appendChild(li);
+      }
+      document.title = `${products.length} products`;
+      window.__STATE__ = { total: products.length };
+      console.error('price feed is stale');
+    }, 300);
+    setTimeout(() => { throw new Error('widget failed'); }, 10);
+  </script>
+</body>
+</html>

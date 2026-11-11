@@ -318,7 +318,13 @@ impl Document {
         })))
     }
 
-    pub(crate) fn create_document_node(&mut self) -> NodeId {
+    /// A new, empty document node: the root of a tree of its own in this
+    /// arena, apart from [`root`](Self::root). Its nodes are never
+    /// [connected](Self::is_connected), and the document-level queries
+    /// ([`head`](Self::head), [`body`](Self::body), [`title`](Self::title)
+    /// and so on) do not look at it. The JS bindings use this for
+    /// `document.implementation.createHTMLDocument()`.
+    pub fn create_document(&mut self) -> NodeId {
         self.alloc(NodeData::Document)
     }
 
@@ -1424,7 +1430,7 @@ mod tests {
         );
         assert_eq!(doc.append_child(root, e), Err(DomError::HierarchyRequest));
         // A document node anywhere.
-        let other_doc = doc.create_document_node();
+        let other_doc = doc.create_document();
         assert_eq!(
             doc.append_child(body, other_doc),
             Err(DomError::HierarchyRequest)

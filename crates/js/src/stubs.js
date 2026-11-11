@@ -32,7 +32,8 @@
 //   WebSocket, EventSource          Fail to connect: an error event, then
 //                                   close, as if the server were unreachable.
 //   CSS.supports                    Answers true for everything.
-//   crypto.subtle                   Every method rejects with NotSupportedError.
+//   crypto.subtle                   Every method but digest() rejects with
+//                                   NotSupportedError.
 //   URL.createObjectURL             Returns a unique blob: URL that resolves to
 //                                   nothing; revokeObjectURL is a no-op.
 //
@@ -41,6 +42,7 @@
 // speechSynthesis, PaymentRequest, WebGL/canvas contexts and WebRTC.
 //
 // Not stubs but real implementations elsewhere: CSS.escape (below),
+// crypto.subtle.digest (crypto.js),
 // requestIdleCallback, matchMedia, storage, history and location (window.js,
 // media.js, storage.js), and Intl (intl.js, which formats every locale as
 // en-US).
@@ -591,7 +593,11 @@
       illegal(key);
     }
   }
-  for (const name of ['encrypt', 'decrypt', 'sign', 'verify', 'digest', 'generateKey', 'deriveKey',
+  // digest is real (see crypto.js); the rest are stubs.
+  method(SubtleCrypto.prototype, 'digest', function digest(algorithm, data) {
+    return internals.digest(algorithm, data, arguments.length);
+  });
+  for (const name of ['encrypt', 'decrypt', 'sign', 'verify', 'generateKey', 'deriveKey',
     'deriveBits', 'importKey', 'exportKey', 'wrapKey', 'unwrapKey']) {
     method(SubtleCrypto.prototype, name, function () {
       return Promise.reject(domException('NotSupportedError', "Failed to execute '" + name + "' on 'SubtleCrypto': not supported."));

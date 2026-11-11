@@ -47,7 +47,10 @@ pub(crate) const GLUE: &[(&str, &str)] = &[
 /// it through `native.loadGlue(name)`, as `(name, source)`. Each evaluates
 /// to a function taking `native` and `internals` and returning what it
 /// implements; `lazy.js` installs that.
-pub(crate) const LAZY: &[(&str, &str)] = &[("dasher:intl", include_str!("intl.js"))];
+pub(crate) const LAZY: &[(&str, &str)] = &[
+    ("dasher:intl", include_str!("intl.js")),
+    ("dasher:streams", include_str!("streams.js")),
+];
 
 /// Compiles the glue now rather than when the first runtime is created.
 ///

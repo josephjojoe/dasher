@@ -17,6 +17,7 @@ dasher-dom = { path = "crates/dom" }
 dasher-js = { path = "crates/js" }
 dasher-net = { path = "crates/net" }
 dasher-page = { path = "crates/page" }
+dasher-serve = { path = "crates/serve" }
 dasher-test-server = { path = "crates/test-server" }
 
 # Third-party crates shared across the workspace.
@@ -61,3 +62,10 @@ debug = false
 inherits = "release"
 debug = "line-tables-only"
 strip = false
+
+# QuickJS's interpreter at -O0 uses several times the native stack per JS
+# call, so real framework code (React unmounting a deep tree) overflows the
+# JS stack limit in debug builds and tests. Optimizing just the C engine
+# keeps debug behaviour close to release, and makes JS-heavy tests faster.
+[profile.dev.package.rquickjs-sys]
+opt-level = 2
