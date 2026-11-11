@@ -1,5 +1,5 @@
-//! Synthetic layout: element boxes, scrolling, scrollIntoView and
-//! ResizeObserver, in both layout modes.
+//! Synthetic layout: element boxes, scrolling, scrollIntoView,
+//! IntersectionObserver and ResizeObserver, in both layout modes.
 
 use dasher_dom::Document;
 use dasher_js::{ClockMode, JsRuntime, LayoutMode, RuntimeOptions, Viewport, WindowOptions};
@@ -147,6 +147,188 @@ fn scroll_into_view_if_needed() {
         "document.getElementById('last').scrollIntoViewIfNeeded(false)",
     );
     assert_eq!(eval(&js, "scrollY"), "660");
+}
+
+/// Observes the ids with one observer and logs `id:isIntersecting:ratio`.
+const OBSERVE: &str = "globalThis.seen = [];
+    globalThis.observe = (ids, options) => {
+      const io = new IntersectionObserver((entries, observer) => {
+        if (observer !== io) throw new Error('wrong observer');
+        for (const e of entries) {
+          seen.push(e.target.id + ':' + e.isIntersecting + ':' + e.intersectionRatio);
+        }
+      }, options);
+      for (const id of ids) io.observe(document.getElementById(id));
+      return io;
+    };
+    globalThis.take = () => seen.splice(0).join(' ');";
+
+#[test]
+fn in_view_targets_intersect_at_once() {
+    let js = page(LayoutMode::InView, LIST);
+    fill(&js, 50);
+    run(
+        &js,
+        &format!("{OBSERVE} globalThis.io = observe(['a', 'last', 'hidden']);"),
+    );
+    assert_eq!(
+        eval(&js, "take()"),
+        r#""a:true:1 last:true:1 hidden:false:0""#
+    );
+    // Nothing changes on scrolling.
+    run(&js, "scrollTo(0, 500)");
+    assert_eq!(eval(&js, "take()"), r#""""#);
+    // Showing or removing a target does.
+    run(
+        &js,
+        "document.getElementById('hidden').hidden = false; document.getElementById('a').remove();",
+    );
+    assert_eq!(eval(&js, "take()"), r#""a:false:0 hidden:true:1""#);
+    // Observing twice does nothing; unobserve and disconnect stop reports.
+    run(
+        &js,
+        "io.observe(document.getElementById('last'));
+         io.unobserve(document.getElementById('hidden'));
+         document.getElementById('hidden').hidden = true;",
+    );
+    assert_eq!(eval(&js, "take()"), r#""""#);
+    run(
+        &js,
+        "io.disconnect(); document.getElementById('last').remove();",
+    );
+    assert_eq!(eval(&js, "take()"), r#""""#);
+}
+
+#[test]
+fn in_view_target_pushed_down_leaves_until_the_next_scroll() {
+    let js = page(LayoutMode::InView, LIST);
+    run(
+        &js,
+        &format!("{OBSERVE} observe(['last']); observe(['a']);"),
+    );
+    assert_eq!(eval(&js, "take()"), r#""last:true:1 a:true:1""#);
+    // New items before the sentinel push it down; 'a' stays put.
+    fill(&js, 10);
+    assert_eq!(eval(&js, "take()"), r#""last:false:0""#);
+    run(&js, "scrollTo(0, document.documentElement.scrollHeight)");
+    assert_eq!(eval(&js, "take()"), r#""last:true:1""#);
+    // Moving up does not count as leaving.
+    run(&js, "document.getElementById('filler').replaceChildren()");
+    assert_eq!(eval(&js, "take()"), r#""""#);
+}
+
+#[test]
+fn scrolled_targets_intersect_once_scrolled_to() {
+    let js = page(LayoutMode::Scrolled, LIST);
+    fill(&js, 20);
+    // The viewport is 100px: a (40..60) is in view, last (540..560) is not.
+    run(
+        &js,
+        &format!("{OBSERVE} globalThis.io = observe(['a', 'last'], {{ threshold: [0, 0.5, 1] }});"),
+    );
+    assert_eq!(eval(&js, "take()"), r#""a:true:1 last:false:0""#);
+    // Half of last in view: crossing 0.5.
+    run(&js, "scrollTo(0, 450)");
+    assert_eq!(eval(&js, "take()"), r#""a:false:0 last:true:0.5""#);
+    run(&js, "scrollTo(0, 460)");
+    assert_eq!(eval(&js, "take()"), r#""last:true:1""#);
+    // Content inserted before it pushes it out of view.
+    fill(&js, 10);
+    assert_eq!(eval(&js, "take()"), r#""last:false:0""#);
+}
+
+#[test]
+fn root_margin_grows_the_viewport() {
+    let js = page(LayoutMode::Scrolled, LIST);
+    fill(&js, 20);
+    run(
+        &js,
+        &format!(
+            "{OBSERVE} globalThis.io = observe(['last'], {{ rootMargin: '0px 0px 450px 0px' }});"
+        ),
+    );
+    assert_eq!(eval(&js, "take()"), r#""last:true:0.5""#);
+    assert_eq!(
+        eval(&js, "[io.rootMargin, io.thresholds, io.root]"),
+        r#"["0px 0px 450px 0px",[0],null]"#
+    );
+}
+
+#[test]
+fn entries_describe_the_geometry() {
+    let js = page(LayoutMode::Scrolled, LIST);
+    run(
+        &js,
+        "new IntersectionObserver(([e]) => {
+           globalThis.entry = {
+             bounds: e.boundingClientRect.toJSON(), hit: e.intersectionRect.height,
+             root: [e.rootBounds.width, e.rootBounds.height], time: typeof e.time,
+             visible: e.isVisible, tag: Object.prototype.toString.call(e),
+           };
+         }).observe(document.getElementById('b'));",
+    );
+    assert_eq!(
+        eval(&js, "entry"),
+        r#"{"bounds":{"x":0,"y":60,"width":800,"height":20,"top":60,"right":800,"bottom":80,"left":0},"hit":20,"root":[800,100],"time":"number","visible":false,"tag":"[object IntersectionObserverEntry]"}"#
+    );
+}
+
+#[test]
+fn element_roots_contain_their_descendants() {
+    let js = page(LayoutMode::Scrolled, LIST);
+    fill(&js, 20);
+    run(
+        &js,
+        &format!(
+            "{OBSERVE} observe(['last', 'main'], {{ root: document.getElementById('filler') }});
+             observe(['last'], {{ root: document.getElementById('main') }});"
+        ),
+    );
+    assert_eq!(
+        eval(&js, "take()"),
+        r#""last:false:0 main:false:0 last:true:1""#
+    );
+}
+
+#[test]
+fn bad_options_throw() {
+    let js = page(LayoutMode::InView, LIST);
+    assert_eq!(
+        eval(
+            &js,
+            "const tries = [
+               () => new IntersectionObserver(),
+               () => new IntersectionObserver(() => {}, { threshold: 2 }),
+               () => new IntersectionObserver(() => {}, { rootMargin: '10em' }),
+               () => new IntersectionObserver(() => {}, { root: {} }),
+               () => new IntersectionObserver(() => {}).observe(document),
+             ];
+             tries.map((f) => { try { f(); return 'ok'; } catch (e) { return e.name; } })"
+        ),
+        r#"["TypeError","RangeError","SyntaxError","TypeError","TypeError"]"#
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "const io = new IntersectionObserver(() => {}, { rootMargin: '5px 10%', threshold: [1, 0.25] });
+             [io.rootMargin, io.thresholds, io.takeRecords().length]"
+        ),
+        r#"["5px 10% 5px 10%",[0.25,1],0]"#
+    );
+}
+
+#[test]
+fn observing_keeps_the_loop_busy_only_while_something_changes() {
+    let js = page(LayoutMode::InView, LIST);
+    run(
+        &js,
+        "globalThis.calls = 0;
+         new IntersectionObserver(() => calls++).observe(document.getElementById('a'));",
+    );
+    assert!(js.is_idle());
+    run(&js, "document.getElementById('b').remove()");
+    assert!(js.is_idle());
+    assert_eq!(eval(&js, "calls"), "1");
 }
 
 #[test]

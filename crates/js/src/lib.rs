@@ -145,10 +145,11 @@
 //! scrolling still loads; [`WindowOptions::layout`] picks how (see
 //! [`LayoutMode`]). By default every rendered element is a visible,
 //! non-zero box at the top of the viewport, the document is as tall as its
-//! content and scrolls without limit. [`LayoutMode::Scrolled`] stacks the
-//! elements in document order instead, so they are only in view once
-//! scrolled to. `ResizeObserver` reports each element's synthetic size
-//! once.
+//! content and scrolls without limit, and `IntersectionObserver` reports
+//! every observed element as intersecting. [`LayoutMode::Scrolled`] stacks
+//! the elements in document order instead, so they intersect only once
+//! scrolled into view. `ResizeObserver` reports each element's synthetic
+//! size once.
 //!
 //! `MutationObserver` sees every change scripts make to the tree, with the
 //! standard's records (`childList`, `attributes` and `characterData`, with
