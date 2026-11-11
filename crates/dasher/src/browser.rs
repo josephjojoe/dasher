@@ -146,6 +146,7 @@ pub struct BrowserBuilder {
     headers: Vec<(String, String)>,
     proxy: Option<String>,
     blocked: Vec<String>,
+    block_private_addresses: bool,
     request_timeout: Option<Duration>,
     max_response_size: Option<u64>,
     root_certificates: Vec<Vec<u8>>,
@@ -165,6 +166,7 @@ impl Default for BrowserBuilder {
             headers: Vec::new(),
             proxy: None,
             blocked: Vec::new(),
+            block_private_addresses: false,
             request_timeout: None,
             max_response_size: None,
             root_certificates: Vec::new(),
@@ -210,6 +212,27 @@ impl BrowserBuilder {
     /// any case.
     pub fn block(mut self, pattern: impl Into<String>) -> Self {
         self.blocked.push(pattern.into());
+        self
+    }
+
+    /// Refuses to connect to loopback, link-local, private (RFC 1918 and
+    /// IPv6 unique local), CGNAT, unspecified, multicast and reserved
+    /// addresses. Off by default; turn it on when the URLs, or the pages
+    /// behind them, come from someone you don't trust, so they can't reach
+    /// the cloud metadata server or anything else on the private network.
+    ///
+    /// The check is on the address connected to, after DNS, so it catches
+    /// host names that resolve or rebind to a private address and
+    /// redirects to them, not only literal IPs. A page refused this way
+    /// fails to load with a blocked [`LoadError::Network`]; refused
+    /// scripts and `fetch()` calls fail as network errors do. Through a
+    /// [`proxy`](Self::proxy) only literal IP targets and the proxy's own
+    /// address can be checked, since the proxy resolves names itself.
+    /// See [`dasher_net::ClientBuilder::block_private_addresses`].
+    ///
+    /// [`LoadError::Network`]: crate::LoadError::Network
+    pub fn block_private_addresses(mut self, enabled: bool) -> Self {
+        self.block_private_addresses = enabled;
         self
     }
 
@@ -359,6 +382,7 @@ impl BrowserBuilder {
             let proxy = Proxy::http(proxy).map_err(|e| Error::Config(e.to_string()))?;
             client = client.proxy(proxy);
         }
+        client = client.block_private_addresses(self.block_private_addresses);
         if let Some(timeout) = self.request_timeout {
             client = client.timeout(Some(timeout));
         }

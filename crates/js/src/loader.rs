@@ -248,13 +248,9 @@ impl JsRuntime {
     }
 
     /// Tells scripts the parser has inserted `body`, the document's
-    /// `<body>` (or `<frameset>`) element. Its window event handler
-    /// attributes, such as `<body onload="init()">`, then set the window's
-    /// handlers, replacing any a script set before. Call it once, as soon
-    /// as the parser has inserted the body and before any script runs
-    /// again. Without the call those attributes still work, but do not
-    /// override handlers set earlier.
-    pub fn body_inserted(&self, body: NodeId) {
+    /// `<body>` (or `<frameset>`) element, so its window event handler
+    /// attributes set the window's handlers.
+    pub(crate) fn body_inserted(&self, body: NodeId) {
         let _ = self.run_task(|ctx| {
             let body = dom::wrap(ctx, &self.shared().dom, body)?;
             LoaderHooks::get(ctx)?.body_inserted.call::<_, ()>((body,))

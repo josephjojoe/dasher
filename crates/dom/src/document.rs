@@ -611,7 +611,7 @@ impl Document {
 
     /// Appends an attribute unless the element already has one with this
     /// namespace and local name, as the parser does for repeated `<html>` and
-    /// `<body>` tags.
+    /// `<body>` tags. Returns whether it was added.
     pub(crate) fn add_attr_if_missing(
         &mut self,
         id: NodeId,
@@ -619,10 +619,12 @@ impl Document {
         prefix: Name,
         local: Name,
         value: &str,
-    ) {
-        if self.attr_index_ns(id, ns, local).is_none() {
+    ) -> bool {
+        let missing = self.attr_index_ns(id, ns, local).is_none();
+        if missing {
             self.push_attr(id, ns, prefix, local, value);
         }
+        missing
     }
 
     /// A new attribute record for one of this document's elements.

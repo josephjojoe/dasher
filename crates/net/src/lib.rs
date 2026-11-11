@@ -48,6 +48,7 @@ mod connector;
 mod cookies;
 mod decode;
 mod error;
+mod guard;
 mod policy;
 mod response;
 

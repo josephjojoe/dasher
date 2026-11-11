@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::{
@@ -19,6 +20,7 @@ use crate::document::{Document, QuirksMode};
 use crate::error::DomError;
 use crate::name::Name;
 use crate::node::{Attr, NodeId, NodeKind, flags};
+use crate::stream::TreeChange;
 
 /// How much fragment input is parsed between checks of the node limit.
 const FRAGMENT_SLICE: usize = 16 * 1024;
@@ -288,6 +290,29 @@ pub(crate) struct Sink<'a> {
     first_element: Cell<Option<NodeId>>,
     /// Text nodes appended to after creation, to shrink when parsing ends.
     grown_text: RefCell<Vec<NodeId>>,
+    /// The changes made to the tree, while they are being logged.
+    pub(crate) log: RefCell<Option<ChangeLog>>,
+}
+
+/// The tree changes a [`DocumentParser`](crate::DocumentParser) made since
+/// they were last taken.
+#[derive(Default)]
+pub(crate) struct ChangeLog {
+    pub(crate) changes: Vec<TreeChange>,
+    /// Text nodes inserted since then: text added to them is part of the
+    /// insertion, not a change of its own.
+    new_text: HashSet<NodeId>,
+    /// Text nodes whose growth is already logged.
+    grown_text: HashSet<NodeId>,
+}
+
+impl ChangeLog {
+    /// Takes the changes logged so far, starting afresh.
+    pub(crate) fn take(&mut self) -> Vec<TreeChange> {
+        self.new_text.clear();
+        self.grown_text.clear();
+        std::mem::take(&mut self.changes)
+    }
 }
 
 impl<'a> Sink<'a> {
@@ -303,7 +328,41 @@ impl<'a> Sink<'a> {
             local_atoms: RefCell::new(Vec::new()),
             first_element: Cell::new(None),
             grown_text: RefCell::new(Vec::new()),
+            log: RefCell::new(None),
         }
+    }
+
+    /// Logs that `node` was just inserted, if changes are being logged.
+    fn log_inserted(&self, doc: &Document, node: NodeId) {
+        let mut log = self.log.borrow_mut();
+        let Some(log) = log.as_mut() else { return };
+        let Some(parent) = doc.parent(node) else {
+            return;
+        };
+        if doc.is_text(node) {
+            log.new_text.insert(node);
+        }
+        log.changes.push(TreeChange::Inserted {
+            parent,
+            node,
+            prev: doc.prev_sibling(node),
+            next: doc.next_sibling(node),
+        });
+    }
+
+    /// Logs that `node` is about to be removed, if changes are being logged.
+    fn log_removing(&self, doc: &Document, node: NodeId) {
+        let mut log = self.log.borrow_mut();
+        let Some(log) = log.as_mut() else { return };
+        let Some(parent) = doc.parent(node) else {
+            return;
+        };
+        log.changes.push(TreeChange::Removed {
+            parent,
+            node,
+            prev: doc.prev_sibling(node),
+            next: doc.next_sibling(node),
+        });
     }
 
     fn intern_qual_name(doc: &mut Document, name: &QualName) -> (Name, Name, Name) {
@@ -326,7 +385,16 @@ impl<'a> Sink<'a> {
     fn append_to_text(&self, doc: &mut Document, prev: Option<NodeId>, text: &str) -> bool {
         match prev {
             Some(p) if doc.is_text(p) => {
-                doc.text_mut(p).expect("is text").push_str(text);
+                let data = doc.text_mut(p).expect("is text");
+                if let Some(log) = self.log.borrow_mut().as_mut() {
+                    if !log.new_text.contains(&p) && log.grown_text.insert(p) {
+                        log.changes.push(TreeChange::TextAppended {
+                            node: p,
+                            old_len: data.len(),
+                        });
+                    }
+                }
+                data.push_str(text);
                 self.grown_text.borrow_mut().push(p);
                 true
             }
@@ -435,12 +503,17 @@ impl TreeSink for Sink<'_> {
     fn append(&self, parent: &NodeId, child: NodeOrText<NodeId>) {
         let mut doc = self.doc.borrow_mut();
         match child {
-            NodeOrText::AppendNode(n) => doc.insert_unchecked(*parent, n, None),
+            NodeOrText::AppendNode(n) => {
+                self.log_removing(&doc, n);
+                doc.insert_unchecked(*parent, n, None);
+                self.log_inserted(&doc, n);
+            }
             NodeOrText::AppendText(text) => {
                 let last = doc.last_child(*parent);
                 if !self.append_to_text(&mut doc, last, &text) {
                     let t = doc.create_text(&text);
                     doc.insert_unchecked(*parent, t, None);
+                    self.log_inserted(&doc, t);
                 }
             }
         }
@@ -469,6 +542,7 @@ impl TreeSink for Sink<'_> {
         let mut doc = self.doc.borrow_mut();
         let dt = doc.create_doctype(&name, &public_id, &system_id);
         doc.insert_unchecked(self.document, dt, None);
+        self.log_inserted(&doc, dt);
     }
 
     fn mark_script_already_started(&self, node: &NodeId) {
@@ -502,12 +576,17 @@ impl TreeSink for Sink<'_> {
             return;
         };
         match new_node {
-            NodeOrText::AppendNode(n) => doc.insert_unchecked(parent, n, Some(*sibling)),
+            NodeOrText::AppendNode(n) => {
+                self.log_removing(&doc, n);
+                doc.insert_unchecked(parent, n, Some(*sibling));
+                self.log_inserted(&doc, n);
+            }
             NodeOrText::AppendText(text) => {
                 let prev = doc.prev_sibling(*sibling);
                 if !self.append_to_text(&mut doc, prev, &text) {
                     let t = doc.create_text(&text);
                     doc.insert_unchecked(parent, t, Some(*sibling));
+                    self.log_inserted(&doc, t);
                 }
             }
         }
@@ -517,16 +596,35 @@ impl TreeSink for Sink<'_> {
         let mut doc = self.doc.borrow_mut();
         for a in &attrs {
             let (ns, prefix, local) = Self::intern_qual_name(&mut doc, &a.name);
-            doc.add_attr_if_missing(*target, ns, prefix, local, &a.value);
+            let added = doc.add_attr_if_missing(*target, ns, prefix, local, &a.value);
+            if let Some(log) = self.log.borrow_mut().as_mut().filter(|_| added) {
+                log.changes.push(TreeChange::AttributeAdded {
+                    node: *target,
+                    namespace: ns,
+                    local,
+                });
+            }
         }
     }
 
     fn remove_from_parent(&self, target: &NodeId) {
-        self.doc.borrow_mut().detach(*target);
+        let mut doc = self.doc.borrow_mut();
+        self.log_removing(&doc, *target);
+        doc.detach(*target);
     }
 
     fn reparent_children(&self, node: &NodeId, new_parent: &NodeId) {
-        self.doc.borrow_mut().reparent_children(*node, *new_parent);
+        let mut doc = self.doc.borrow_mut();
+        if self.log.borrow().is_none() {
+            doc.reparent_children(*node, *new_parent);
+            return;
+        }
+        // One child at a time, as the adoption agency algorithm moves them.
+        while let Some(c) = doc.first_child(*node) {
+            self.log_removing(&doc, c);
+            doc.insert_unchecked(*new_parent, c, None);
+            self.log_inserted(&doc, c);
+        }
     }
 
     fn is_mathml_annotation_xml_integration_point(&self, handle: &NodeId) -> bool {

@@ -104,8 +104,8 @@ mod imp {
     use super::HeapState;
 
     unsafe extern "C" {
-        safe fn malloc(size: usize) -> *mut c_void;
-        safe fn calloc(count: usize, size: usize) -> *mut c_void;
+        fn malloc(size: usize) -> *mut c_void;
+        fn calloc(count: usize, size: usize) -> *mut c_void;
         fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
         fn free(ptr: *mut c_void);
         #[cfg_attr(target_vendor = "apple", link_name = "malloc_size")]
@@ -133,7 +133,9 @@ mod imp {
             if !self.0.admit(size) {
                 return ptr::null_mut();
             }
-            self.track(malloc(size))
+            // SAFETY: `malloc` has no preconditions; a null result is passed
+            // through as an allocation failure.
+            self.track(unsafe { malloc(size) })
         }
 
         fn calloc(&mut self, count: usize, size: usize) -> *mut u8 {
@@ -143,7 +145,9 @@ mod imp {
             if !self.0.admit(total) {
                 return ptr::null_mut();
             }
-            self.track(calloc(count, size))
+            // SAFETY: `calloc` has no preconditions; a null result is passed
+            // through as an allocation failure.
+            self.track(unsafe { calloc(count, size) })
         }
 
         unsafe fn dealloc(&mut self, ptr: *mut u8) {

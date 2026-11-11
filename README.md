@@ -92,8 +92,11 @@ docker build -t dasher . && docker run --rm -p 8080:8080 dasher
 curl -s localhost:8080/scrape -d '{"url": "https://example.com/", "extract": {"title": "h1"}}'
 ```
 
-See [docs/deploy.md](docs/deploy.md) for Cloud Run and Lambda, the job
-format and sizing.
+The service refuses to let pages connect to loopback, private and
+link-local addresses (the cloud metadata server among them), checked
+after DNS; set `DASHER_ALLOW_PRIVATE_ADDRESSES=true` to scrape a server
+on your own machine. See [docs/deploy.md](docs/deploy.md) for Cloud Run
+and Lambda, the job format, sizing and security.
 
 ## Development
 

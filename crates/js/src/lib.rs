@@ -173,11 +173,13 @@
 //! `MutationObserver` sees every change scripts make to the tree, with the
 //! standard's records (`childList`, `attributes` and `characterData`, with
 //! `subtree`, `attributeFilter` and old values) delivered in a microtask.
-//! Changes the host makes through
-//! [`with_document_mut`](JsRuntime::with_document_mut) are not observed.
-//! The same changes, when made to nodes in the document, are counted for
-//! the host as [`DomActivity`] (see [`JsRuntime::dom_activity`]), so the
-//! page layer can tell when a page has stopped changing.
+//! It also sees what the page loader's parser builds through
+//! [`with_parser`](JsRuntime::with_parser), as in browsers. Other changes
+//! the host makes through [`with_document_mut`](JsRuntime::with_document_mut)
+//! are not observed. The changes scripts make, when made to nodes in the
+//! document, are counted for the host as [`DomActivity`] (see
+//! [`JsRuntime::dom_activity`]), so the page layer can tell when a page has
+//! stopped changing.
 //!
 //! Inline classic script elements that a script inserts into the document
 //! run as they are inserted. Other inserted scripts are left alone unless a
@@ -241,9 +243,6 @@
 //!   `document.characterSet`, `contentType` and `referrer`;
 //! - [`hold_detached_nodes`](JsRuntime::hold_detached_nodes), which keeps
 //!   node ids the parser still uses valid while scripts change the tree;
-//! - [`body_inserted`](JsRuntime::body_inserted), once the parser has
-//!   inserted the body, so `<body onload="...">` and its kin replace the
-//!   window handlers scripts set before it;
 //! - the module graph functions (see [ES modules](#es-modules)),
 //!   [`register_import_map`](JsRuntime::register_import_map) and
 //!   [`link_inserted`](JsRuntime::link_inserted) for parser-inserted

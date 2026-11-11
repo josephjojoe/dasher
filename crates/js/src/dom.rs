@@ -48,7 +48,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use dasher_css::SelectorList;
-use dasher_dom::{Document, NodeId};
+use dasher_dom::{Document, DocumentParser, NodeId};
 use rquickjs::{Ctx, Function, Object, qjs};
 
 use crate::clock::Clock;
@@ -106,6 +106,8 @@ pub(crate) struct DomState {
     layout_seen: Cell<u32>,
     /// The node limit every document of the page gets.
     node_limit: Option<usize>,
+    /// Whether scripts were told the parser inserted the body.
+    body_seen: Cell<bool>,
 }
 
 impl DomState {
@@ -125,6 +127,7 @@ impl DomState {
             hold: Cell::new(false),
             layout_watch: Cell::new(false),
             layout_seen: Cell::new(0),
+            body_seen: Cell::new(false),
         }
     }
 
@@ -313,6 +316,64 @@ impl JsRuntime {
         result
     }
 
+    /// Runs `f`, which parses into the page's document with `parser`, with
+    /// write access to the document as [`with_document_mut`] gives.
+    ///
+    /// Unlike other host changes, what the parser builds is reported to
+    /// `MutationObserver`s, as browsers report it: a `childList` record for
+    /// each node inserted (or moved, for misnested markup), a
+    /// `characterData` record when text is added to a text node that was
+    /// there before this call, and an `attributes` record for each
+    /// attribute a repeated `<html>` or `<body>` tag adds. If any are
+    /// queued, a microtask checkpoint follows, as one does in browsers
+    /// before the parser runs a script and after it parses each chunk of
+    /// input, so observers have seen the new nodes before the next script
+    /// runs. While nothing is observed the parser logs nothing.
+    ///
+    /// Once the parser has inserted the body, before those records go out,
+    /// the body's window event handler attributes (`<body onload="...">`)
+    /// set the window's handlers, replacing any that scripts set before, as
+    /// in browsers.
+    ///
+    /// [`with_document_mut`]: Self::with_document_mut
+    pub fn with_parser<R>(
+        &self,
+        parser: &mut DocumentParser,
+        f: impl FnOnce(&mut DocumentParser, &mut Document) -> R,
+    ) -> R {
+        let dom = Rc::clone(&self.shared().dom);
+        let observed = dom.is_observed();
+        parser.log_changes(observed);
+        let result = self.with_document_mut(|doc| f(parser, doc));
+        self.note_parsed_body();
+        if observed {
+            dom.parser_changes(&dom.doc(), &parser.take_changes());
+            if dom.has_pending_records() {
+                self.with(|ctx| {
+                    if let Err(e) = mutation::deliver(&ctx, &dom) {
+                        self.shared().report_uncaught(&ctx, e);
+                    }
+                });
+                self.perform_microtask_checkpoint();
+            }
+        }
+        result
+    }
+
+    /// The first time the document has a body, tells scripts (see
+    /// [`with_parser`](Self::with_parser)).
+    fn note_parsed_body(&self) {
+        let dom = &self.shared().dom;
+        if dom.body_seen.get() {
+            return;
+        }
+        let Some(body) = dom.doc().body() else {
+            return;
+        };
+        dom.body_seen.set(true);
+        self.body_inserted(body);
+    }
+
     /// While `hold` is set, nodes detached from the document are not freed,
     /// even once nothing refers to them, so node ids the host keeps across
     /// script runs stay valid. The page loader holds them while it parses,
@@ -339,6 +400,7 @@ impl JsRuntime {
         let root = dom.doc.borrow().root();
         dom.observed.borrow_mut().retain(|&n| n == root);
         dom.pending.borrow_mut().clear();
+        dom.body_seen.set(false);
         dom.bump();
         drop(old);
     }

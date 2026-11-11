@@ -1,7 +1,7 @@
 //! Event handler content attributes: `onclick="..."` on elements and
 //! `<body onload="...">` for the window.
 
-use dasher_dom::Document;
+use dasher_dom::{Document, DocumentParser, ParseOptions, ParseStep};
 use dasher_js::{ClockMode, EventTarget, JsRuntime, RuntimeOptions, WindowOptions};
 
 fn page(html: &str) -> JsRuntime {
@@ -267,16 +267,27 @@ fn body_attributes_set_window_handlers() {
 
 #[test]
 fn the_parsed_body_replaces_handlers_set_before_it() {
-    let js = page(r#"<body onload="log.push('attr')">"#);
-    // As if a script in the head set it before the parser reached the body.
-    js.run_script("window.onload = () => log.push('script');", "head.js")
-        .unwrap();
-    let body = js.with_document(|doc| doc.body()).unwrap();
-    js.body_inserted(body);
+    let js = page("");
+    js.set_document(Document::new());
+    let mut parser = js.with_document_mut(|doc| DocumentParser::new(doc, ParseOptions::default()));
+    parser.push(
+        "<script>window.onload = () => log.push('head script')</script>\
+         <body onload=\"log.push('attr')\"><p>\
+         <script>log.push(typeof onload, String(onload).includes('attr'))</script>",
+    );
+    // Run the scripts as the page loader would.
+    while let ParseStep::Script(script) = js.with_parser(&mut parser, |p, doc| p.resume(doc)) {
+        let text = js.with_document(|doc| doc.text_content(script).unwrap_or_default());
+        js.run_script(&text, "inline.js").unwrap();
+    }
+    js.with_parser(&mut parser, |p, doc| p.finish(doc));
     js.fire_event(EventTarget::Window, "load", false, false);
     // A script after the body overrides it in turn.
     js.run_script("window.onload = () => log.push('later script');", "body.js")
         .unwrap();
     js.fire_event(EventTarget::Window, "load", false, false);
-    assert_eq!(eval(&js, "log"), r#"["attr","later script"]"#);
+    assert_eq!(
+        eval(&js, "log"),
+        r#"["function",true,"attr","later script"]"#
+    );
 }

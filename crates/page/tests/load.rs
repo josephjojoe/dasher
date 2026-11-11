@@ -464,3 +464,47 @@ async fn load_errors() {
         Err(LoadError::Network(_))
     ));
 }
+
+#[tokio::test]
+async fn mutation_observers_see_what_the_parser_inserts() {
+    // An observer registered in the head processes items as they arrive,
+    // as ad, anti-flicker and "upgrade elements as they load" scripts do.
+    let page_html = r#"<!DOCTYPE html><html><head><script>
+        globalThis.log = [];
+        new MutationObserver((records) => {
+          for (const r of records) {
+            for (const n of r.addedNodes) {
+              if (n.nodeType === 1 && n.classList.contains('item')) {
+                n.dataset.seen = 'yes';
+                log.push('saw ' + n.id);
+              }
+            }
+          }
+        }).observe(document.documentElement, { childList: true, subtree: true });
+      </script></head><body>
+      <div class=item id=a></div><div class=item id=b></div>
+      <script src=/blocking.js></script>
+      <div class=item id=c></div>
+    </body></html>"#;
+    let server = FixtureServer::builder()
+        .route("/observe", move |_| FixtureResponse::html(page_html))
+        .route("/blocking.js", |_| {
+            FixtureResponse::ok(
+                "text/javascript",
+                "log.push('script, a seen: ' + document.getElementById('a').dataset.seen);",
+            )
+        })
+        .path_latency("/blocking.js", Duration::from_millis(50))
+        .start()
+        .unwrap();
+    let page = load(&server, "/observe").await;
+    assert_eq!(
+        serde_list(&json(&page, "log")),
+        ["saw a", "saw b", "script, a seen: yes", "saw c"]
+    );
+    assert_eq!(
+        json(&page, "document.querySelectorAll('[data-seen=yes]').length"),
+        "3"
+    );
+    assert_eq!(page.js().take_errors(), []);
+}
