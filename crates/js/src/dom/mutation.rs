@@ -12,6 +12,11 @@
 //! The same reports, for nodes in the document, are counted as
 //! [`DomActivity`](super::DomActivity) for the page layer.
 //!
+//! The page loader's parser changes the tree from the host side. It logs
+//! its changes while anything is observed, and [`DomState::parser_changes`]
+//! turns the log into records the same way (see
+//! [`JsRuntime::with_parser`](crate::JsRuntime::with_parser)).
+//!
 //! Queued records hold node ids, so no tree is released from the arena
 //! while records are queued (see [`DomState::sweep`](super::DomState)).
 //! Delivering wraps every node a record names, which keeps it alive from
@@ -19,7 +24,7 @@
 
 use std::rc::Rc;
 
-use dasher_dom::{Document, Name, NodeId};
+use dasher_dom::{Document, Name, NodeId, TreeChange};
 use rquickjs::function::Rest;
 use rquickjs::{Ctx, IntoJs, Result, Value};
 
@@ -74,6 +79,19 @@ impl DomState {
     /// and returns the observed inclusive ancestors of `target`, nearest
     /// first, or `None` if no observer can be interested in it.
     fn interest(&self, doc: &Document, target: NodeId) -> Option<Vec<NodeId>> {
+        let (found, top) = self.observed_ancestors(doc, target);
+        if top == doc.root() {
+            let mut activity = self.activity.get();
+            activity.mutations += 1;
+            activity.last_mutation = Some(self.clock.now());
+            self.activity.set(activity);
+        }
+        (!found.is_empty()).then_some(found)
+    }
+
+    /// The observed inclusive ancestors of `target`, nearest first, and
+    /// its root.
+    fn observed_ancestors(&self, doc: &Document, target: NodeId) -> (Vec<NodeId>, NodeId) {
         let observed = self.observed.borrow();
         let mut found = Vec::new();
         let mut top = target;
@@ -83,13 +101,64 @@ impl DomState {
             }
             top = n;
         }
-        if top == doc.root() {
-            let mut activity = self.activity.get();
-            activity.mutations += 1;
-            activity.last_mutation = Some(self.clock.now());
-            self.activity.set(activity);
+        (found, top)
+    }
+
+    /// Whether any node has registered observers. While none has, the
+    /// parser need not log its changes.
+    pub(crate) fn is_observed(&self) -> bool {
+        !self.observed.borrow().is_empty()
+    }
+
+    /// Notes the changes the parser made, in order, as the records the DOM
+    /// standard's algorithms queue for them. Unlike changes made from
+    /// script, they are not counted as [`DomActivity`](super::DomActivity).
+    ///
+    /// Who is interested is decided from the tree as it is now, after the
+    /// changes, rather than as it was at each one; the two only differ
+    /// when the parser moved nodes it had just inserted.
+    pub(crate) fn parser_changes(&self, doc: &Document, changes: &[TreeChange]) {
+        let mut pending = self.pending.borrow_mut();
+        for &change in changes {
+            let (kind, target) = match change {
+                TreeChange::Inserted { parent, .. } | TreeChange::Removed { parent, .. } => {
+                    (Kind::ChildList, parent)
+                }
+                TreeChange::TextAppended { node, .. } => (Kind::CharacterData, node),
+                TreeChange::AttributeAdded { node, .. } => (Kind::Attributes, node),
+            };
+            let (observed, _) = self.observed_ancestors(doc, target);
+            if observed.is_empty() {
+                continue;
+            }
+            let mut record = Record::new(observed, kind, target);
+            match change {
+                TreeChange::Inserted {
+                    node, prev, next, ..
+                } => {
+                    record.added = vec![node];
+                    (record.prev, record.next) = (prev, next);
+                }
+                TreeChange::Removed {
+                    node, prev, next, ..
+                } => {
+                    record.removed = vec![node];
+                    (record.prev, record.next) = (prev, next);
+                }
+                TreeChange::TextAppended { node, old_len } => {
+                    let data = doc.text(node).unwrap_or_default();
+                    record.old_value = Some(data.get(..old_len).unwrap_or(data).to_owned());
+                }
+                TreeChange::AttributeAdded {
+                    namespace, local, ..
+                } => {
+                    record.name = Some(doc.name_str(local).to_owned());
+                    record.namespace =
+                        (namespace != Name::EMPTY).then(|| doc.name_str(namespace).to_owned());
+                }
+            }
+            pending.push(record);
         }
-        (!found.is_empty()).then_some(found)
     }
 
     /// Notes that `added` were inserted into `target` and/or `removed` were

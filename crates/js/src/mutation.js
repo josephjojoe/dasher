@@ -4,8 +4,8 @@
 // Registrations live here, in a WeakMap from node to its registered
 // observers, so they last exactly as long as the node's wrapper. Rust is
 // told which nodes have any (native.dom.setObserved). For every change to
-// the tree made from script whose target, or an ancestor of it, is among
-// them, Rust calls queueRecord with the change and those observed nodes,
+// the tree made from script or by the page's parser whose target, or an
+// ancestor of it, is among them, Rust calls queueRecord with the change and those observed nodes,
 // nearest first. queueRecord queues a record for each interested observer,
 // and records are delivered together in one microtask, as the standard's
 // "notify mutation observers" does.
