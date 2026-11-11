@@ -210,6 +210,35 @@ impl Document {
         root
     }
 
+    /// The slot `node` is assigned to by name: the first `<slot>` in its
+    /// parent's shadow tree whose `name` matches `node`'s `slot` attribute
+    /// (the default slot, for text and for elements without one). `None`
+    /// if `node`'s parent hosts no shadow root, or no slot matches.
+    pub fn assigned_slot(&self, node: NodeId) -> Option<NodeId> {
+        let wanted = match &self.node(node).data {
+            NodeData::Element(_) => self.attribute_named(node, Name::SLOT).unwrap_or(""),
+            NodeData::Text(_) => "",
+            _ => return None,
+        };
+        let root = self.shadow_root(self.parent(node)?)?;
+        self.descendants(root).find(|&n| {
+            self.is_html(n, Name::SLOT)
+                && self.attribute_named(n, Name::NAME).unwrap_or("") == wanted
+        })
+    }
+
+    /// The nodes assigned to `slot` by name: the children of its shadow
+    /// tree's host whose [assigned slot](Self::assigned_slot) it is. Empty
+    /// if `slot` is not in a shadow tree.
+    pub fn assigned_nodes(&self, slot: NodeId) -> Vec<NodeId> {
+        let Some(host) = self.shadow_host(self.tree_root(slot)) else {
+            return Vec::new();
+        };
+        self.children(host)
+            .filter(|&c| self.assigned_slot(c) == Some(slot))
+            .collect()
+    }
+
     /// `id` and everything under it, also going into shadow trees, in the
     /// DOM's shadow-including tree order: a host is followed by its shadow
     /// root and the shadow tree, then by its children. Template contents are
@@ -313,6 +342,25 @@ mod tests {
             .map(|n| doc.node_name(n).into_owned())
             .collect();
         assert_eq!(names, ["DIV", "#document-fragment", "I", "B"]);
+    }
+
+    #[test]
+    fn slots_are_assigned_by_name() {
+        let mut doc = Document::parse(
+            "<my-el><template shadowrootmode=open><slot name=a></slot><slot></slot>\
+             <slot name=a></slot></template><b slot=a>1</b>t<i>2</i><u slot=x>3</u><!--c--></my-el>",
+        );
+        let host = doc.first_child(doc.body().unwrap()).unwrap();
+        let root = doc.shadow_root(host).unwrap();
+        let slots: Vec<NodeId> = doc.children(root).collect();
+        let kids: Vec<NodeId> = doc.children(host).collect();
+        assert_eq!(doc.assigned_nodes(slots[0]), [kids[0]]);
+        assert_eq!(doc.assigned_nodes(slots[1]), [kids[1], kids[2]]);
+        assert_eq!(doc.assigned_nodes(slots[2]), []);
+        assert_eq!(doc.assigned_slot(kids[3]), None);
+        assert_eq!(doc.assigned_slot(kids[4]), None);
+        let loose = doc.create_element("slot");
+        assert_eq!(doc.assigned_nodes(loose), []);
     }
 
     #[test]
