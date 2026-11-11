@@ -38,12 +38,12 @@
 //
 // Deliberately absent, so feature detection takes the fallback path:
 // Worker, SharedWorker, navigator.serviceWorker, caches, indexedDB,
-// speechSynthesis, PaymentRequest, WebGL/canvas contexts, WebRTC and Intl
-// (QuickJS has no Intl).
+// speechSynthesis, PaymentRequest, WebGL/canvas contexts and WebRTC.
 //
 // Not stubs but real implementations elsewhere: CSS.escape (below),
 // requestIdleCallback, matchMedia, storage, history and location (window.js,
-// media.js, storage.js).
+// media.js, storage.js), and Intl (intl.js, which formats every locale as
+// en-US).
 (function (native, internals) {
   'use strict';
 

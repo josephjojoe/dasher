@@ -119,7 +119,7 @@ fn css_crypto_subtle_and_blob_urls() {
         ({ escape: [CSS.escape('a b'), CSS.escape('1x'), CSS.escape('-'), CSS.escape('-2'), CSS.escape('é#')],
            supports: CSS.supports('display', 'grid'), rejected,
            blob: /^blob:https:\/\/example\.com\/[0-9a-f-]{36}$/.test(URL.createObjectURL({})),
-           absent: ['Worker', 'SharedWorker', 'indexedDB', 'caches', 'Intl'].filter((n) => n in globalThis) })
+           absent: ['Worker', 'SharedWorker', 'indexedDB', 'caches'].filter((n) => n in globalThis) })
         "#,
     );
     assert_eq!(

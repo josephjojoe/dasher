@@ -83,11 +83,17 @@
 //! - `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`,
 //!   `btoa`, `crypto.getRandomValues`/`randomUUID`, `structuredClone`,
 //!   `postMessage`, `MessageChannel` and `requestIdleCallback`.
+//! - `Intl` (`NumberFormat`, `DateTimeFormat`, `PluralRules`, `Collator`,
+//!   `RelativeTimeFormat`, `ListFormat`), which QuickJS lacks, and the
+//!   `toLocaleString`/`localeCompare` methods built on it. Every locale
+//!   formats as en-US, and time zones other than UTC and fixed offsets
+//!   use the host's zone. It is evaluated on first use, so pages that
+//!   never format anything don't carry it in their heap.
 //!
 //! Everything that is only a stand-in (dialogs, `ResizeObserver`,
 //! `WebSocket`, `crypto.subtle`, navigator extras and so on) is defined in
 //! `src/stubs.js`. Its header lists every stub, plus the APIs left out on
-//! purpose (workers, `indexedDB`, `caches`, `Intl`).
+//! purpose (workers, `indexedDB`, `caches`).
 //!
 //! The JS side is compiled to bytecode once per process. Call
 //! [`precompile`] at start-up to keep that cost off the first page.
