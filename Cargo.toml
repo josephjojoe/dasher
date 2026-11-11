@@ -17,6 +17,7 @@ dasher-dom = { path = "crates/dom" }
 dasher-js = { path = "crates/js" }
 dasher-net = { path = "crates/net" }
 dasher-page = { path = "crates/page" }
+dasher-serve = { path = "crates/serve" }
 dasher-test-server = { path = "crates/test-server" }
 
 # Third-party crates shared across the workspace.
