@@ -240,7 +240,7 @@
   // right away, as they would in a browser. The others (external scripts,
   // modules) go to the page loader through internals.scriptConnected, with
   // the script's "non-blocking" flag; without a loader they are left alone.
-  // Module preload links come here too, for internals.linkConnected.
+  // Links that load something come here too, for internals.linkConnected.
   function connected(scripts) {
     for (const script of scripts) {
       try {

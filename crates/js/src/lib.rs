@@ -152,7 +152,9 @@
 //!
 //! Inline classic script elements that a script inserts into the document
 //! run as they are inserted. Other inserted scripts are left alone unless a
-//! page loader takes them over (see below).
+//! page loader takes them over (see below). Stylesheet and preload links
+//! that scripts insert are never fetched, but get a `load` event as if
+//! they had loaded empty, since scripts wait for it.
 //!
 //! Every node keeps one JS wrapper for as long as script can reach it, so
 //! identity and expando properties are stable, but wrappers do not keep

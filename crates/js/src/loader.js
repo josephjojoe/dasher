@@ -9,7 +9,18 @@
   // prepare, and document.write() markup while the parser runs.
   internals.scriptConnected = (script, nonBlocking) => L.scriptInserted(script, nonBlocking);
   internals.documentWrite = (html) => L.write(internals.usv(html));
-  internals.linkConnected = (link) => native.modules.linkConnected(link);
+  // Links that load something. Module preloads fetch their module (see
+  // src/modules/mod.rs). Stylesheets and other preloads are never fetched,
+  // but get their load event as if they had loaded empty: scripts wait for
+  // it (Vite's preload helper holds dynamic imports until their CSS loads).
+  internals.linkConnected = (link) => {
+    const rel = (link.getAttribute('rel') || '').toLowerCase().split(/[\t\n\f\r ]+/);
+    if (rel.includes('modulepreload')) {
+      native.modules.linkConnected(link);
+    } else if (link.hasAttribute('href')) {
+      internals.queueTask(() => internals.fire(link, 'load'));
+    }
+  };
 
   // Scripts' import() calls are renamed to call this global (see
   // src/modules/mod.rs), which fetches module graphs asynchronously.

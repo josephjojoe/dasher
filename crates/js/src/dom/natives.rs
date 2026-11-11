@@ -139,8 +139,8 @@ fn adjacent_position(ctx: &Ctx<'_>, position: &str) -> Result<AdjacentPosition> 
 // document is borrowed, then delivers them once the borrow is released.
 
 /// The script elements under `moved` that just became connected and have
-/// not run, for the page loader to prepare, and the module preload links,
-/// for the module loader.
+/// not run, for the page loader to prepare, and the links that load
+/// something, which get a load event.
 fn connected_scripts(doc: &Document, moved: &[NodeId]) -> Vec<NodeId> {
     let mut scripts = Vec::new();
     for &root in moved {
@@ -150,17 +150,22 @@ fn connected_scripts(doc: &Document, moved: &[NodeId]) -> Vec<NodeId> {
         let subtree = std::iter::once(root).chain(doc.descendants(root));
         scripts.extend(subtree.filter(|&n| {
             (doc.is_html(n, Name::SCRIPT) && !doc.script_already_started(n))
-                || is_module_preload(doc, n)
+                || is_loading_link(doc, n)
         }));
     }
     scripts
 }
 
-fn is_module_preload(doc: &Document, node: NodeId) -> bool {
+/// Whether `node` is a `<link>` that loads something: a stylesheet or a
+/// preload (of a module or anything else).
+fn is_loading_link(doc: &Document, node: NodeId) -> bool {
     doc.is_html(node, Name::LINK)
         && doc.attribute(node, "rel").is_some_and(|rel| {
-            rel.split_ascii_whitespace()
-                .any(|t| t.eq_ignore_ascii_case("modulepreload"))
+            rel.split_ascii_whitespace().any(|t| {
+                ["stylesheet", "preload", "modulepreload"]
+                    .iter()
+                    .any(|r| t.eq_ignore_ascii_case(r))
+            })
         })
 }
 

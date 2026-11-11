@@ -437,3 +437,47 @@ async fn the_import_function_stays_out_of_sight() {
         "false"
     );
 }
+
+#[tokio::test]
+async fn vite_style_preloading_of_lazy_chunks() {
+    let server = server();
+    let js = page(&server);
+    js.set_document(Document::parse("<head></head><body></body>"));
+    js.run_script("globalThis.log = [];", "setup.js").unwrap();
+    // Vite's preload helper, as it wraps a code-split import(): it adds a
+    // link per dependency and waits for the stylesheets to load.
+    js.run_script(
+        r#"
+        const relList = document.createElement('link').relList;
+        const scriptRel = relList.supports('modulepreload') ? 'modulepreload' : 'preload';
+        function preload(baseModule, deps) {
+          return Promise.all(deps.map((dep) => {
+            if (document.querySelector(`link[href="${dep}"]`)) return;
+            const isCss = dep.endsWith('.css');
+            const link = document.createElement('link');
+            link.rel = isCss ? 'stylesheet' : scriptRel;
+            if (!isCss) link.as = 'script';
+            link.crossOrigin = '';
+            link.href = dep;
+            document.head.appendChild(link);
+            if (isCss) {
+              return new Promise((res, rej) => {
+                link.addEventListener('load', res);
+                link.addEventListener('error', () => rej(new Error('css')));
+              });
+            }
+          })).then(() => baseModule());
+        }
+        preload(() => import('./lazy.js'), ['/app/lazy.css', '/app/lazy.js'])
+          .then((m) => globalThis.viteLazy = m.default);
+        "#,
+        "test.js",
+    )
+    .unwrap();
+    settle(&js).await;
+    assert_eq!(js.take_errors(), []);
+    assert_eq!(json(&js, "viteLazy"), r#""lazy 1""#);
+    // Stylesheets are never downloaded; the module was fetched once.
+    assert_eq!(server.request_count_for("/app/lazy.css"), 0);
+    assert_eq!(server.request_count_for("/app/lazy.js"), 1);
+}
