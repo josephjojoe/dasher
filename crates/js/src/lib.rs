@@ -108,6 +108,58 @@
 //! # }
 //! ```
 //!
+//! # The DOM
+//!
+//! Each runtime holds the page's [`dasher_dom::Document`], an empty
+//! `about:blank` one until the host replaces it with
+//! [`set_document`](JsRuntime::set_document). The host reads it with
+//! [`with_document`](JsRuntime::with_document), e.g. to serialize the page
+//! or run selectors, and may change it with
+//! [`with_document_mut`](JsRuntime::with_document_mut).
+//!
+//! Scripts see the standard tree API: `Node` and its subclasses, with the
+//! HTML element interfaces they test with `instanceof` (`HTMLDivElement`,
+//! `HTMLInputElement`, `SVGSVGElement`...), `document`, `Text`, `Comment`,
+//! `DocumentFragment`, attributes, `classList`, `dataset`, live
+//! `childNodes`/`children`/`getElementsBy*` collections,
+//! `querySelector*`/`matches`/`closest` (via `dasher-css`),
+//! `innerHTML`/`outerHTML`/`innerText`, the tree mutation methods, form
+//! control state, `TreeWalker`, and event propagation from nodes through
+//! `document` to `window`. Inline `style` is parsed from and written back to
+//! the `style` attribute; `getComputedStyle` reports it over per-element
+//! defaults, with no cascade. Geometry is synthetic: every rendered element
+//! is a visible box at the top of the viewport.
+//!
+//! Script elements that a script inserts into the document run if they are
+//! inline classic scripts, unless the page loader takes them over through
+//! the `internals.scriptConnected` hook.
+//!
+//! Every node keeps one JS wrapper for as long as script can reach it, so
+//! identity and expando properties are stable, but wrappers do not keep
+//! detached subtrees alive: once a detached subtree has no reachable
+//! wrapper, its nodes are freed from the arena. The `dom` module docs
+//! explain how.
+//!
+//! ```
+//! use dasher_dom::Document;
+//! use dasher_js::{JsRuntime, RuntimeOptions};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let js = JsRuntime::new(RuntimeOptions::default())?;
+//! js.set_document(Document::parse("<ul id=list><li>one</li></ul>"));
+//! js.run_script(
+//!     "const li = document.createElement('li');
+//!      li.textContent = 'two';
+//!      document.getElementById('list').append(li);",
+//!     "page.js",
+//! )?;
+//! assert_eq!(js.eval_json("document.querySelectorAll('li').length")?.as_deref(), Some("2"));
+//! let html = js.with_document(|doc| doc.outer_html(doc.body().unwrap()));
+//! assert_eq!(html, r#"<body><ul id="list"><li>one</li><li>two</li></ul></body>"#);
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Network
 //!
 //! `fetch()` (with `Headers`, `Request`, `Response`, `Blob`, `File`,
