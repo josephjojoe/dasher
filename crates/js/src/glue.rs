@@ -32,11 +32,18 @@ pub(crate) const GLUE: &[(&str, &str)] = &[
     ("dasher:window", include_str!("window.js")),
     ("dasher:storage", include_str!("storage.js")),
     ("dasher:media", include_str!("media.js")),
+    ("dasher:lazy", include_str!("lazy.js")),
     // Every stub is in this one file, which lists them all.
     ("dasher:stubs", include_str!("stubs.js")),
     ("dasher:fetch", include_str!("fetch.js")),
     ("dasher:xhr", include_str!("xhr.js")),
 ];
+
+/// Glue compiled with the rest but evaluated only when `lazy.js` asks for
+/// it through `native.loadGlue(name)`, as `(name, source)`. Each evaluates
+/// to a function taking `native` and `internals` and returning what it
+/// implements; `lazy.js` installs that.
+pub(crate) const LAZY: &[(&str, &str)] = &[("dasher:intl", include_str!("intl.js"))];
 
 /// Compiles the glue now rather than when the first runtime is created.
 ///
@@ -50,7 +57,8 @@ pub fn precompile() -> Result<(), ScriptError> {
         .map_err(|e| ScriptError::new(ErrorKind::Internal, e))
 }
 
-/// Bytecode for the prelude followed by each entry of [`GLUE`].
+/// Bytecode for the prelude followed by each entry of [`GLUE`], then of
+/// [`LAZY`].
 fn bytecode() -> Result<&'static [Vec<u8>], String> {
     static BYTECODE: OnceLock<Result<Vec<Vec<u8>>, String>> = OnceLock::new();
     BYTECODE
@@ -65,6 +73,7 @@ fn compile_all() -> Result<Vec<Vec<u8>>, String> {
     context.with(|ctx| {
         std::iter::once(&PRELUDE)
             .chain(GLUE)
+            .chain(LAZY)
             .map(|&(name, source)| {
                 compile(&ctx, name, source).map_err(|e| {
                     let detail = match e {
@@ -145,7 +154,21 @@ fn run<'js>(ctx: &Ctx<'js>, bytes: &[u8]) -> rquickjs::Result<Value<'js>> {
 /// value (the functions the glue files evaluate to) in order.
 pub(crate) fn load<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Vec<Value<'js>>> {
     let code = bytecode().map_err(|e| Exception::throw_internal(ctx, &e))?;
-    code.iter().map(|bytes| run(ctx, bytes)).collect()
+    code[..=GLUE.len()]
+        .iter()
+        .map(|bytes| run(ctx, bytes))
+        .collect()
+}
+
+/// Evaluates the [`LAZY`] glue script called `name` and returns its
+/// completion value.
+pub(crate) fn load_lazy<'js>(ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Value<'js>> {
+    let code = bytecode().map_err(|e| Exception::throw_internal(ctx, &e))?;
+    let index = LAZY
+        .iter()
+        .position(|&(n, _)| n == name)
+        .ok_or_else(|| Exception::throw_internal(ctx, &format!("no lazy glue {name}")))?;
+    run(ctx, &code[1 + GLUE.len() + index])
 }
 
 #[cfg(test)]
@@ -155,7 +178,7 @@ mod tests {
     #[test]
     fn glue_compiles() {
         let code = bytecode().unwrap();
-        assert_eq!(code.len(), GLUE.len() + 1);
+        assert_eq!(code.len(), 1 + GLUE.len() + LAZY.len());
         assert!(code.iter().all(|b| !b.is_empty()));
     }
 }

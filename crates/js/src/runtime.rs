@@ -527,6 +527,13 @@ fn install<'js>(
         })?,
     )?;
 
+    native.set(
+        "loadGlue",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, name: String| {
+            glue::load_lazy(&ctx, &name)
+        })?,
+    )?;
+
     event_loop::install(ctx, &native, shared)?;
     console::install(ctx, &native, shared, options.max_console_message_len)?;
     net::install(ctx, &native, shared)?;
