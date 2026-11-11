@@ -1,0 +1,30 @@
+<!doctype html>
+<title>Lazy-loaded sections and images</title>
+<main>
+  <section data-src="/api/section?n=1"><h2>One</h2><div class="body"></div></section>
+  <section data-src="/api/section?n=2"><h2>Two</h2><div class="body"></div></section>
+  <section data-src="/api/section?n=3"><h2>Three</h2><div class="body"></div></section>
+  <section data-src="/api/section?n=4"><h2>Four</h2><div class="body"></div></section>
+  <img class="lazy" data-src="/img/1.png" alt="one">
+  <img class="lazy" data-src="/img/2.png" alt="two">
+</main>
+<script>
+  // Each section fetches its body the first time it comes into view; images
+  // swap in their real src. Both stop observing once loaded.
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const el = entry.target;
+      observer.unobserve(el);
+      if (el.tagName === 'IMG') {
+        el.src = el.dataset.src;
+        continue;
+      }
+      fetch(el.dataset.src).then((r) => r.text()).then((text) => {
+        el.querySelector('.body').textContent = text;
+        el.dataset.loaded = '';
+      });
+    }
+  });
+  document.querySelectorAll('[data-src]').forEach((el) => observer.observe(el));
+</script>

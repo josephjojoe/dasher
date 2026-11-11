@@ -1,0 +1,37 @@
+<!doctype html>
+<title>Infinite scroll on scroll events</title>
+<style>.item { height: 120px; }</style>
+<div id="feed"></div>
+<p id="end" hidden>No more items</p>
+<script>
+  // The classic pattern: on scroll, if the bottom of the page is near,
+  // fetch the next page and append it.
+  const feed = document.getElementById('feed');
+  let page = 0;
+  let loading = false;
+  let done = false;
+
+  async function loadMore() {
+    if (loading || done) return;
+    loading = true;
+    const items = await (await fetch('/api/feed?page=' + page)).json();
+    page++;
+    if (items.length === 0) {
+      done = true;
+      document.getElementById('end').hidden = false;
+    }
+    for (const text of items) {
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.textContent = text;
+      feed.append(div);
+    }
+    loading = false;
+  }
+
+  addEventListener('scroll', () => {
+    const bottom = window.innerHeight + window.scrollY;
+    if (bottom >= document.body.offsetHeight - 300) loadMore();
+  });
+  loadMore();
+</script>

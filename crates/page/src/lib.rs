@@ -78,16 +78,30 @@
 //! Quiet periods are page time, so under the virtual clock a page that is
 //! only waiting on timers settles without real waiting.
 //!
+//! # Scrolling and lazy content
+//!
+//! Nothing is laid out, but layout queries get synthetic answers chosen so
+//! that lazy content loads (see [`LayoutMode`]). By default every element
+//! is in view: `IntersectionObserver` reports it intersecting as soon as it
+//! is observed, so lazy images and sections load during the settle, and
+//! the document is tall enough to scroll. [`Page::auto_scroll`] then works
+//! through infinite feeds: it scrolls to the bottom a viewport at a time,
+//! settles, and repeats until scrolling brings nothing new or a limit is
+//! hit. Feeds that listen for `scroll` events and ones that watch a
+//! sentinel element with `IntersectionObserver` both keep loading.
+//!
 //! [`ClockMode::Virtual`]: dasher_js::ClockMode::Virtual
+//! [`LayoutMode`]: dasher_js::LayoutMode
 //!
 //! ```no_run
 //! use dasher_net::Client;
-//! use dasher_page::{Page, PageOptions, SettleOptions};
+//! use dasher_page::{AutoScrollOptions, Page, PageOptions, SettleOptions};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let session = Client::new()?.session();
 //! let mut page = Page::load(&session, "https://example.com/", PageOptions::default()).await?;
 //! page.settle(&SettleOptions::default()).await?;
+//! page.auto_scroll(&AutoScrollOptions::default()).await?;
 //! let title = page.js().eval_json("document.title")?;
 //! let html = page.html();
 //! # let _ = (title, html);
@@ -98,9 +112,11 @@
 mod charset;
 mod page;
 mod script;
+mod scroll;
 mod settle;
 
 pub use page::{DEFAULT_MAX_NAVIGATIONS, LoadError, Page, PageOptions};
+pub use scroll::{AutoScrollOptions, AutoScrollReport, AutoScrollStop, DEFAULT_MAX_SCROLLS};
 pub use settle::{
     DEFAULT_QUIET, DEFAULT_SETTLE_TIMEOUT, NetworkIdle, SettleError, SettleOptions, SettleOutcome,
 };

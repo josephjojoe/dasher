@@ -74,6 +74,10 @@ pub enum LayoutMode {
     /// (at least the viewport). Boxes move as the page scrolls, scrolling
     /// stops at the bottom, and `IntersectionObserver` reports what overlaps
     /// the viewport.
+    ///
+    /// Content below the fold only loads once scrolled to, as in a browser,
+    /// and a page whose content does not fill the viewport may stop loading
+    /// more, as it would in a browser with a tall window.
     Scrolled,
 }
 
