@@ -76,6 +76,49 @@ impl Document {
         doc
     }
 
+    /// Parses a complete HTML document into `document`, an empty document
+    /// node made by [`create_document`](Self::create_document), the way
+    /// `DOMParser` and `XMLHttpRequest.responseXML` do: with scripting
+    /// disabled (so `<noscript>` content is markup) and every script marked
+    /// "already started", so none of them ever runs. Returns the quirks mode
+    /// the doctype implies for that document; this document's own
+    /// [`quirks_mode`](Self::quirks_mode) is left alone.
+    ///
+    /// The input is parsed in slices and parsing stops early once the
+    /// [node limit](Self::set_node_limit) is exceeded, as for fragments.
+    ///
+    /// # Panics
+    ///
+    /// If `document` is not an empty document node.
+    pub fn parse_document_into(&mut self, document: NodeId, html: &str) -> QuirksMode {
+        assert!(
+            self.kind(document) == NodeKind::Document && self.first_child(document).is_none(),
+            "can only parse into an empty document node"
+        );
+        let page_quirks = self.quirks_mode();
+        self.set_quirks_mode(QuirksMode::NoQuirks);
+        let opts = ParseOpts {
+            tree_builder: TreeBuilderOpts {
+                scripting_enabled: false,
+                ..TreeBuilderOpts::default()
+            },
+            ..ParseOpts::default()
+        };
+        let mut parser = html5ever::parse_document(Sink::new(self, document, false), opts);
+        feed_in_slices(&mut parser, html);
+        parser.finish();
+        let quirks = self.quirks_mode();
+        self.set_quirks_mode(page_quirks);
+        let scripts: Vec<NodeId> = self
+            .descendants(document)
+            .filter(|&n| self.is_html(n, Name::SCRIPT))
+            .collect();
+        for script in scripts {
+            self.set_script_already_started(script);
+        }
+        quirks
+    }
+
     /// Parses `html` as a fragment in the context of the element `context`,
     /// as the HTML standard's fragment parsing algorithm does for
     /// `innerHTML`. Returns a new document fragment holding the result.
@@ -132,28 +175,7 @@ impl Document {
             context_attrs,
             scripting,
         );
-        // In slices, so that input that would build far more nodes than
-        // the document may hold is not parsed in full.
-        let mut rest = html;
-        while !rest.is_empty() {
-            let mut end = rest.len().min(FRAGMENT_SLICE);
-            while !rest.is_char_boundary(end) {
-                end += 1;
-            }
-            let (slice, tail) = rest.split_at(end);
-            parser.process(StrTendril::from(slice));
-            rest = tail;
-            if parser
-                .tokenizer
-                .sink
-                .sink
-                .doc
-                .borrow()
-                .node_limit_exceeded()
-            {
-                break;
-            }
-        }
+        feed_in_slices(&mut parser, html);
         let context_copy = parser.finish();
 
         let fragment = self.create_fragment();
@@ -240,6 +262,32 @@ impl Document {
         let fragment = self.parse_fragment(body, html);
         self.release(body);
         fragment
+    }
+}
+
+/// Feeds `html` to `parser` in slices, stopping once the document is over
+/// its node limit, so that input that would build far more nodes than the
+/// document may hold is not parsed in full.
+fn feed_in_slices(parser: &mut html5ever::driver::Parser<Sink<'_>>, html: &str) {
+    let mut rest = html;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(FRAGMENT_SLICE);
+        while !rest.is_char_boundary(end) {
+            end += 1;
+        }
+        let (slice, tail) = rest.split_at(end);
+        parser.process(StrTendril::from(slice));
+        rest = tail;
+        if parser
+            .tokenizer
+            .sink
+            .sink
+            .doc
+            .borrow()
+            .node_limit_exceeded()
+        {
+            break;
+        }
     }
 }
 
