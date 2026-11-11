@@ -141,9 +141,9 @@
 //! defaults, with no cascade. Geometry is synthetic: every rendered element
 //! is a visible box at the top of the viewport.
 //!
-//! Script elements that a script inserts into the document run if they are
-//! inline classic scripts, unless the page loader takes them over through
-//! the `internals.scriptConnected` hook.
+//! Inline classic script elements that a script inserts into the document
+//! run as they are inserted. Other inserted scripts are left alone unless a
+//! page loader takes them over (see below).
 //!
 //! Every node keeps one JS wrapper for as long as script can reach it, so
 //! identity and expando properties are stable, but wrappers do not keep
@@ -170,6 +170,30 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Page loader hooks
+//!
+//! The page loader in `dasher-page` fetches and parses the document and
+//! decides when scripts run. It drives the JS side through:
+//!
+//! - [`set_ready_state`](JsRuntime::set_ready_state) for
+//!   `document.readyState` (firing `readystatechange`) and
+//!   [`fire_event`](JsRuntime::fire_event) for `DOMContentLoaded`, `load`,
+//!   `pageshow` and the `load`/`error` events of script elements;
+//! - [`run_script_element`](JsRuntime::run_script_element), which runs a
+//!   script's source with `document.currentScript` set;
+//! - [`take_over_inserted_scripts`](JsRuntime::take_over_inserted_scripts),
+//!   after which external and module scripts that scripts insert are
+//!   queued as [`InsertedScript`]s for the loader instead of being ignored.
+//!   Each holds a pending operation, so the event loop does not go idle or
+//!   skip ahead in virtual time before the loader has dealt with it;
+//! - [`set_document_write`](JsRuntime::set_document_write), which makes
+//!   `document.write()` capture markup for the parser while a
+//!   parser-executed script runs, and ignore it from async scripts;
+//! - [`set_document_info`](JsRuntime::set_document_info) for
+//!   `document.characterSet`, `contentType` and `referrer`;
+//! - [`hold_detached_nodes`](JsRuntime::hold_detached_nodes), which keeps
+//!   node ids the parser still uses valid while scripts change the tree.
 //!
 //! # Network
 //!
@@ -217,6 +241,7 @@ mod error;
 mod event_loop;
 mod glue;
 mod heap;
+mod loader;
 mod log;
 mod media;
 mod net;
@@ -234,6 +259,7 @@ pub use console::{ConsoleLevel, ConsoleMessage};
 pub use error::{ErrorKind, ScriptError};
 pub use event_loop::{DEFAULT_FRAME_INTERVAL, LoopHandle, Stopped, Task};
 pub use glue::precompile;
+pub use loader::{DocumentInfo, DocumentWrite, EventTarget, InsertedScript, ReadyState};
 pub use remote::{PendingOperation, SendTask, TaskSender};
 pub use run::{RunLimits, RunOutcome};
 pub use runtime::{

@@ -23,6 +23,7 @@ use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::glue;
 use crate::heap::{self, HeapState};
+use crate::loader::{self, LoaderHooks, LoaderState};
 use crate::log::BoundedLog;
 use crate::net::{self, NetState};
 use crate::random;
@@ -128,6 +129,7 @@ pub(crate) struct Shared {
     pub(crate) window: WindowState,
     pub(crate) net: NetState,
     pub(crate) dom: Rc<DomState>,
+    pub(crate) loader: LoaderState,
 }
 
 impl Shared {
@@ -143,6 +145,7 @@ impl Shared {
             window: WindowState::new(url),
             net: NetState::new(options.network.clone()),
             dom: Rc::new(DomState::new(Document::parse(""))),
+            loader: LoaderState::default(),
         }
     }
 
@@ -413,7 +416,7 @@ fn take_handled_late<'js>(ctx: &Ctx<'js>, promise: &Value<'js>) -> bool {
     late.len() != before
 }
 
-fn eval_options(filename: &str) -> EvalOptions {
+pub(crate) fn eval_options(filename: &str) -> EvalOptions {
     let mut options = EvalOptions::default();
     options.global = true;
     options.strict = false;
@@ -711,12 +714,16 @@ fn install<'js>(
     random::install(ctx, &native)?;
     window::install(ctx, &native, shared, &options.window)?;
     dom::install(ctx, &native, shared)?;
+    loader::install(ctx, &native, shared)?;
 
     let mut scripts = glue::load(ctx)?.into_iter().map(Function::from_value);
     let prelude = scripts.next().ok_or(rquickjs::Error::Unknown)??;
     let hooks: Object<'js> = prelude.call((native.clone(),))?;
     for glue in scripts {
         glue?.call::<_, ()>((native.clone(), hooks.clone()))?;
+    }
+    if ctx.store_userdata(LoaderHooks::from_glue(&hooks)?).is_err() {
+        return Err(rquickjs::Error::Unknown);
     }
     let data = JsData {
         inspect: hooks.get("inspect")?,

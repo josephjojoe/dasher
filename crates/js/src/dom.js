@@ -236,16 +236,19 @@
 
   let documentNode = null;
 
-  // Script elements that become connected: the page loader handles them
-  // through internals.scriptConnected if it set one. Otherwise inline
-  // classic scripts run right away, as they would in a browser, and
-  // external ones are left alone.
+  // Script elements that become connected. Inline classic scripts run
+  // right away, as they would in a browser. The others (external scripts,
+  // modules) go to the page loader through internals.scriptConnected, with
+  // the script's "non-blocking" flag; without a loader they are left alone.
   function connected(scripts) {
     for (const script of scripts) {
       try {
-        const hook = internals.scriptConnected;
-        if (typeof hook === 'function') hook(script);
-        else runInlineScript(script);
+        if (!N.hasAttr(script, 'src') && scriptType(script) === 'classic') {
+          runInlineScript(script);
+        } else {
+          const hook = internals.scriptConnected;
+          if (typeof hook === 'function') hook(script, state(script).forceAsync === true);
+        }
       } catch (error) {
         native.reportError(error);
       }
@@ -276,11 +279,14 @@
 
   function runInlineScript(script) {
     if (N.hasAttr(script, 'src') || scriptType(script) !== 'classic') return;
+    // An empty script is not started, so it runs if it gets text later.
+    const text = script.text;
+    if (text === '') return;
     N.markScriptStarted(script);
     const previous = currentScript;
     currentScript = script;
     try {
-      indirectEval(script.text);
+      indirectEval(text);
     } catch (error) {
       native.reportError(error);
     } finally {
@@ -3430,6 +3436,8 @@
 
   let readyState = 'complete';
   let currentScript = null;
+  // What the page loader knows about the document (see setDocumentInfo).
+  const documentInfo = { characterSet: 'UTF-8', contentType: 'text/html', referrer: '' };
 
   class Document extends Node {
     constructor() {
@@ -3457,8 +3465,7 @@
       void v;
     }
     get referrer() {
-      const r = internals.referrer;
-      return typeof r === 'function' ? r() : '';
+      return documentInfo.referrer;
     }
     get cookie() {
       return N.cookie();
@@ -3479,16 +3486,16 @@
       return N.compatMode();
     }
     get characterSet() {
-      return 'UTF-8';
+      return documentInfo.characterSet;
     }
     get charset() {
-      return 'UTF-8';
+      return documentInfo.characterSet;
     }
     get inputEncoding() {
-      return 'UTF-8';
+      return documentInfo.characterSet;
     }
     get contentType() {
-      return 'text/html';
+      return documentInfo.contentType;
     }
     get doctype() {
       return N.docPart(3);
@@ -3796,15 +3803,12 @@
   class XMLDocument extends Document {}
   tag(XMLDocument, 'XMLDocument');
 
-  // document.write(): the page loader may provide a parser-aware version;
-  // otherwise the markup goes after the running script, or at the end of
-  // the body.
+  // document.write(): the page loader takes the markup while the parser
+  // is running (the hook returns true). Otherwise the markup goes after the
+  // running script, or at the end of the body.
   function documentWrite(html) {
     const hook = internals.documentWrite;
-    if (typeof hook === 'function') {
-      hook(html);
-      return;
-    }
+    if (typeof hook === 'function' && hook(html)) return;
     const script = currentScript;
     if (script !== null && N.isConnected(script)) {
       N.insertAdjacentHTML(script, 'afterend', html);
@@ -3926,8 +3930,15 @@
       readyState = value;
       internals.fire(documentNode, 'readystatechange');
     },
+    // Sets document.currentScript, returning the previous value.
     setCurrentScript(script) {
+      const previous = currentScript;
       currentScript = script;
+      return previous;
+    },
+    // characterSet, contentType and referrer, from the response.
+    setDocumentInfo(info) {
+      Object.assign(documentInfo, info);
     },
     // Marks a script element as started, so it is not run again.
     markScriptStarted: N.markScriptStarted,

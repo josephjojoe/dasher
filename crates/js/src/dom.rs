@@ -48,6 +48,8 @@ use rquickjs::{Ctx, Function, Object, qjs};
 
 use crate::runtime::{JsRuntime, Shared};
 
+pub(crate) use wrapper::{Node, wrap};
+
 /// How many parsed selectors are kept for reuse.
 const SELECTOR_CACHE_SIZE: usize = 64;
 
@@ -64,6 +66,9 @@ pub(crate) struct DomState {
     /// Bumped by every change to the tree or to attributes.
     version: Cell<u32>,
     selectors: RefCell<HashMap<String, Rc<SelectorList>>>,
+    /// Set while the host holds node ids that must stay valid, such as the
+    /// parser's open elements: garbage trees are kept until it is cleared.
+    hold: Cell<bool>,
 }
 
 impl DomState {
@@ -74,6 +79,7 @@ impl DomState {
             candidates: RefCell::default(),
             version: Cell::new(0),
             selectors: RefCell::default(),
+            hold: Cell::new(false),
         }
     }
 
@@ -123,6 +129,9 @@ impl DomState {
     /// Releases the trees of queued candidates that are detached and have
     /// no wrapper left.
     fn sweep(&self, doc: &mut Document) {
+        if self.hold.get() {
+            return;
+        }
         let candidates = std::mem::take(&mut *self.candidates.borrow_mut());
         if candidates.is_empty() {
             return;
@@ -237,6 +246,15 @@ impl JsRuntime {
         dom.bump();
         self.with(|ctx| wrapper::regroup_all(&ctx, dom));
         result
+    }
+
+    /// While `hold` is set, nodes detached from the document are not freed,
+    /// even once nothing refers to them, so node ids the host keeps across
+    /// script runs stay valid. The page loader holds them while it parses,
+    /// since the parser keeps ids of open elements that scripts may remove.
+    /// Clearing it lets the garbage be freed again.
+    pub fn hold_detached_nodes(&self, hold: bool) {
+        self.shared().dom.hold.set(hold);
     }
 
     /// Replaces the page's document, e.g. with one parsed from the response.
