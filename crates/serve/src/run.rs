@@ -61,9 +61,10 @@ impl Default for RunOptions {
 ///
 /// Status 200 means the page loaded (whatever status the site answered
 /// with; that is the body's `status`). Otherwise the body has an `error`
-/// message: 400 for a job that cannot run as given, 502 when the page
-/// could not be fetched, 503 when the service is too busy or shutting
-/// down, 504 when no response came in time.
+/// message: 400 for a job that cannot run as given, 422 when the page
+/// went over its JS heap or DOM node limit, 502 when the page could not
+/// be fetched, 503 when the service is too busy or shutting down, 504 when
+/// no response came in time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
     /// The HTTP status.
@@ -308,6 +309,8 @@ fn failure(error: &Error) -> Outcome {
         | Error::Load(LoadError::InvalidUrl(_)) => 400,
         Error::Load(LoadError::Network(_)) => 502,
         Error::Load(LoadError::Timeout) | Error::Timeout => 504,
+        // The page's fault, not the service's.
+        Error::LimitExceeded(_) => 422,
         _ => 500,
     };
     Outcome::error(status, report::error_message(error))
@@ -315,4 +318,21 @@ fn failure(error: &Error) -> Outcome {
 
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use dasher::ResourceLimit;
+
+    use super::*;
+
+    #[test]
+    fn pages_over_their_limits_are_unprocessable() {
+        let outcome = failure(&Error::LimitExceeded(ResourceLimit::DomNodes { limit: 10 }));
+        assert_eq!(outcome.status, 422);
+        assert_eq!(
+            outcome.body["error"],
+            "the page went over its limit of 10 DOM nodes"
+        );
+    }
 }

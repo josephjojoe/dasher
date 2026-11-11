@@ -225,6 +225,7 @@ Failures have an `error` message and these statuses:
 | `400` | The job is invalid: bad JSON, unknown field, not an `http(s)` URL, bad selector, header or cookie. |
 | `401` | `DASHER_AUTH_TOKEN` is set and the request lacks it. |
 | `413` | The job is over 1 MiB. |
+| `422` | The page went over its JS heap or DOM node limit and was stopped. |
 | `502` | The page could not be fetched (DNS, connection, TLS, blocked URL). |
 | `503` | Too many jobs, or shutting down; retry. |
 | `504` | No response for the document in time. |
@@ -234,9 +235,14 @@ Failures have an `error` message and these statuses:
 - Each job gets its own browser and page (its own JS heap, DOM, cookies
   and storage), all freed when it answers. Nothing is shared between
   jobs.
-- A page's JS heap is capped at 256 MiB; most pages use a small part of
-  that. Size memory for your concurrency times a typical page plus a few
-  tens of MB for the process, and measure with your sites.
+- A page's JS heap is capped at 256 MiB and its DOM at 500,000 nodes. A
+  page that goes over either is stopped and its memory freed, and the job
+  fails with `422`, so one runaway page cannot take down the instance.
+- Measured on the static musl build (see `crates/bench/README.md`), a
+  ready process idles at about 4 MiB RSS and a job on a React SPA peaks
+  near 12 MiB; a 1.6 MB, 75,000-node page peaks near 17 MiB. Size memory
+  for your concurrency times a typical page of your sites plus a few MB,
+  with headroom for heavy pages, and measure.
 - A page that spins in JavaScript is stopped at its time limit and holds
   up only its own job.
 
