@@ -10,11 +10,12 @@ use std::rc::Rc;
 
 use dasher_dom::{AdjacentPosition, Document, DomError, Name, NodeId, NodeKind, QuirksMode};
 use rquickjs::function::IntoJsFunc;
-use rquickjs::{Class, Ctx, Function, IntoJs, Object, Result, Value, qjs};
+use rquickjs::{Array, Class, Ctx, Function, IntoJs, Object, Result, Value, qjs};
 
 use super::DomState;
 use super::collection::{Collection, CollectionObject, Filter};
 use super::inner_text::inner_text;
+use super::layout;
 use super::mutation::deliver;
 use super::wrapper::{self, DomData, Move, Node, after_insert, after_remove, plan_insert, wrap};
 
@@ -759,6 +760,31 @@ fn install_core<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     })?;
     let d = Rc::clone(dom);
     def(obj, "version", move || d.version())?;
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "setLayoutHook",
+        move |ctx: Ctx<'js>, hook: Option<Function<'js>>| -> Result<()> {
+            let data = ctx
+                .userdata::<DomData<'js>>()
+                .ok_or(rquickjs::Error::Unknown)?;
+            d.watch_layout(hook.is_some());
+            data.layout_hook.replace(hook);
+            Ok(())
+        },
+    )?;
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "layoutLines",
+        move |ctx: Ctx<'js>, nodes: Array<'js>| -> Result<Vec<i32>> {
+            let ids = nodes
+                .iter::<Node<'js>>()
+                .map(|n| n.and_then(|n| id(&ctx, &n)))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(layout::lines(&d.doc(), &ids))
+        },
+    )?;
     def(
         obj,
         "setMutationHook",

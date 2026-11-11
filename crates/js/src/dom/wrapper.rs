@@ -88,6 +88,8 @@ pub(crate) struct DomData<'js> {
     pub(crate) document: Node<'js>,
     /// Takes mutation records (see the `mutation` module).
     pub(crate) mutation_hook: RefCell<Option<Function<'js>>>,
+    /// Told when the document changed (see the `layout` module).
+    pub(crate) layout_hook: RefCell<Option<Function<'js>>>,
     element: Object<'js>,
     html_element: Object<'js>,
     html_unknown: Object<'js>,
@@ -123,6 +125,7 @@ pub(crate) fn init<'js>(
         exception,
         document,
         mutation_hook: RefCell::new(None),
+        layout_hook: RefCell::new(None),
         element: protos.get("Element")?,
         html_element: protos.get("HTMLElement")?,
         html_unknown: protos.get("HTMLUnknownElement")?,

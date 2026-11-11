@@ -37,6 +37,7 @@
 
 mod collection;
 mod inner_text;
+mod layout;
 mod mutation;
 mod natives;
 mod wrapper;
@@ -99,6 +100,10 @@ pub(crate) struct DomState {
     /// Set while the host holds node ids that must stay valid, such as the
     /// parser's open elements: garbage trees are kept until it is cleared.
     hold: Cell<bool>,
+    /// Whether the layout hook is set (see the `layout` module).
+    layout_watch: Cell<bool>,
+    /// The version the layout hook last saw.
+    layout_seen: Cell<u32>,
 }
 
 impl DomState {
@@ -114,6 +119,8 @@ impl DomState {
             activity: Cell::default(),
             clock,
             hold: Cell::new(false),
+            layout_watch: Cell::new(false),
+            layout_seen: Cell::new(0),
         }
     }
 

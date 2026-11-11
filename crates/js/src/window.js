@@ -449,13 +449,17 @@
   const screen = new Screen(KEY);
 
   // Scrolling. Position is tracked so pages that read it after scrolling
-  // see it move; there is no upper bound because the document counts as
-  // tall enough. A `scroll` event is queued once per change, at
-  // internals.scrollTarget() (the window until the DOM provides document).
+  // see it move. In the default layout there is no upper bound, because the
+  // document counts as tall enough; the DOM sets internals.scrollLimit() to
+  // [maxX, maxY] when it lays elements out. A `scroll` event is queued once
+  // per change, at internals.scrollTarget() (the window until the DOM
+  // provides document), and internals.scrolled() is told of every change.
   let scrollX = 0;
   let scrollY = 0;
   let scrollEventQueued = false;
   internals.scrollTarget = () => globalThis;
+  internals.scrollLimit = () => null;
+  internals.scrolled = () => {};
 
   function scrollCoordinate(value, fallback) {
     if (value === undefined) return fallback;
@@ -464,11 +468,17 @@
   }
 
   function scrollWindow(x, y) {
+    const limit = internals.scrollLimit();
+    if (limit !== null) {
+      x = Math.min(x, limit[0]);
+      y = Math.min(y, limit[1]);
+    }
     x = Math.max(0, x);
     y = Math.max(0, y);
     if (x === scrollX && y === scrollY) return;
     scrollX = x;
     scrollY = y;
+    internals.scrolled();
     if (!scrollEventQueued) {
       scrollEventQueued = true;
       queueTask(() => {

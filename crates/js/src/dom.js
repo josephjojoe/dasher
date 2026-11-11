@@ -1283,31 +1283,106 @@
   }
 
   // ---------------------------------------------------------------------
-  // Geometry. Nothing is laid out: every rendered element is a box at the
-  // top left of the viewport, as wide as the viewport and one line tall, so
-  // anything gated on visibility counts as visible and in view. The root
-  // element is as tall as the content (a line per element), at least the
-  // viewport. Replace internals.elementBox to change this.
+  // Geometry. Nothing is laid out (see LayoutMode in window.rs): every
+  // rendered element is a box as wide as the viewport, hidden ones are
+  // empty. In the default 'inView' layout each box is one 20px line at the
+  // top of the viewport, so anything gated on visibility counts as visible
+  // and in view. In the 'scrolled' layout the elements under <body> are
+  // stacked in document order, a line each, every element spanning its
+  // descendants (N.layoutLines), and boxes move as the page scrolls. Either
+  // way the root element is as tall as the content, at least the viewport.
+  //
+  // internals.elementBox gives an element's [x, y, width, height] in
+  // document coordinates; replace it to change all of this.
 
+  const LINE = 20;
+  const SCROLLED = env.layout === 'scrolled';
   const ROOT_BOX = { version: -1, height: 0 };
 
+  function rootHeight() {
+    const v = N.version();
+    if (ROOT_BOX.version !== v) {
+      ROOT_BOX.version = v;
+      let lines;
+      if (SCROLLED) {
+        const body = N.docPart(2);
+        lines = body === null ? 0 : N.layoutLines([body])[1];
+      } else {
+        lines = N.count(documentNode, 'body *');
+      }
+      ROOT_BOX.height = Math.max(env.height, lines * LINE);
+    }
+    return ROOT_BOX.height;
+  }
+
+  function rendered(el) {
+    return N.isConnected(el) && N.matches(el, ':visible');
+  }
+
+  // Where an element sits in the stacked layout, as [y, height] in
+  // document coordinates, or null if it is not rendered under <body>.
+  function stackedBox(el) {
+    if (!rendered(el)) return null;
+    const lines = N.layoutLines([el]);
+    return lines[0] < 0 ? null : [lines[0] * LINE, lines[1] * LINE];
+  }
+
   function defaultElementBox(el) {
-    if (!N.matches(el, ':visible') || !N.isConnected(el)) return [0, 0, 0, 0];
+    if (!rendered(el)) return [0, 0, 0, 0];
     const name = N.elementName(el);
     if (name[1] === HTML_NS && (name[0] === 'html' || name[0] === 'body')) {
-      const v = N.version();
-      if (ROOT_BOX.version !== v) {
-        ROOT_BOX.version = v;
-        ROOT_BOX.height = Math.max(env.height, N.count(documentNode, 'body *') * 20);
-      }
-      return [0, 0, env.width, ROOT_BOX.height];
+      return [0, 0, env.width, rootHeight()];
     }
-    return [0, 0, env.width, 20];
+    if (SCROLLED) {
+      const stacked = stackedBox(el);
+      if (stacked !== null) return [0, stacked[0], env.width, stacked[1]];
+    }
+    return [0, 0, env.width, LINE];
   }
   internals.elementBox = defaultElementBox;
+  if (SCROLLED) {
+    internals.scrollLimit = () => [0, Math.max(0, rootHeight() - env.height)];
+  }
 
   function box(el) {
     return internals.elementBox(el);
+  }
+
+  // An element's box relative to the viewport, as getBoundingClientRect()
+  // reports it. In the 'inView' layout boxes stay put when scrolling.
+  function clientBox(el) {
+    const b = box(el);
+    if (!SCROLLED || (b[2] === 0 && b[3] === 0)) return b;
+    const pos = internals.scrollPosition();
+    return [b[0] - pos[0], b[1] - pos[1], b[2], b[3]];
+  }
+
+  // Scrolls the window to bring el into view, in either layout, so pages
+  // that scroll to an element see the position move and get scroll events.
+  function scrollIntoView(el, block, ifNeeded) {
+    const stacked = stackedBox(el);
+    if (stacked === null) return;
+    const [y, height] = stacked;
+    const pos = internals.scrollPosition();
+    const viewport = env.height;
+    const inView = y >= pos[1] && y + height <= pos[1] + viewport;
+    if (ifNeeded && (inView || !SCROLLED)) return;
+    let top;
+    switch (block) {
+      case 'end':
+        top = y + height - viewport;
+        break;
+      case 'center':
+        top = y + height / 2 - viewport / 2;
+        break;
+      case 'nearest':
+        if (inView) return;
+        top = y < pos[1] ? y : y + height - viewport;
+        break;
+      default:
+        top = y;
+    }
+    internals.scrollTo(pos[0], Math.max(0, top));
   }
 
   class DOMRectReadOnly {
@@ -1385,6 +1460,7 @@
     if (s.scrollLeft === x && s.scrollTop === y) return;
     s.scrollLeft = x;
     s.scrollTop = y;
+    internals.scrolled();
     if (!s.scrollQueued) {
       s.scrollQueued = true;
       queueTask(() => {
@@ -1603,11 +1679,11 @@
       return null;
     }
     getBoundingClientRect() {
-      const b = box(this);
+      const b = clientBox(this);
       return new DOMRect(b[0], b[1], b[2], b[3]);
     }
     getClientRects() {
-      const b = box(this);
+      const b = clientBox(this);
       return new DOMRectList(KEY, b[2] === 0 && b[3] === 0 ? [] : [new DOMRect(b[0], b[1], b[2], b[3])]);
     }
     checkVisibility() {
@@ -1644,8 +1720,15 @@
     scrollBy(...args) {
       scrollArgs(this, args, true);
     }
-    scrollIntoView() {}
-    scrollIntoViewIfNeeded() {}
+    scrollIntoView(arg) {
+      let block = 'start';
+      if (arg === false) block = 'end';
+      else if (arg !== null && typeof arg === 'object' && arg.block !== undefined) block = str(arg.block);
+      scrollIntoView(this, block, false);
+    }
+    scrollIntoViewIfNeeded(center = true) {
+      scrollIntoView(this, center ? 'center' : 'nearest', true);
+    }
     attachShadow(init) {
       void init;
       throw domException('NotSupportedError', 'Shadow DOM is not supported.');
@@ -3923,6 +4006,15 @@
       base.href = parts === undefined ? url : parts[internals.URL_PARTS.HREF];
     }
     return base.href;
+  };
+
+  // For IntersectionObserver.
+  internals.geometry = {
+    scrolled: SCROLLED,
+    rendered,
+    clientBox,
+    isElement: (value) => value instanceof Element,
+    contains: (a, b) => N.contains(a, b),
   };
 
   Object.assign(internals, {

@@ -256,6 +256,7 @@ impl JsRuntime {
             && state.timers.borrow().is_empty()
             && state.frames.borrow().pending.is_empty()
             && !self.has_pending_microtasks()
+            && !self.shared().dom.layout_changed()
     }
 
     /// Runs everything that is runnable at the current page time (queued
@@ -309,8 +310,15 @@ impl JsRuntime {
         if state.next_frame().is_some_and(|due| due <= now) {
             self.run_frame(state.frame_at(now));
         } else {
-            let Some(task) = state.tasks.borrow_mut().pop_front() else {
-                return Ok(false);
+            let task = state.tasks.borrow_mut().pop_front();
+            let Some(task) = task else {
+                // The queue has drained: let layout observers catch up with
+                // the tree, as a browser's rendering step would.
+                if !self.update_layout() {
+                    return Ok(false);
+                }
+                self.check_stop()?;
+                return Ok(true);
             };
             match task {
                 Queued::Timer(id) => self.run_timer(id),
