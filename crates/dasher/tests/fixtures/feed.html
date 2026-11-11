@@ -1,0 +1,21 @@
+<!doctype html>
+<title>Feed</title>
+<div id="feed"><article>post 0</article></div>
+<script>
+  // Loads the next page when the reader nears the bottom.
+  let page = 0;
+  let loading = false;
+  addEventListener('scroll', async () => {
+    const root = document.scrollingElement;
+    if (loading || window.scrollY + innerHeight < root.scrollHeight - 100) return;
+    loading = true;
+    page += 1;
+    const posts = await (await fetch('/api/feed?page=' + page)).json();
+    for (const text of posts) {
+      const article = document.createElement('article');
+      article.textContent = text;
+      document.getElementById('feed').appendChild(article);
+    }
+    loading = false;
+  });
+</script>
