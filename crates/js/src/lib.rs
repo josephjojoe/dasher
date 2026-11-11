@@ -146,6 +146,9 @@
 //! `subtree`, `attributeFilter` and old values) delivered in a microtask.
 //! Changes the host makes through
 //! [`with_document_mut`](JsRuntime::with_document_mut) are not observed.
+//! The same changes, when made to nodes in the document, are counted for
+//! the host as [`DomActivity`] (see [`JsRuntime::dom_activity`]), so the
+//! page layer can tell when a page has stopped changing.
 //!
 //! Script elements that a script inserts into the document run if they are
 //! inline classic scripts, unless the page loader takes them over through
@@ -237,6 +240,7 @@ mod window;
 
 pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
+pub use dom::DomActivity;
 pub use error::{ErrorKind, ScriptError};
 pub use event_loop::{DEFAULT_FRAME_INTERVAL, LoopHandle, Stopped, Task};
 pub use glue::precompile;

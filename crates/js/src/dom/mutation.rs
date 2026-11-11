@@ -9,6 +9,9 @@
 //! borrow is released. The hook picks the interested observers and queues
 //! the records for them. While no node is observed, nothing is collected.
 //!
+//! The same reports, for nodes in the document, are counted as
+//! [`DomActivity`](super::DomActivity) for the page layer.
+//!
 //! Queued records hold node ids, so no tree is released from the arena
 //! while records are queued (see [`DomState::sweep`](super::DomState)).
 //! Delivering wraps every node a record names, which keeps it alive from
@@ -67,17 +70,25 @@ impl Record {
 }
 
 impl DomState {
-    /// The observed inclusive ancestors of `target`, nearest first, or
-    /// `None` if no observer can be interested in a change to it.
+    /// Counts a change to `target` as activity if it is in the document,
+    /// and returns the observed inclusive ancestors of `target`, nearest
+    /// first, or `None` if no observer can be interested in it.
     fn interest(&self, doc: &Document, target: NodeId) -> Option<Vec<NodeId>> {
         let observed = self.observed.borrow();
-        if observed.is_empty() {
-            return None;
+        let mut found = Vec::new();
+        let mut top = target;
+        for n in std::iter::once(target).chain(doc.ancestors(target)) {
+            if !observed.is_empty() && observed.contains(&n) {
+                found.push(n);
+            }
+            top = n;
         }
-        let found: Vec<NodeId> = std::iter::once(target)
-            .chain(doc.ancestors(target))
-            .filter(|n| observed.contains(n))
-            .collect();
+        if top == doc.root() {
+            let mut activity = self.activity.get();
+            activity.mutations += 1;
+            activity.last_mutation = Some(self.clock.now());
+            self.activity.set(activity);
+        }
         (!found.is_empty()).then_some(found)
     }
 

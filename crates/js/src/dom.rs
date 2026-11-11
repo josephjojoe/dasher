@@ -33,7 +33,7 @@
 //! mutation methods, which keep the wrapper groups in step with the trees
 //! and bump the version that live collections use to notice changes. They
 //! also report each change for `MutationObserver` (see the `mutation`
-//! module).
+//! module) and count it as [`DomActivity`].
 
 mod collection;
 mod inner_text;
@@ -44,15 +44,35 @@ mod wrapper;
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Duration;
 
 use dasher_css::SelectorList;
 use dasher_dom::{Document, NodeId};
 use rquickjs::{Ctx, Function, Object, qjs};
 
+use crate::clock::Clock;
 use crate::runtime::{JsRuntime, Shared};
 
 /// How many parsed selectors are kept for reuse.
 const SELECTOR_CACHE_SIZE: usize = 64;
+
+/// How busy scripts have been changing the document, for judging when a
+/// page has settled. Read it with [`JsRuntime::dom_activity`].
+///
+/// Each change scripts make to a node in the document counts once: an
+/// insertion or removal of children (a whole `innerHTML` or
+/// `replaceChildren` counts once), an attribute set or removed, or new
+/// text data. These are the changes `MutationObserver` reports, whether or
+/// not anything observes them. Changes to detached nodes, such as a subtree
+/// being built before it is inserted, do not count until it is inserted,
+/// and neither do changes the host makes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DomActivity {
+    /// How many changes scripts have made to the document so far.
+    pub mutations: u64,
+    /// The page time (see [`JsRuntime::now`]) of the latest one.
+    pub last_mutation: Option<Duration>,
+}
 
 /// The page's document and the bookkeeping that ties it to JS.
 pub(crate) struct DomState {
@@ -72,10 +92,12 @@ pub(crate) struct DomState {
     observed: RefCell<HashSet<NodeId>>,
     /// Mutation records waiting to be delivered to JS.
     pending: RefCell<Vec<mutation::Record>>,
+    activity: Cell<DomActivity>,
+    clock: Rc<Clock>,
 }
 
 impl DomState {
-    pub(crate) fn new(doc: Document) -> Self {
+    pub(crate) fn new(doc: Document, clock: Rc<Clock>) -> Self {
         Self {
             doc: RefCell::new(doc),
             wrappers: RefCell::default(),
@@ -84,6 +106,8 @@ impl DomState {
             selectors: RefCell::default(),
             observed: RefCell::default(),
             pending: RefCell::default(),
+            activity: Cell::default(),
+            clock,
         }
     }
 
@@ -229,6 +253,12 @@ pub(crate) fn install<'js>(
 }
 
 impl JsRuntime {
+    /// How much scripts have changed the document so far, and when they
+    /// last did, for telling when a page has gone quiet.
+    pub fn dom_activity(&self) -> DomActivity {
+        self.shared().dom.activity.get()
+    }
+
     /// Runs `f` with read access to the page's document.
     ///
     /// # Panics
