@@ -1,0 +1,8 @@
+{
+  "items": [
+    { "sku": "A-100", "name": "Espresso Machine", "price": 24999, "tags": ["kitchen", "coffee"] },
+    { "sku": "A-101", "name": "Burr Grinder", "price": 8999, "tags": ["coffee"] },
+    { "sku": "A-102", "name": "Milk Jug", "price": 1499, "tags": [] }
+  ],
+  "next": "/compat/react-spa/api/products-2.json"
+}

@@ -1,0 +1,1 @@
+import{d as o,h as c,u as t}from"./vendor-2dnIE_mj.js";function i(){const[e,m]=o([]);return c(()=>{fetch(new URL("/compat/vite/api/comments.json",location.origin)).then(n=>n.json()).then(n=>m(n.comments))},[]),t("section",{id:"comments",children:[t("h2",{children:"Comments"}),e.map(n=>t("p",{class:"comment",children:n}))]})}export{i as default};

@@ -1,0 +1,6 @@
+{
+  "reviews": [
+    { "id": 1, "author": "Grace", "text": "Clear and useful." },
+    { "id": 2, "author": "Alan", "text": "Worked on the first try." }
+  ]
+}

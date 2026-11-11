@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job board</title>
+  <style>[v-cloak] { display: none; }</style>
+  <script src="vendor/vue.global.prod.js"></script>
+  <script src="vendor/axios.min.js"></script>
+</head>
+<body>
+  <!-- An in-DOM template compiled at runtime, as with Vue from a CDN. -->
+  <div id="app" v-cloak>
+    <h1>{{ title }}</h1>
+    <p class="summary" v-if="loaded">{{ openJobs.length }} open of {{ jobs.length }} jobs</p>
+    <p class="loading" v-else>Loading jobs…</p>
+    <label>
+      Team
+      <select v-model="team">
+        <option value="">All</option>
+        <option v-for="t in teams" :key="t" :value="t">{{ t }}</option>
+      </select>
+    </label>
+    <ul id="jobs">
+      <job-card v-for="job in filtered" :key="job.id" :job="job" @apply="apply"></job-card>
+    </ul>
+    <p id="applied" v-show="applied.length">Applied to: {{ applied.join(', ') }}</p>
+    <footer><slot-demo>Posted by <em>{{ company }}</em></slot-demo></footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
