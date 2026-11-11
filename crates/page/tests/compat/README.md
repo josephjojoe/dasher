@@ -13,6 +13,7 @@ uncaught error or console error.
 | `vue` | `/compat/vue/` | Vue 3's global build compiling an in-DOM template at runtime, components with string templates, `v-model`, axios (XHR) |
 | `vite` | `/compat/vite/` | A Vite 6 production build of a Preact app: module scripts, `modulepreload`, a vendor chunk, a dynamically imported route chunk with its own CSS |
 | `jquery` | `/compat/jquery/` | jQuery 3.7.1: `$.getJSON` with a serialized form, `.load()` of a page fragment, JSONP, a POST with `$.ajax`, delegated events |
+| `lit` | `/compat/lit/` | Lit 3 web components rendering into shadow roots: reactive properties, `static styles`, `repeat`, slots, reflected attributes, a composed event from a nested component's shadow tree, data fetched after load; a plain custom element rewriting its own text; a server-rendered declarative shadow root that its component hydrates |
 | `router` | `/compat/router/` | React Router 7's data router with history routing: deep links answered with the SPA's one document, loaders, `<Link>` pushes, `popstate`, search params, a not-found route |
 
 The built output in `../fixtures/compat` is committed, so the tests need

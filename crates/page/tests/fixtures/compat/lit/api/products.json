@@ -1,0 +1,5 @@
+[
+  { "sku": "K-1", "name": "Kettle", "price": 25, "tags": ["kitchen"] },
+  { "sku": "T-2", "name": "Toaster", "price": 40, "tags": ["kitchen", "breakfast"] },
+  { "sku": "L-3", "name": "Desk Lamp", "price": 32.5, "tags": ["office"] }
+]

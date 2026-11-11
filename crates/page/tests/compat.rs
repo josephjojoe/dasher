@@ -37,6 +37,7 @@ fn server() -> FixtureServer {
         .path_latency("/compat/vite/api/stories.json", MS(150))
         .path_latency("/compat/jquery/api/listings.json", MS(150))
         .path_latency("/compat/router/api/items/2.json", MS(150))
+        .path_latency("/compat/lit/api/products.json", MS(150))
         // Clean URLs, as the static host of a Next.js export serves them.
         .route("/compat/next/about", page_file("next/about.html"))
         .route("/compat/next/legacy", page_file("next/legacy.html"))
@@ -484,4 +485,87 @@ async fn history_routing_renders_deep_links_and_follows_navigation() {
     // Only the first document was loaded from the server.
     assert_eq!(server.request_count_for("/compat/router/items/2"), 1);
     assert_eq!(server.request_count_for("/compat/router/assets/app.js"), 1);
+}
+
+#[tokio::test]
+async fn lit_components_render_into_shadow_roots() {
+    let server = server();
+    let mut page = open(&server, "/compat/lit/").await;
+    let html = page.html();
+    assert_contains(
+        &html,
+        &[
+            // Lit renders the app into its shadow root, which the page's
+            // HTML carries as declarative shadow DOM, around the light DOM
+            // it slots in.
+            r#"<shop-app src="/compat/lit/api/products.json"><template shadowrootmode="open">"#,
+            r#"<slot name="title"></slot>"#,
+            r#"<cart-badge count="0"><template shadowrootmode="open">"#,
+            // (Lit marks its bindings with comments, as it does in browsers.)
+            r#"<p class="count"><!--?lit$"#,
+            "3 products</p>",
+            "<h1 slot=\"title\">Lit Shop</h1>",
+            // Each card is a component of its own, with its own shadow tree.
+            r#"<h2 part="name">"#,
+            "Kettle",
+            "$25.00",
+            "Desk Lamp",
+            "$32.50",
+            "breakfast</li>",
+            // The plain custom element rewrote its text.
+            r#"<relative-time datetime="2026-03-14T12:00:00Z" title="2026-03-14T12:00:00.000Z">Mar 14, 2026</relative-time>"#,
+            // The server-rendered banner was hydrated, not replaced.
+            r#"<promo-banner><template shadowrootmode="open"><strong data-hydrated="">Spring sale</strong> <slot></slot></template>Ends Friday</promo-banner>"#,
+        ],
+    );
+    assert_lacks(&html, &["Loading…"]);
+    // Scripts see what they would in a browser: the shadow trees are not
+    // in the light DOM.
+    assert_eq!(
+        json(
+            &page,
+            "[document.querySelectorAll('product-card').length, \
+              document.querySelector('shop-app').shadowRoot.querySelectorAll('product-card').length, \
+              customElements.get('shop-app').name.length > 0]"
+        ),
+        "[0,3,true]"
+    );
+
+    // Clicking a button inside a card's shadow root sends a composed event
+    // that the app hears, re-rendering the badge and reflecting the card's
+    // state into an attribute.
+    run(
+        &page,
+        "const app = document.querySelector('shop-app').shadowRoot; \
+         app.querySelectorAll('product-card')[1].shadowRoot.querySelector('button').click();",
+    );
+    settle(&mut page).await;
+    let html = page.html();
+    assert_contains(
+        &html,
+        &[
+            r#"<cart-badge count="1">"#,
+            "Cart: <b>",
+            r#"<p class="cart">In cart: "#,
+            "T-2</p>",
+            r#"<product-card added=""><template shadowrootmode="open">"#,
+            "Added</button>",
+        ],
+    );
+
+    // Typing in the filter, inside the shadow root, narrows the list.
+    run(
+        &page,
+        "const input = document.querySelector('shop-app').shadowRoot.querySelector('input'); \
+         input.value = 'toa'; input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));",
+    );
+    settle(&mut page).await;
+    assert_eq!(
+        json(
+            &page,
+            "[...document.querySelector('shop-app').shadowRoot.querySelectorAll('product-card')] \
+               .map((c) => c.shadowRoot.querySelector('h2').textContent)"
+        ),
+        r#"["Toaster"]"#
+    );
 }

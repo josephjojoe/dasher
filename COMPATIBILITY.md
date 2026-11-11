@@ -3,7 +3,7 @@
 dasher runs real sites' JavaScript well enough for scraping: the
 compatibility suite (`crates/page/tests/compat.rs`, with the apps described in
 `crates/page/tests/compat/README.md`) loads production builds of React,
-Next.js (App and Pages Router), Vue, Vite, jQuery and React Router and checks
+Next.js (App and Pages Router), Vue, Vite, jQuery, React Router and Lit and checks
 the content they render.
 
 Some APIs are left out on purpose (see the project README's non-goals), some
@@ -11,14 +11,22 @@ are harmless stand-ins (every one is listed at the top of
 `crates/js/src/stubs.js`), and some are simply not there yet. This is the
 short list of known gaps a page may hit.
 
+Web components work: custom elements are defined, constructed, upgraded
+and get their lifecycle callbacks, and shadow roots (including declarative
+ones from the markup) hold their content. Shadow trees are part of the
+scraped output: `page.html()` / `content()` writes each one as declarative
+shadow DOM (`<template shadowrootmode="open">` first in its host), and the
+Rust selector helpers look into shadow trees. Scripts keep the browser's
+view, where `querySelector` and `innerHTML` stop at shadow roots.
+
 ## Not supported
 
 | API | What pages see |
 | --- | --- |
-| Custom elements (`customElements.define`, upgrades, lifecycle callbacks) | `customElements` is undefined; custom tags stay plain `HTMLElement`s |
-| Slots and event retargeting in shadow DOM | `attachShadow` works, but slotted nodes are never assigned and events crossing a shadow boundary keep their inner target |
-| Declarative shadow DOM (`<template shadowrootmode>`) | Stays an ordinary `<template>` |
-| Shadow trees in the output | `page.html()` does not include shadow root contents |
+| `slotchange` events | Never fire; `assignedNodes()` and `assignedSlot` are always current |
+| `adoptedCallback`, scoped custom element registries | `adoptedCallback` never runs (there is one document); `new CustomElementRegistry()` throws |
+| Form-associated custom elements | `attachInternals()` works, but every control counts as valid and its value is never submitted |
+| `:defined`, `:host`, `::part()`, `::slotted()` in selectors | `:defined` matches every element; the shadow-scoped ones never match |
 | `DOMParser`, `XMLSerializer`, XML documents, `responseXML` | `DOMParser` is undefined; `document.implementation.createHTMLDocument()` is the only way to make a second document |
 | `document.evaluate` / XPath | Undefined |
 | `Range` constructor | Undefined (`document.createRange()` exists) |

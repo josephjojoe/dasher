@@ -10,6 +10,7 @@
     "axios": "1",
     "esbuild": "0.25",
     "jquery": "3.7.1",
+    "lit": "^3.3.3",
     "next": "16",
     "preact": "10",
     "react": "19",

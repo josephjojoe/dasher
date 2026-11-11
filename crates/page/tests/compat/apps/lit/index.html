@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lit Shop</title>
+    <script type="module" src="/compat/lit/assets/app.js"></script>
+  </head>
+  <body>
+    <shop-app src="/compat/lit/api/products.json">
+      <h1 slot="title">Lit Shop</h1>
+      <p>Prices include VAT.</p>
+    </shop-app>
+    <footer>Updated <relative-time datetime="2026-03-14T12:00:00Z">on 14 March</relative-time></footer>
+    <!-- Server-rendered, as Lit SSR emits it: the shadow root is already in the markup. -->
+    <promo-banner><template shadowrootmode="open"><strong>Spring sale</strong> <slot></slot></template>Ends Friday</promo-banner>
+  </body>
+</html>

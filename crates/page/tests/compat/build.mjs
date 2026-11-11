@@ -111,3 +111,18 @@ for (const app of ["react-spa", "router"]) {
     },
   });
 }
+
+// Lit web components: shadow DOM rendering, slots, composed events,
+// reflected attributes, a plain custom element and declarative shadow DOM.
+{
+  const app = "lit";
+  const dir = await fresh(app);
+  await copyStatic(app, dir);
+  await cp(join(apps, app, "index.html"), join(dir, "index.html"));
+  await esbuild.build({
+    ...bundleOptions,
+    format: "esm",
+    entryPoints: [join(apps, app, "src", "main.js")],
+    outfile: join(dir, "assets", "app.js"),
+  });
+}
