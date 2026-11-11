@@ -239,6 +239,7 @@ fn settle_name(outcome: SettleOutcome) -> &'static str {
         SettleOutcome::TimedOut => "timed_out",
         SettleOutcome::NavigationRequested => "navigation_requested",
         SettleOutcome::Interrupted => "interrupted",
+        SettleOutcome::LimitExceeded(_) => "limit_exceeded",
     }
 }
 
@@ -249,6 +250,7 @@ fn scroll_json(report: &AutoScrollReport) -> JsonValue {
         AutoScrollStop::TimedOut => "timed_out",
         AutoScrollStop::NavigationRequested => "navigation_requested",
         AutoScrollStop::Interrupted => "interrupted",
+        AutoScrollStop::LimitExceeded(_) => "limit_exceeded",
     };
     json!({
         "scrolls": report.scrolls,

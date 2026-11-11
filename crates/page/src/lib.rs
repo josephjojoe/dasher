@@ -66,6 +66,13 @@
 //! `http(s)` URLs are ignored. [`PageOptions::timeout`] bounds the whole
 //! load; a page that runs out of time is returned as far as it got.
 //!
+//! A page that goes over a resource limit while loading (it fills its JS
+//! heap, or it or its scripts build more DOM nodes than
+//! [`RuntimeOptions::max_dom_nodes`](dasher_js::RuntimeOptions::max_dom_nodes)
+//! allows) is dropped, and loading fails with [`LoadError::LimitExceeded`].
+//! Later, [`Page::settle`], [`Page::auto_scroll`] and [`Page::run`] report
+//! it as their outcome; the page runs no more JS after that.
+//!
 //! After loading, [`Page::run`] keeps the event loop going (still loading
 //! inserted scripts), and [`Page::follow_navigation`] follows navigations
 //! requested later.

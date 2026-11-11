@@ -91,6 +91,8 @@ pub enum AutoScrollStop {
     NavigationRequested,
     /// An [`InterruptHandle`](dasher_js::InterruptHandle) stopped the page.
     Interrupted,
+    /// The page went over a resource limit and can run no more.
+    LimitExceeded(dasher_js::ResourceLimit),
 }
 
 /// What [`Page::auto_scroll`] did.
@@ -149,6 +151,10 @@ impl Page {
                 }
                 SettleOutcome::Interrupted => {
                     report.stopped = AutoScrollStop::Interrupted;
+                    return Ok(report);
+                }
+                SettleOutcome::LimitExceeded(limit) => {
+                    report.stopped = AutoScrollStop::LimitExceeded(limit);
                     return Ok(report);
                 }
             }

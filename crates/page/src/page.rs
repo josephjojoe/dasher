@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep};
 use dasher_js::{
-    DocumentInfo, DocumentWrite, EventTarget, JsRuntime, PendingOperation, ReadyState, RunLimits,
-    RunOutcome, RuntimeOptions, ScriptError, WindowOptions,
+    DocumentInfo, DocumentWrite, EventTarget, JsRuntime, PendingOperation, ReadyState,
+    ResourceLimit, RunLimits, RunOutcome, RuntimeOptions, ScriptError, WindowOptions,
 };
 use dasher_net::{HeaderMap, Request, ResourceType, Response, Session, StatusCode, Url};
 use encoding_rs::Encoding;
@@ -60,6 +60,11 @@ pub enum LoadError {
     Timeout,
     /// The page's JS runtime could not be created.
     Runtime(ScriptError),
+    /// The page went over a resource limit while loading: it filled its
+    /// JS heap or built too many DOM nodes (see
+    /// [`RuntimeOptions::memory_limit`] and
+    /// [`RuntimeOptions::max_dom_nodes`]). The page was dropped.
+    LimitExceeded(ResourceLimit),
 }
 
 impl fmt::Display for LoadError {
@@ -69,6 +74,7 @@ impl fmt::Display for LoadError {
             Self::Network(e) => write!(f, "loading the document failed: {e}"),
             Self::Timeout => f.write_str("timed out waiting for the document"),
             Self::Runtime(e) => write!(f, "creating the JS runtime failed: {e}"),
+            Self::LimitExceeded(limit) => write!(f, "loading stopped: {limit}"),
         }
     }
 }
@@ -90,6 +96,8 @@ pub(crate) enum Stop {
     Navigate,
     /// The time limit ran out or the runtime was interrupted.
     Halted,
+    /// The page went over a resource limit and can run no more.
+    Limit(ResourceLimit),
 }
 
 /// A live page: a document, its JS runtime and the session they load
@@ -203,6 +211,7 @@ impl Page {
             // A navigation request stays pending for `navigate`.
             Ok(()) | Err(Stop::Navigate) => {}
             Err(Stop::Halted) => page.timed_out = true,
+            Err(Stop::Limit(limit)) => return Err(LoadError::LimitExceeded(limit)),
         }
         page.js.set_document_write(DocumentWrite::Insert);
         page.js.hold_detached_nodes(false);
@@ -330,6 +339,7 @@ impl Page {
             Ok(_) => wait.outcome.unwrap_or(RunOutcome::Idle),
             Err(Stop::Navigate) => RunOutcome::NavigationRequested,
             Err(Stop::Halted) => RunOutcome::DeadlineExceeded,
+            Err(Stop::Limit(limit)) => RunOutcome::LimitExceeded(limit),
         }
     }
 
@@ -386,7 +396,12 @@ impl Page {
         parser.push(&charset::decode_chunk(&mut decoder, &head, eof));
         drop(head);
         loop {
-            match self.js.with_document_mut(|doc| parser.resume(doc)) {
+            let step = self.js.with_document_mut(|doc| parser.resume(doc));
+            // Parsing alone can build too many nodes.
+            if let Some(limit) = self.js.limit_exceeded() {
+                return Err(Stop::Limit(limit));
+            }
+            match step {
                 ParseStep::Script(script) => {
                     self.parser_script(script, &mut parser, &mut wait).await?
                 }
@@ -658,9 +673,13 @@ impl Page {
         Url::parse(&self.js.url()).expect("the runtime keeps an absolute URL")
     }
 
-    /// Fails with [`Stop::Navigate`] if the page asked to navigate and may.
+    /// Fails with [`Stop::Limit`] if the page went over a resource limit,
+    /// else with [`Stop::Navigate`] if the page asked to navigate and may.
     /// A request past the navigation budget is dropped.
     pub(crate) fn check_navigation(&self) -> Result<(), Stop> {
+        if let Some(limit) = self.js.limit_exceeded() {
+            return Err(Stop::Limit(limit));
+        }
         if self.js.navigation_request().is_none() {
             return Ok(());
         }
@@ -726,6 +745,9 @@ impl Page {
                         if let Until::Run(_) = until {
                             wait.outcome = Some(outcome);
                             return Ok(None);
+                        }
+                        if let RunOutcome::LimitExceeded(limit) = outcome {
+                            return Err(Stop::Limit(limit));
                         }
                         return Err(Stop::Halted);
                     }

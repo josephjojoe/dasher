@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use dasher_css::SelectorList;
-use dasher_js::{ClockMode, RunLimits, RunOutcome};
+use dasher_js::{ClockMode, ResourceLimit, RunLimits, RunOutcome};
 
 use crate::page::{Page, Stop, Until, Wait};
 
@@ -107,6 +107,8 @@ pub enum SettleOutcome {
     NavigationRequested,
     /// An [`InterruptHandle`](dasher_js::InterruptHandle) stopped the page.
     Interrupted,
+    /// The page went over a resource limit and can run no more.
+    LimitExceeded(ResourceLimit),
 }
 
 /// Why [`Page::settle`] could not start.
@@ -165,8 +167,10 @@ impl Page {
         let mut network_quiet_since = Some(start);
 
         loop {
-            if self.check_navigation().is_err() {
-                return SettleOutcome::NavigationRequested;
+            match self.check_navigation() {
+                Ok(()) => {}
+                Err(Stop::Limit(limit)) => return SettleOutcome::LimitExceeded(limit),
+                Err(_) => return SettleOutcome::NavigationRequested,
             }
             let now = self.js.now();
             // When a quiet period ends, if that is all that is missing.
@@ -225,12 +229,14 @@ impl Page {
             {
                 Err(Stop::Navigate) => return SettleOutcome::NavigationRequested,
                 Err(Stop::Halted) => return SettleOutcome::TimedOut,
+                Err(Stop::Limit(limit)) => return SettleOutcome::LimitExceeded(limit),
                 Ok(_) => {}
             }
             match wait.outcome {
                 Some(RunOutcome::DeadlineExceeded) => return SettleOutcome::TimedOut,
-                Some(RunOutcome::Interrupted | RunOutcome::LimitExceeded(_)) => {
-                    return SettleOutcome::Interrupted;
+                Some(RunOutcome::Interrupted) => return SettleOutcome::Interrupted,
+                Some(RunOutcome::LimitExceeded(limit)) => {
+                    return SettleOutcome::LimitExceeded(limit);
                 }
                 Some(RunOutcome::Idle) => {
                     // Nothing left to run. Let page time pass until the next
