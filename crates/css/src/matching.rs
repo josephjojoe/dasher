@@ -37,6 +37,9 @@ pub(crate) struct Context<'a> {
     /// The element `:scope` matches; `None` makes it match `:root`.
     scope: Option<NodeId>,
     quirks: bool,
+    /// Whether descendant and child combinators cross from a shadow tree
+    /// to its host, for queries that look into shadow trees.
+    deep: bool,
 }
 
 impl<'a> Context<'a> {
@@ -48,6 +51,25 @@ impl<'a> Context<'a> {
             doc,
             scope: scope.filter(|&s| doc.kind(s) != NodeKind::Document),
             quirks: doc.quirks_mode() == QuirksMode::Quirks,
+            deep: false,
+        }
+    }
+
+    /// A context whose combinators see a shadow root's host as the parent
+    /// of the shadow tree's top elements.
+    pub(crate) fn deep(doc: &'a Document, scope: Option<NodeId>) -> Self {
+        Context {
+            deep: true,
+            ..Self::new(doc, scope)
+        }
+    }
+
+    fn parent_element(&self, el: NodeId) -> Option<NodeId> {
+        let doc = self.doc;
+        match doc.parent(el) {
+            Some(p) if doc.is_element(p) => Some(p),
+            Some(p) if self.deep => doc.shadow_host(p),
+            _ => None,
         }
     }
 
@@ -80,7 +102,7 @@ impl<'a> Context<'a> {
         let mut current = el;
         loop {
             let candidate = match combinator {
-                Combinator::Child | Combinator::Descendant => self.doc.parent_element(current),
+                Combinator::Child | Combinator::Descendant => self.parent_element(current),
                 Combinator::NextSibling | Combinator::SubsequentSibling => {
                     self.prev_element_sibling(current)
                 }

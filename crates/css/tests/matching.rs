@@ -489,3 +489,31 @@ fn visible_is_decided_from_the_markup() {
     assert!(select(&doc, "script:visible, head:visible, title:visible").is_empty());
     assert_eq!(select(&doc, "#in-hidden:not(:visible)"), ["in-hidden"]);
 }
+
+#[test]
+fn deep_queries_look_into_shadow_trees() {
+    let doc = Document::parse(
+        "<main><my-card id=card><template shadowrootmode=closed><h2 id=sh2>T</h2>\
+         <div class=body><x-price id=price><template shadowrootmode=open><b id=amount>9</b>\
+         </template></x-price></div></template><h2 id=light>L</h2></my-card><b id=after></b></main>",
+    );
+    let deep = |selectors: &str| {
+        let list = SelectorList::parse(selectors).unwrap();
+        labels(&doc, list.query_all_deep(&doc, doc.root()))
+    };
+    // Shadow trees come before the host's children.
+    assert_eq!(deep("h2"), ["sh2", "light"]);
+    assert_eq!(deep("b"), ["amount", "after"]);
+    // Combinators cross from a shadow tree to its host.
+    assert_eq!(deep("my-card h2"), ["sh2", "light"]);
+    assert_eq!(deep("my-card > h2"), ["sh2", "light"]);
+    assert_eq!(deep("my-card .body > x-price > b"), ["amount"]);
+    assert_eq!(deep("main b"), ["amount", "after"]);
+    // Sibling combinators stay within one tree.
+    assert_eq!(deep("h2 + div, h2 ~ b"), ["div"]);
+    // The usual queries never look inside.
+    assert_eq!(select(&doc, "h2, #amount"), ["light"]);
+    let card = by_id(&doc, "card");
+    let list = SelectorList::parse("b").unwrap();
+    assert_eq!(labels(&doc, list.query_first_deep(&doc, card)), ["amount"]);
+}

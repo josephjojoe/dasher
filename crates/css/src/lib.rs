@@ -74,6 +74,9 @@
 //!   inline `display: none` or `visibility: hidden`, closed `<dialog>`s and
 //!   `<details>`, `<input type=hidden>`).
 //!
+//! [`SelectorList::query_all_deep`] also looks into shadow trees, for the
+//! host's own queries; a page's `querySelector` never does.
+//!
 //! Invalid selectors fail with a [`SelectorError`] whose
 //! [`name`](SelectorError::name) is `"SyntaxError"`, wherever a browser would
 //! throw one. Like the CSS parser, the tokenizer closes blocks and strings
@@ -85,7 +88,7 @@ mod parser;
 mod selector;
 mod tokenizer;
 
-use dasher_dom::{Descendants, Document, NodeId};
+use dasher_dom::{Descendants, Document, NodeId, ShadowIncluding};
 
 pub use error::SelectorError;
 pub use selector::SelectorList;
@@ -154,6 +157,48 @@ impl SelectorList {
             list: self,
             nodes: doc.descendants(root),
         }
+    }
+
+    /// Like [`query_first`](Self::query_first), but also looking inside
+    /// shadow trees, open or closed: see [`query_all_deep`](Self::query_all_deep).
+    pub fn query_first_deep(&self, doc: &Document, root: NodeId) -> Option<NodeId> {
+        self.query_all_deep(doc, root).next()
+    }
+
+    /// Like [`query_all`](Self::query_all), but also looking inside shadow
+    /// trees, open or closed, as a scraper wants and as Playwright's CSS
+    /// engine does. Elements come in shadow-including tree order (a host's
+    /// shadow tree before its children), and the descendant and child
+    /// combinators cross from a shadow tree to its host, so `my-card h2`
+    /// finds an `h2` in `my-card`'s shadow tree. Pages' own
+    /// `querySelector` never looks into shadow trees.
+    pub fn query_all_deep<'a>(&'a self, doc: &'a Document, root: NodeId) -> QueryAllDeep<'a> {
+        let mut nodes = doc.shadow_including_inclusive_descendants(root);
+        nodes.next();
+        QueryAllDeep {
+            cx: Context::deep(doc, Some(root)),
+            list: self,
+            nodes,
+        }
+    }
+}
+
+/// The matches of [`SelectorList::query_all_deep`], in shadow-including
+/// tree order.
+pub struct QueryAllDeep<'a> {
+    cx: Context<'a>,
+    list: &'a SelectorList,
+    nodes: ShadowIncluding<'a>,
+}
+
+impl Iterator for QueryAllDeep<'_> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<NodeId> {
+        let doc = self.cx.doc;
+        self.nodes
+            .by_ref()
+            .find(|&n| doc.is_element(n) && self.cx.matches_list(self.list, n))
     }
 }
 
