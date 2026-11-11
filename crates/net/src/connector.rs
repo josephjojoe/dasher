@@ -12,7 +12,7 @@ use hyper::http::uri::Scheme;
 use hyper::rt::{Read, ReadBufCursor, Write};
 use hyper_rustls::{HttpsConnector, MaybeHttpsStream};
 use hyper_util::client::legacy::connect::proxy::Tunnel;
-use hyper_util::client::legacy::connect::{Connected, Connection, HttpConnector};
+use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tower_service::Service;
@@ -20,6 +20,7 @@ use url::Url;
 
 use crate::client::basic_auth;
 use crate::error::{BoxError, Error, ErrorKind, Result};
+use crate::guard::{self, GuardedHttp};
 
 /// An HTTP proxy that every request goes through.
 ///
@@ -27,6 +28,15 @@ use crate::error::{BoxError, Error, ErrorKind, Result};
 /// requests are tunnelled with `CONNECT`, so TLS still runs end to end. Only
 /// `http://` proxies are supported. Credentials in the proxy URL are sent as
 /// `Proxy-Authorization: Basic`.
+///
+/// With [`ClientBuilder::block_private_addresses`] on, the proxy decides
+/// where requests through it go, so only part of the check can be made:
+/// the proxy's own address is checked like any other, and so are target
+/// URLs whose host is a literal IP, but a host name is resolved by the
+/// proxy, out of dasher's sight. Refusing private addresses for those is
+/// up to the proxy.
+///
+/// [`ClientBuilder::block_private_addresses`]: crate::ClientBuilder::block_private_addresses
 #[derive(Clone)]
 pub struct Proxy {
     uri: Uri,
@@ -81,22 +91,22 @@ type Stream = MaybeHttpsStream<TokioIo<TcpStream>>;
 /// Makes connections for the pool.
 #[derive(Clone)]
 pub(crate) enum Connector {
-    Direct(HttpsConnector<HttpConnector>),
+    Direct(HttpsConnector<GuardedHttp>),
     Proxied(Box<Proxied>),
 }
 
 #[derive(Clone)]
 pub(crate) struct Proxied {
     /// For `https`: TLS inside a `CONNECT` tunnel.
-    tunnel: HttpsConnector<Tunnel<HttpConnector>>,
+    tunnel: HttpsConnector<Tunnel<GuardedHttp>>,
     /// For `http`: a plain connection to the proxy itself.
-    http: HttpConnector,
+    http: GuardedHttp,
     proxy: Uri,
 }
 
 impl Connector {
     pub(crate) fn new(
-        http: HttpConnector,
+        http: GuardedHttp,
         tls: rustls::ClientConfig,
         http2: bool,
         proxy: Option<&Proxy>,
@@ -210,24 +220,47 @@ impl Service<Uri> for Connector {
                     })
                 })
             }
-            Self::Proxied(proxied) if dst.scheme() == Some(&Scheme::HTTPS) => {
-                let connecting = proxied.tunnel.call(dst);
-                Box::pin(async move {
-                    Ok(Conn {
-                        stream: connecting.await?,
-                        proxied: false,
-                    })
-                })
-            }
             Self::Proxied(proxied) => {
-                let connecting = proxied.http.call(proxied.proxy.clone());
-                Box::pin(async move {
-                    Ok(Conn {
-                        stream: MaybeHttpsStream::Http(connecting.await?),
-                        proxied: true,
-                    })
-                })
+                if let Err(e) = proxied.check_target(&dst) {
+                    return Box::pin(async move { Err(e) });
+                }
+                if dst.scheme() == Some(&Scheme::HTTPS) {
+                    proxied.tunnel_to(dst)
+                } else {
+                    proxied.http_via()
+                }
             }
         }
+    }
+}
+
+impl Proxied {
+    /// The proxy connects to the target itself, so only a literal IP in
+    /// its URL can be checked here.
+    fn check_target(&self, dst: &Uri) -> Result<(), BoxError> {
+        match guard::literal_host(dst) {
+            Some(ip) => Ok(guard::check(self.http.guard(), ip)?),
+            None => Ok(()),
+        }
+    }
+
+    fn tunnel_to(&mut self, dst: Uri) -> ConnectFuture {
+        let connecting = self.tunnel.call(dst);
+        Box::pin(async move {
+            Ok(Conn {
+                stream: connecting.await?,
+                proxied: false,
+            })
+        })
+    }
+
+    fn http_via(&mut self) -> ConnectFuture {
+        let connecting = self.http.call(self.proxy.clone());
+        Box::pin(async move {
+            Ok(Conn {
+                stream: MaybeHttpsStream::Http(connecting.await?),
+                proxied: true,
+            })
+        })
     }
 }
