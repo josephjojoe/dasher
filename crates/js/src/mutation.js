@@ -148,7 +148,7 @@
       }
       // `nodes` holds weak references to the nodes observed, `transient`
       // the nodes with transient registrations.
-      this.#s = { callback, order: created++, records: [], nodes: [], transient: [] };
+      this.#s = { callback, order: created++, records: [], nodes: [], pruneAt: 16, transient: [] };
     }
 
     observe(target, options) {
@@ -190,8 +190,12 @@
         return;
       }
       register(target, { observer: this, options: opts, source: null });
-      // Forget nodes that have been collected before adding another.
-      s.nodes = s.nodes.filter((ref) => ReflectApply(WeakRefDeref, ref, []) !== undefined);
+      // Forget nodes that have been collected, whenever the list has
+      // doubled since the last time.
+      if (s.nodes.length >= s.pruneAt) {
+        s.nodes = s.nodes.filter((ref) => ReflectApply(WeakRefDeref, ref, []) !== undefined);
+        s.pruneAt = Math.max(16, s.nodes.length * 2);
+      }
       s.nodes.push(new WeakRefCtor(target));
     }
 

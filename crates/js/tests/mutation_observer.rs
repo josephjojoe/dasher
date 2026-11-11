@@ -681,3 +681,30 @@ fn records_replay_to_the_tree() {
     }
     assert!(js.take_errors().is_empty());
 }
+
+#[test]
+fn one_observer_can_watch_many_nodes() {
+    let js = page("<div id=a></div>");
+    run(
+        &js,
+        r#"
+        globalThis.count = 0;
+        const mo = new MutationObserver((rs) => { count += rs.length; });
+        const nodes = [];
+        for (let i = 0; i < 5000; i++) {
+          const d = document.createElement('div');
+          nodes.push(d);
+          mo.observe(d, { attributes: true });
+        }
+        for (const d of nodes) d.title = 'x';
+        "#,
+    );
+    js.perform_microtask_checkpoint();
+    assert_eq!(js.eval_json("count").unwrap().unwrap(), "5000");
+    run(
+        &js,
+        "mo.disconnect(); for (const d of nodes) d.title = 'y';",
+    );
+    js.perform_microtask_checkpoint();
+    assert_eq!(js.eval_json("count").unwrap().unwrap(), "5000");
+}
