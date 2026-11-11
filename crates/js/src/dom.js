@@ -31,6 +31,8 @@
   }
 
   const KEY = Symbol('dom');
+  // Set once createHTMLDocument has made a second document.
+  let otherDocuments = false;
   function illegal(key) {
     if (key !== KEY) throw new TypeError('Illegal constructor');
   }
@@ -319,7 +321,12 @@
       return shadow !== undefined && shadow.host.isConnected;
     }
     get ownerDocument() {
-      return N.nodeType(this) === 9 ? null : documentNode;
+      if (N.nodeType(this) === 9) return null;
+      if (!otherDocuments) return documentNode;
+      // Nodes in a document made by createHTMLDocument belong to it.
+      // Detached nodes are taken to belong to the page's document.
+      const root = N.rootNode(this);
+      return N.nodeType(root) === 9 ? root : documentNode;
     }
     getRootNode(options) {
       let root = N.rootNode(this);
@@ -3643,6 +3650,27 @@
   // What the page loader knows about the document (see setDocumentInfo).
   const documentInfo = { characterSet: 'UTF-8', contentType: 'text/html', referrer: '' };
 
+  // A document's document element (0), head (1), body (2) or doctype (3).
+  // Documents made by createHTMLDocument share the page's arena, as trees
+  // of their own, so their parts are found here rather than natively.
+  function docPart(doc, which) {
+    if (doc === documentNode) return N.docPart(which);
+    if (which === 3) {
+      for (let n = N.nav(doc, 1); n !== null; n = N.nav(n, 4)) if (N.nodeType(n) === 10) return n;
+      return null;
+    }
+    const root = N.nav(doc, 6);
+    if (which === 0 || root === null) return root;
+    const name = N.elementName(root);
+    if (name[1] !== HTML_NS || name[0] !== 'html') return null;
+    for (let el = N.nav(root, 6); el !== null; el = N.nav(el, 9)) {
+      const [local, ns] = N.elementName(el);
+      if (ns !== HTML_NS) continue;
+      if (which === 1 ? local === 'head' : local === 'body' || local === 'frameset') return el;
+    }
+    return null;
+  }
+
   class Document extends Node {
     constructor() {
       throw domException('NotSupportedError', 'dasher has a single document per page; new documents cannot be created.');
@@ -3651,13 +3679,13 @@
       return implementation;
     }
     get URL() {
-      return internals.documentURL();
+      return this === documentNode ? internals.documentURL() : 'about:blank';
     }
     get documentURI() {
-      return internals.documentURL();
+      return this.URL;
     }
     get location() {
-      return globalThis.location;
+      return this === documentNode ? globalThis.location : null;
     }
     set location(v) {
       globalThis.location.href = v;
@@ -3672,10 +3700,10 @@
       return documentInfo.referrer;
     }
     get cookie() {
-      return N.cookie();
+      return this === documentNode ? N.cookie() : '';
     }
     set cookie(v) {
-      N.setCookie(str(v));
+      if (this === documentNode) N.setCookie(str(v));
     }
     get lastModified() {
       const d = new Date();
@@ -3702,40 +3730,44 @@
       return documentInfo.contentType;
     }
     get doctype() {
-      return N.docPart(3);
+      return docPart(this, 3);
     }
     get documentElement() {
-      return N.docPart(0);
+      return docPart(this, 0);
     }
     get head() {
-      return N.docPart(1);
+      return docPart(this, 1);
     }
     get body() {
-      return N.docPart(2);
+      return docPart(this, 2);
     }
     set body(value) {
       if (!(value instanceof I.HTMLBodyElement) && !(value instanceof I.HTMLFrameSetElement)) {
         throw domException('HierarchyRequestError', "Failed to set the 'body' property on 'Document': The new body element is of type '" + (value && value.tagName) + "'. It must be either a 'BODY' or 'FRAMESET' element.");
       }
-      const old = N.docPart(2);
+      const old = docPart(this, 2);
       if (old === value) return;
-      const root = N.docPart(0);
+      const root = docPart(this, 0);
       if (root === null) throw domException('HierarchyRequestError', 'There is no document element.');
       if (old !== null) connected(N.replaceChild(root, value, old));
       else connected(N.insert(root, value, null));
     }
     get title() {
-      const root = N.docPart(0);
+      const root = docPart(this, 0);
       if (root !== null && N.elementName(root)[1] === SVG_NS) {
         const t = N.query(root, ':scope > title');
         return t === null ? '' : N.textContent(t);
+      }
+      if (this !== documentNode) {
+        const t = N.query(this, 'title');
+        return t === null ? '' : N.textContent(t).replace(/[\t\n\f\r ]+/g, ' ').trim();
       }
       return N.title();
     }
     set title(value) {
       let title = N.query(this, 'title');
       if (title === null) {
-        const head = N.docPart(1);
+        const head = docPart(this, 1);
         if (head === null) return;
         title = N.createElement('title');
         N.insert(head, title, null);
@@ -3743,19 +3775,19 @@
       N.setTextContent(title, str(value));
     }
     get dir() {
-      const root = N.docPart(0);
+      const root = docPart(this, 0);
       return root === null ? '' : root.dir;
     }
     set dir(v) {
-      const root = N.docPart(0);
+      const root = docPart(this, 0);
       if (root !== null) root.dir = v;
     }
     get defaultView() {
-      return globalThis;
+      return this === documentNode ? globalThis : null;
     }
     get activeElement() {
       if (focused !== null && N.isConnected(focused)) return focused;
-      return N.docPart(2) || N.docPart(0);
+      return docPart(this, 2) || docPart(this, 0);
     }
     hasFocus() {
       return true;
@@ -3801,7 +3833,7 @@
       return null;
     }
     get scrollingElement() {
-      return N.docPart(0);
+      return docPart(this, 0);
     }
     get designMode() {
       return 'off';
@@ -3958,10 +3990,10 @@
       return node;
     }
     elementFromPoint() {
-      return N.docPart(2) || N.docPart(0);
+      return docPart(this, 2) || docPart(this, 0);
     }
     elementsFromPoint() {
-      return [N.docPart(2), N.docPart(0)].filter((x) => x !== null);
+      return [docPart(this, 2), docPart(this, 0)].filter((x) => x !== null);
     }
     caretRangeFromPoint() {
       return null;
@@ -4032,8 +4064,26 @@
     createDocumentType(qualifiedName, publicId, systemId) {
       return N.createDoctype(str(qualifiedName), str(publicId), str(systemId));
     }
-    createHTMLDocument() {
-      throw domException('NotSupportedError', 'dasher has a single document per page; new documents cannot be created.');
+    // A document with no browsing context, for parsing and building markup
+    // off the page (jQuery parses HTML strings in one). It lives in the
+    // page's arena as a tree of its own: its scripts never run, it has no
+    // URL, location, cookies or window, and nodes moved between it and the
+    // page need no adopting.
+    createHTMLDocument(title = undefined) {
+      const doc = N.createDocument();
+      otherDocuments = true;
+      N.insert(doc, N.createDoctype('html', '', ''), null);
+      const html = N.createElement('html');
+      N.insert(doc, html, null);
+      const head = N.createElement('head');
+      N.insert(html, head, null);
+      if (title !== undefined) {
+        const titleElement = N.createElement('title');
+        N.insert(titleElement, N.createText(str(title)), null);
+        N.insert(head, titleElement, null);
+      }
+      N.insert(html, N.createElement('body'), null);
+      return doc;
     }
     createDocument() {
       throw domException('NotSupportedError', 'dasher has a single document per page; new documents cannot be created.');

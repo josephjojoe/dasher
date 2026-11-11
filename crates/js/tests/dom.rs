@@ -927,3 +927,97 @@ fn shadow_trees_are_freed_with_their_host() {
         nodes(&js)
     );
 }
+
+#[test]
+fn create_html_document_builds_an_inert_document() {
+    let js = page("<title>Page</title><div id=target></div>");
+    run(
+        &js,
+        r#"
+        window.doc = document.implementation.createHTMLDocument('Scratch');
+        doc.body.innerHTML = '<form></form><form></form><p id=p>parsed <img src=x.png onerror="window.ran = 1"></p><script>window.ran = 2</script>';
+        "#,
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[doc instanceof Document, doc === document, doc.nodeType, doc.title, \
+             doc.documentElement.outerHTML.slice(0, 41), doc.doctype.name, doc.body.childNodes.length, \
+             doc.head.firstChild.tagName, doc.URL, doc.defaultView, doc.location, doc.cookie]"
+        ),
+        r#"[true,false,9,"Scratch","<html><head><title>Scratch</title></head>","html",4,"TITLE","about:blank",null,null,""]"#
+    );
+    // Lookups stay inside each document.
+    assert_eq!(
+        eval(
+            &js,
+            "[doc.getElementById('p').id, document.getElementById('p'), doc.getElementById('target'), \
+             doc.querySelectorAll('form').length, doc.getElementsByTagName('p').length, \
+             document.title, doc.body.isConnected, doc.getElementById('p').ownerDocument === doc]"
+        ),
+        r#"["p",null,null,2,1,"Page",false,true]"#
+    );
+    // Nodes move into the page without adopting; nothing ran in the inert
+    // document.
+    run(
+        &js,
+        "document.getElementById('target').append(doc.getElementById('p'));",
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[document.getElementById('p').ownerDocument === document, \
+             document.querySelector('#target p').textContent, doc.body.childNodes.length, window.ran]"
+        ),
+        r#"[true,"parsed ",3,null]"#
+    );
+    // Without a title argument there is no title element.
+    assert_eq!(
+        eval(
+            &js,
+            "(() => { const d = document.implementation.createHTMLDocument(); \
+             return [d.head.childNodes.length, d.title, d.body.tagName]; })()"
+        ),
+        r#"[0,"","BODY"]"#
+    );
+    assert_eq!(
+        eval(&js, "doc.title = 'Renamed'; doc.title"),
+        json("Renamed")
+    );
+    assert_eq!(eval(&js, "document.title"), json("Page"));
+}
+
+#[test]
+fn documents_from_create_html_document_are_freed_once_unreachable() {
+    let js = page("");
+    let base = nodes(&js);
+    run(
+        &js,
+        r#"
+        for (let i = 0; i < 20; i++) {
+            const d = document.implementation.createHTMLDocument('');
+            d.body.innerHTML = '<p>x</p>'.repeat(20);
+        }
+        window.kept = document.implementation.createHTMLDocument('');
+        kept.body.innerHTML = '<p>y</p>';
+        "#,
+    );
+    js.run_gc();
+    run(
+        &js,
+        "document.body.appendChild(document.createElement('i'));",
+    );
+    let held = nodes(&js);
+    assert!(held <= base + 12, "{held} nodes, {base} at start");
+    run(&js, "delete window.kept;");
+    js.run_gc();
+    run(
+        &js,
+        "document.body.appendChild(document.createElement('i'));",
+    );
+    assert!(
+        nodes(&js) <= base + 2,
+        "{} nodes, {base} at start",
+        nodes(&js)
+    );
+}

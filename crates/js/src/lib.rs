@@ -152,6 +152,12 @@
 //! document's HTML, slots are never assigned, events are not retargeted,
 //! and `<template shadowrootmode>` stays an ordinary template.
 //!
+//! `document.implementation.createHTMLDocument()` makes a second, inert
+//! document in the page's arena for building markup off the page (jQuery
+//! parses HTML strings in one). Its scripts never run and it has no URL,
+//! window or cookies. Nodes move between it and the page freely; a
+//! detached node's `ownerDocument` is always the page's document.
+//!
 //! Geometry is synthetic, chosen so content gated on visibility or
 //! scrolling still loads; [`WindowOptions::layout`] picks how (see
 //! [`LayoutMode`]). By default every rendered element is a visible,
