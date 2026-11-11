@@ -64,3 +64,23 @@ jobs:
           file "$bin"
           "$bin" --version
           echo "dasher binary: $(stat -c %s "$bin") bytes" >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    # Guards the Dockerfile: builds the image and checks that it serves.
+    name: container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t dasher:ci .
+      - name: Smoke test
+        run: |
+          docker run --rm dasher:ci --version
+          docker run -d --name dasher -p 8080:8080 dasher:ci
+          for _ in $(seq 50); do curl -sf localhost:8080/health && break; sleep 0.2; done
+          curl -sf localhost:8080/health
+          docker stop dasher
+          test "$(docker inspect -f '{{.State.ExitCode}}' dasher)" = 0
+      - name: Report image size
+        run: |
+          size=$(docker image inspect -f '{{.Size}}' dasher:ci)
+          echo "dasher image: $size bytes" >> "$GITHUB_STEP_SUMMARY"

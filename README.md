@@ -71,8 +71,25 @@ binary (musl) in a distroless or scratch-sized container.
 | `dasher-js` | `crates/js` | QuickJS runtime, event loop and DOM bindings |
 | `dasher-page` | `crates/page` | Page lifecycle and orchestration |
 | `dasher` | `crates/dasher` | Public library API |
-| `dasher-cli` | `crates/cli` | The `dasher` command-line binary |
+| `dasher-serve` | `crates/serve` | HTTP service and AWS Lambda runtime |
+| `dasher-cli` | `crates/cli` | The `dasher` binary: CLI, `serve` and `lambda` |
 | `dasher-test-server` | `crates/test-server` | In-process HTTP fixture server for tests |
+
+## Deploying
+
+The `dasher` binary is also the service. `dasher serve` takes JSON jobs
+at `POST /scrape` (a URL, how to wait, what to extract) and answers with
+JSON, for Cloud Run or any container platform; `dasher lambda` takes the
+same jobs as an AWS Lambda custom runtime. The [`Dockerfile`](Dockerfile)
+builds a distroless image with the static binary.
+
+```sh
+docker build -t dasher . && docker run --rm -p 8080:8080 dasher
+curl -s localhost:8080/scrape -d '{"url": "https://example.com/", "extract": {"title": "h1"}}'
+```
+
+See [docs/deploy.md](docs/deploy.md) for Cloud Run and Lambda, the job
+format and sizing.
 
 ## Development
 
