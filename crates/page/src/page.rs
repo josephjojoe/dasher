@@ -427,7 +427,8 @@ impl Page {
         parser.push(&charset::decode_chunk(&mut decoder, &head, eof));
         drop(head);
         loop {
-            let step = self.js.with_document_mut(|doc| parser.resume(doc));
+            // What the parser inserts is reported to mutation observers.
+            let step = self.js.with_parser(&mut parser, |p, doc| p.resume(doc));
             // Parsing alone can build too many nodes.
             if let Some(limit) = self.js.limit_exceeded() {
                 return Err(Stop::Limit(limit));
@@ -446,7 +447,7 @@ impl Page {
                 }
             }
         }
-        self.js.with_document_mut(|doc| parser.finish(doc));
+        self.js.with_parser(&mut parser, |p, doc| p.finish(doc));
         drop(parser);
         self.js.hold_detached_nodes(false);
         self.preload_links(true);

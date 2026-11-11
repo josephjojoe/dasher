@@ -1,7 +1,7 @@
 //! MutationObserver: which changes are recorded, what the records say, and
 //! when and how they are delivered.
 
-use dasher_dom::Document;
+use dasher_dom::{Document, DocumentParser, ParseOptions, ParseStep};
 use dasher_js::{ClockMode, JsRuntime, RuntimeOptions};
 
 fn page(html: &str) -> JsRuntime {
@@ -707,4 +707,103 @@ fn one_observer_can_watch_many_nodes() {
     );
     js.perform_microtask_checkpoint();
     assert_eq!(js.eval_json("count").unwrap().unwrap(), "5000");
+}
+
+/// The log so far, emptying it.
+fn take_log(js: &JsRuntime) -> Vec<String> {
+    js.take_console();
+    run(
+        js,
+        "for (const line of log) console.log(line); log.length = 0;",
+    );
+    js.take_console().into_iter().map(|m| m.text).collect()
+}
+
+#[test]
+fn parser_changes_are_recorded() {
+    let js = page("");
+    js.set_document(Document::new());
+    js.hold_detached_nodes(true);
+    let mut parser = js.with_document_mut(|doc| DocumentParser::new(doc, ParseOptions::default()));
+    let step = |parser: &mut DocumentParser, chunk: &str| {
+        parser.push(chunk);
+        js.with_parser(parser, |p, doc| p.resume(doc))
+    };
+    let run_paused = |step: ParseStep| {
+        let ParseStep::Script(script) = step else {
+            panic!("expected a script, got {step:?}");
+        };
+        let source = js.with_document(|doc| doc.text_content(script).unwrap());
+        js.run_script_element(script, &source, "https://example.com/")
+            .unwrap();
+    };
+
+    // Before anything is observed, the parser logs nothing.
+    let paused = step(
+        &mut parser,
+        "<!DOCTYPE html><html><head><script>
+           observe(document, { childList: true, subtree: true, attributes: true,
+                               characterData: true, characterDataOldValue: true });
+         </script>",
+    );
+    assert!(parser.take_changes().is_empty());
+    run_paused(paused);
+    assert_eq!(take_log(&js), Vec::<String>::new());
+
+    // Each step's records are delivered before it returns, one per node.
+    assert_eq!(
+        step(&mut parser, "</head><body class=a><p id=one>Hel"),
+        ParseStep::NeedInput
+    );
+    assert_eq!(
+        take_log(&js),
+        [
+            "childList html +[body] -[] head|null",
+            "childList body +[p#one] -[] null|null",
+            "childList p#one +[#text:Hel] -[] null|null",
+        ]
+    );
+
+    // Text added to a text node from an earlier step is one characterData
+    // record; repeated <body> attributes are attribute records.
+    step(
+        &mut parser,
+        "lo &amp; bye</p><body id=b class=c><table>x<tr>",
+    );
+    assert_eq!(
+        take_log(&js),
+        [
+            "characterData #text old=Hel",
+            "attributes body#b id",
+            "childList body#b +[table] -[] p#one|null",
+            // Foster-parented text goes before the table.
+            "childList body#b +[#text:x] -[] p#one|table",
+            "childList table +[tbody] -[] null|null",
+            "childList tbody +[tr] -[] null|null",
+        ]
+    );
+
+    // A script sees the records for everything parsed before it, itself
+    // included, before it runs.
+    let paused = step(
+        &mut parser,
+        "</table><script>log.push('ran after ' + log.length)</script><template><b>",
+    );
+    run_paused(paused);
+    assert_eq!(
+        take_log(&js),
+        [
+            "childList body#b +[script] -[] table|null",
+            "childList script +[#text:log.push('ran after ' + log.length)] -[] null|null",
+            "ran after 2",
+        ]
+    );
+
+    // Template contents are a tree of their own, not observed here.
+    js.with_parser(&mut parser, |p, doc| p.finish(doc));
+    assert_eq!(
+        take_log(&js),
+        ["childList body#b +[template] -[] script|null"]
+    );
+    assert!(js.take_errors().is_empty());
 }

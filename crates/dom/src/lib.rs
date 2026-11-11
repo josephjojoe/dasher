@@ -73,4 +73,4 @@ pub use error::DomError;
 pub use name::{Name, Names};
 pub use node::{Attr, Doctype, NodeId, NodeKind};
 pub use parse::{AdjacentPosition, ParseOptions};
-pub use stream::{DocumentParser, ParseStep};
+pub use stream::{DocumentParser, ParseStep, TreeChange};
