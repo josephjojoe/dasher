@@ -531,6 +531,27 @@ impl JsRuntime {
         result
     }
 
+    /// Evaluates `source` and returns whether its completion value is
+    /// truthy, as JavaScript's `if` would decide. Performs a microtask
+    /// checkpoint afterwards.
+    ///
+    /// For host-side conditions such as "has the page finished rendering
+    /// its list": an exception is returned rather than recorded in the
+    /// page's error log.
+    pub fn eval_truthy(&self, source: &str) -> Result<bool, ScriptError> {
+        self.shared.begin()?;
+        let result = self.with(|ctx| {
+            let run = || -> rquickjs::Result<bool> {
+                let value: Value<'_> =
+                    ctx.eval_with_options(source, eval_options("dasher:eval"))?;
+                Ok(Coerced::<bool>::from_js(&ctx, value)?.0)
+            };
+            run().map_err(|e| self.shared.capture(&ctx, e))
+        });
+        self.perform_microtask_checkpoint();
+        result
+    }
+
     /// Runs `f` as a task: refuses to start past the deadline, and reports
     /// any error it raises.
     pub(crate) fn run_task(

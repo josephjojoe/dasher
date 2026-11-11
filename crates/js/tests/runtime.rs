@@ -22,6 +22,26 @@ fn runs_scripts_and_returns_json() {
 }
 
 #[test]
+fn evaluates_conditions_as_truthy_or_not() {
+    let js = runtime();
+    for (source, truthy) in [
+        ("1 + 1 === 2", true),
+        ("[]", true),
+        ("'x'", true),
+        ("0", false),
+        ("''", false),
+        ("undefined", false),
+        ("NaN", false),
+        ("let n = 3; n > 2", true),
+    ] {
+        assert_eq!(js.eval_truthy(source).unwrap(), truthy, "{source}");
+    }
+    let error = js.eval_truthy("missing.value").unwrap_err();
+    assert!(error.message.contains("missing"), "{error}");
+    assert!(js.errors().is_empty());
+}
+
+#[test]
 fn uncaught_exceptions_are_captured_with_stack() {
     let js = runtime();
     let err = js
