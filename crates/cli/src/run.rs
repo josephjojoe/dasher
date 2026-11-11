@@ -4,9 +4,11 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use dasher::{
-    AutoScrollOptions, AutoScrollReport, AutoScrollStop, Browser, ClockMode, ConsoleLevel, Error,
-    GotoOptions, JsonValue, Navigation, NetworkIdle, Page, ScriptError, ScriptErrorKind,
-    SettleOptions, SettleOutcome,
+    AutoScrollOptions, Browser, ClockMode, Error, GotoOptions, JsonValue, Navigation, NetworkIdle,
+    Page, SettleOptions,
+};
+use dasher_serve::report::{
+    console_json, error_json, error_message, level_name, scroll_json, settle_name,
 };
 use serde_json::{Map, json};
 
@@ -150,10 +152,7 @@ fn summary(page: &Page, navigation: &Navigation) -> JsonValue {
         "settle": navigation.settle.map(settle_name),
         "scroll": navigation.scroll.as_ref().map(scroll_json),
         "elapsed_ms": u64::try_from(navigation.elapsed.as_millis()).unwrap_or(u64::MAX),
-        "console": page.console().iter().map(|m| json!({
-            "level": level_name(m.level),
-            "text": m.text,
-        })).collect::<Vec<_>>(),
+        "console": page.console().iter().map(console_json).collect::<Vec<_>>(),
         "errors": page.errors().iter().map(error_json).collect::<Vec<_>>(),
     })
 }
@@ -187,16 +186,6 @@ fn fail(options: &Options, summary: &JsonValue, error: &Error) -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn error_message(error: &Error) -> String {
-    match error {
-        Error::Script(e) => match &e.stack {
-            Some(stack) => format!("{e}\n{}", stack.trim_end()),
-            None => e.to_string(),
-        },
-        other => other.to_string(),
-    }
-}
-
 fn report_diagnostics(page: &Page) {
     for message in page.console() {
         eprintln!("console.{}: {}", level_name(message.level), message.text);
@@ -221,53 +210,4 @@ fn print(text: &str) -> ExitCode {
 
 fn print_json(value: &JsonValue) -> ExitCode {
     print(&value.to_string())
-}
-
-fn level_name(level: ConsoleLevel) -> &'static str {
-    match level {
-        ConsoleLevel::Debug => "debug",
-        ConsoleLevel::Log => "log",
-        ConsoleLevel::Info => "info",
-        ConsoleLevel::Warn => "warn",
-        ConsoleLevel::Error => "error",
-    }
-}
-
-fn settle_name(outcome: SettleOutcome) -> &'static str {
-    match outcome {
-        SettleOutcome::Settled => "settled",
-        SettleOutcome::TimedOut => "timed_out",
-        SettleOutcome::NavigationRequested => "navigation_requested",
-        SettleOutcome::Interrupted => "interrupted",
-    }
-}
-
-fn scroll_json(report: &AutoScrollReport) -> JsonValue {
-    let stopped = match report.stopped {
-        AutoScrollStop::NoNewContent => "no_new_content",
-        AutoScrollStop::ScrollLimit => "scroll_limit",
-        AutoScrollStop::TimedOut => "timed_out",
-        AutoScrollStop::NavigationRequested => "navigation_requested",
-        AutoScrollStop::Interrupted => "interrupted",
-    };
-    json!({
-        "scrolls": report.scrolls,
-        "productive_scrolls": report.productive_scrolls,
-        "stopped": stopped,
-    })
-}
-
-fn error_json(error: &ScriptError) -> JsonValue {
-    let kind = match error.kind {
-        ScriptErrorKind::Uncaught => "uncaught",
-        ScriptErrorKind::UnhandledRejection => "unhandled_rejection",
-        ScriptErrorKind::OutOfMemory => "out_of_memory",
-        ScriptErrorKind::Interrupted => "interrupted",
-        _ => "internal",
-    };
-    json!({
-        "kind": kind,
-        "message": error.message,
-        "stack": error.stack,
-    })
 }

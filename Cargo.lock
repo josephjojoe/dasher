@@ -220,6 +220,7 @@ name = "dasher-cli"
 version = "0.1.0"
 dependencies = [
  "dasher",
+ "dasher-serve",
  "dasher-test-server",
  "serde_json",
  "tokio",
