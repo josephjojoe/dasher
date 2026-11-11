@@ -445,6 +445,8 @@
     const copy = N.clone(node, deep);
     const hook = internals.cloningSteps;
     if (typeof hook === 'function') hook(node, copy);
+    // Copies of custom elements are upgraded before the copy is returned.
+    internals.upgradeCustomElementsIn(copy);
     return copy;
   }
 
@@ -2116,9 +2118,24 @@
     }
   }
 
+  // Custom element constructors reach here through super(); the registry
+  // (custom_elements.js) makes or finds the element they construct.
+  internals.constructHTMLElement = () => {
+    throw new TypeError("Failed to construct 'HTMLElement': Illegal constructor");
+  };
+  internals.attachInternals = () => {
+    throw domException('NotSupportedError', "Failed to execute 'attachInternals' on 'HTMLElement': Unable to attach ElementInternals to non-custom elements.");
+  };
+  internals.upgradeCustomElementsIn = () => {};
+  internals.createElement = (name, is) => {
+    void is;
+    return N.createElement(name);
+  };
+
   class HTMLElement extends Element {
+    // eslint-disable-next-line constructor-super
     constructor(key) {
-      illegal(key);
+      if (key !== KEY) return internals.constructHTMLElement(new.target);
       super(key);
     }
     get dataset() {
@@ -2214,7 +2231,7 @@
       N.setAttr(this, 'nonce', str(v));
     }
     attachInternals() {
-      throw domException('NotSupportedError', 'Custom element internals are not supported.');
+      return internals.attachInternals(this);
     }
     showPopover() {}
     hidePopover() {}
@@ -4026,13 +4043,14 @@
     }
     createElement(localName, options) {
       requireArgs(arguments, 1, "'createElement' on 'Document'");
-      void options;
-      return created(N.createElement(str(localName)));
+      return created(internals.createElement(str(localName), isOption(options)));
     }
     createElementNS(namespace, qualifiedName, options) {
       requireArgs(arguments, 2, "'createElementNS' on 'Document'");
-      void options;
-      return created(N.createElementNS(nullableStr(namespace), str(qualifiedName)));
+      const ns = nullableStr(namespace);
+      const name = str(qualifiedName);
+      if (ns === HTML_NS && !name.includes(':')) return created(internals.createElement(name, isOption(options), true));
+      return created(N.createElementNS(ns, name));
     }
     createDocumentFragment() {
       return N.createFragment();
@@ -4134,6 +4152,13 @@
   tag(Document, 'Document');
 
   // Scripts created by script are async unless told otherwise.
+  // The `is` of createElement's options: a customized built-in element.
+  function isOption(options) {
+    if (typeof options === 'string') return options;
+    if (options !== null && typeof options === 'object' && options.is !== undefined) return str(options.is);
+    return null;
+  }
+
   function created(el) {
     if (el instanceof I.HTMLScriptElement) state(el).forceAsync = true;
     return el;
@@ -4315,6 +4340,10 @@
 
   Object.assign(internals, {
     document: documentNode,
+    nodeState: state,
+    // Whether `name` is an HTML element with its own interface (not
+    // HTMLUnknownElement), as customElements.define's `extends` needs.
+    isKnownHTMLTag: (name) => Object.prototype.hasOwnProperty.call(htmlProtos, name),
     isNode: (value) => value instanceof Node,
     staticNodeList,
     // Page lifecycle: document.readyState and document.currentScript.

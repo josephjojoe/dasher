@@ -245,6 +245,10 @@ fn insert_into(
     after_insert(ctx, dom, doc, parent, node, &moved, plan);
     dom.bump();
     record_moved_out(dom, doc, node, &moved, old);
+    if let Some((old_parent, _, _)) = old {
+        dom.ce_removed(ctx, doc, old_parent, &[node]);
+    }
+    dom.ce_inserted(doc, &moved);
     if record {
         if let (Some(&first), Some(&last)) = (moved.first(), moved.last()) {
             let (prev, next) = (doc.prev_sibling(first), doc.next_sibling(last));
@@ -279,6 +283,7 @@ fn detach(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId) -> Result<()> {
             return Ok(());
         };
         doc.remove(node);
+        dom.ce_removed(ctx, &doc, parent, &[node]);
         after_remove(ctx, dom, &doc, node);
         dom.bump();
         dom.child_list(&doc, parent, &[], &[node], prev, next);
@@ -296,6 +301,7 @@ fn remove_children(
 ) -> Vec<NodeId> {
     let old: Vec<NodeId> = doc.children(parent).collect();
     doc.remove_children(parent);
+    dom.ce_removed(ctx, doc, parent, &old);
     for &child in &old {
         after_remove(ctx, dom, doc, child);
     }
@@ -331,6 +337,7 @@ fn replace_child(
         let result = doc.replace_child(parent, node, child);
         result.map(|_| {
             if node != child {
+                dom.ce_removed(ctx, &doc, parent, &[child]);
                 after_insert(ctx, dom, &doc, parent, node, &moved, plan);
                 after_remove(ctx, dom, &doc, child);
                 dom.bump();
@@ -339,6 +346,12 @@ fn replace_child(
             // Replacing a child with itself only moves it out and back in.
             let removed: &[NodeId] = if node == child { &[] } else { &[child] };
             dom.child_list(&doc, parent, &moved, removed, prev, next);
+            if node != child {
+                if let Some((old_parent, _, _)) = old {
+                    dom.ce_removed(ctx, &doc, old_parent, &[node]);
+                }
+                dom.ce_inserted(&doc, &moved);
+            }
             if node == child {
                 Vec::new()
             } else {
@@ -423,6 +436,7 @@ fn set_inner_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -
         dom.bump();
         let added: Vec<NodeId> = doc.children(target).collect();
         dom.child_list(&doc, target, &added, &removed, None, None);
+        dom.ce_inserted(&doc, &added);
     }
     deliver(ctx, dom)
 }
@@ -433,10 +447,12 @@ fn set_outer_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -
         let old = place(&doc, node);
         let result = doc.set_outer_html(node, html);
         if let (Ok(()), Some((parent, prev, next))) = (&result, old) {
+            dom.ce_removed(ctx, &doc, parent, &[node]);
             after_remove(ctx, dom, &doc, node);
             dom.bump();
             let added = children_between(&doc, parent, prev, next);
             dom.child_list(&doc, parent, &added, &[node], prev, next);
+            dom.ce_inserted(&doc, &added);
         }
         result
     };
@@ -469,6 +485,7 @@ fn insert_adjacent_html(
         if let (Ok(()), Some(parent)) = (&result, parent) {
             let added = children_between(&doc, parent, prev, next);
             dom.child_list(&doc, parent, &added, &[], prev, next);
+            dom.ce_inserted(&doc, &added);
         }
         result
     };
@@ -548,12 +565,14 @@ fn set_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str, value: &st
     {
         let mut doc = dom.doc_mut();
         let name = html_lower(&doc, n, name);
-        match attr_by_qualified_name(&doc, n, &name) {
-            Some((ns, local, old)) => dom.attribute(&doc, n, ns, local, Some(old)),
-            None => dom.attribute(&doc, n, Name::EMPTY, &name, None),
-        }
+        let (ns, local, old) = match attr_by_qualified_name(&doc, n, &name) {
+            Some((ns, local, old)) => (ns, local.to_owned(), Some(old.to_owned())),
+            None => (Name::EMPTY, name.clone(), None),
+        };
+        dom.attribute(&doc, n, ns, &local, old.as_deref());
         doc.set_attribute(n, &name, value);
         dom.bump();
+        dom.ce_attribute(&doc, n, ns, &local, old.as_deref(), Some(value));
     }
     deliver(ctx, dom)
 }
@@ -562,12 +581,17 @@ fn remove_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str) -> Resu
     let removed = {
         let mut doc = dom.doc_mut();
         let name = html_lower(&doc, n, name);
-        if let Some((ns, local, old)) = attr_by_qualified_name(&doc, n, &name) {
-            dom.attribute(&doc, n, ns, local, Some(old));
+        let found = attr_by_qualified_name(&doc, n, &name)
+            .map(|(ns, local, old)| (ns, local.to_owned(), old.to_owned()));
+        if let Some((ns, local, old)) = &found {
+            dom.attribute(&doc, n, *ns, local, Some(old));
         }
         let removed = doc.remove_attribute(n, &name);
         if removed {
             dom.bump();
+        }
+        if let Some((ns, local, old)) = &found {
+            dom.ce_attribute(&doc, n, *ns, local, Some(old), None);
         }
         removed
     };
@@ -588,10 +612,11 @@ fn set_attr_ns(
         let local = name.split_once(':').map_or(name, |(_, l)| l);
         // `setAttributeNS` interns both names anyway.
         let (ns_name, local_name) = (doc.intern(ns), doc.intern(local));
-        let old = doc.attribute_ns(n, ns_name, local_name);
-        dom.attribute(&doc, n, ns_name, local, old);
+        let old = doc.attribute_ns(n, ns_name, local_name).map(str::to_owned);
+        dom.attribute(&doc, n, ns_name, local, old.as_deref());
         doc.set_attribute_ns(n, ns, name, value);
         dom.bump();
+        dom.ce_attribute(&doc, n, ns_name, local, old.as_deref(), Some(value));
     }
     deliver(ctx, dom)
 }
@@ -609,12 +634,17 @@ fn remove_attr_ns(
         let (Some(ns), Some(local)) = (names.get(ns.unwrap_or("")), names.get(local)) else {
             return Ok(false);
         };
-        if let Some(old) = doc.attribute_ns(n, ns, local) {
+        let old = doc.attribute_ns(n, ns, local).map(str::to_owned);
+        if let Some(old) = &old {
             dom.attribute(&doc, n, ns, doc.name_str(local), Some(old));
         }
         let removed = doc.remove_attribute_ns(n, ns, local);
         if removed {
             dom.bump();
+        }
+        if let Some(old) = &old {
+            let local = doc.name_str(local).to_owned();
+            dom.ce_attribute(&doc, n, ns, &local, Some(old), None);
         }
         removed
     };
@@ -742,6 +772,7 @@ pub(super) fn install<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
     install_attributes(obj, dom)?;
     install_queries(obj, dom)?;
     super::shadow::install(obj, dom)?;
+    super::custom::install(obj, dom)?;
     Ok(())
 }
 

@@ -36,6 +36,7 @@
 //! module) and count it as [`DomActivity`].
 
 mod collection;
+mod custom;
 mod inner_text;
 mod layout;
 mod mutation;
@@ -96,6 +97,12 @@ pub(crate) struct DomState {
     observed: RefCell<HashSet<NodeId>>,
     /// Mutation records waiting to be delivered to JS.
     pending: RefCell<Vec<mutation::Record>>,
+    /// The names custom elements are defined for (see the `custom` module).
+    ce_names: RefCell<HashSet<String>>,
+    /// Custom elements. Each has a wrapper, whose finalizer removes it.
+    ce_custom: RefCell<HashSet<NodeId>>,
+    /// Custom element reactions waiting to be delivered to JS.
+    ce_reactions: RefCell<Vec<custom::Reaction>>,
     activity: Cell<DomActivity>,
     clock: Rc<Clock>,
     /// Set while the host holds node ids that must stay valid, such as the
@@ -121,6 +128,9 @@ impl DomState {
             selectors: RefCell::default(),
             observed: RefCell::default(),
             pending: RefCell::default(),
+            ce_names: RefCell::default(),
+            ce_custom: RefCell::default(),
+            ce_reactions: RefCell::default(),
             activity: Cell::default(),
             clock,
             hold: Cell::new(false),
@@ -186,10 +196,11 @@ impl DomState {
     }
 
     /// Releases the trees of queued candidates that are detached and have
-    /// no wrapper left. Waits while mutation records, which may name nodes
-    /// of those trees, are queued, and while the host holds detached nodes.
+    /// no wrapper left. Waits while mutation records or custom element
+    /// reactions, which may name nodes of those trees, are queued, and while
+    /// the host holds detached nodes.
     fn sweep(&self, doc: &mut Document) {
-        if self.hold.get() || self.has_pending_records() {
+        if self.hold.get() || self.has_pending_records() || self.has_pending_reactions() {
             return;
         }
         let candidates = std::mem::take(&mut *self.candidates.borrow_mut());
@@ -348,6 +359,8 @@ impl JsRuntime {
         let root = dom.doc.borrow().root();
         dom.observed.borrow_mut().retain(|&n| n == root);
         dom.pending.borrow_mut().clear();
+        dom.ce_custom.borrow_mut().clear();
+        dom.ce_reactions.borrow_mut().clear();
         dom.bump();
         drop(old);
     }
@@ -387,6 +400,11 @@ mod tests {
             pool.push(template, template.content);
             const host = document.createElement('my-host');
             pool.push(host, host.attachShadow({ mode: 'open' }));
+            customElements.define('x-r', class extends HTMLElement {
+              connectedCallback() { this.seen = (this.seen || 0) + 1; }
+              disconnectedCallback() { this.gone = true; }
+            });
+            for (let i = 0; i < 3; i++) pool.push(document.createElement('x-r'));
             const pick = () => pool[rand(pool.length)];
             globalThis.step = () => {
               const a = pick(), b = pick();
@@ -396,7 +414,7 @@ mod tests {
                   case 0: a.appendChild(b); break;
                   case 1: a.insertBefore(b, a.firstChild); break;
                   case 2: if (b.parentNode) b.remove(); break;
-                  case 3: a.innerHTML = '<i><b></b></i><u></u>'; break;
+                  case 3: a.innerHTML = '<i><b></b></i><x-r></x-r><u></u>'; break;
                   case 4: if (b.parentNode) b.parentNode.replaceChild(a, b); break;
                   case 5: { const c = a.firstChild; if (c) { pool.push(c); c.k = 1; } break; }
                   case 6: { const c = a.querySelector('*'); if (c) pool.push(c); break; }

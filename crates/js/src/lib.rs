@@ -157,6 +157,18 @@
 //! `assignedSlot` asks, events from a shadow tree are retargeted to its
 //! host, and composed events cross the boundary. `slotchange` never fires.
 //!
+//! Custom elements work as in browsers: `customElements.define` (with
+//! `observedAttributes`, customized built-ins and `whenDefined`), `new
+//! MyElement()` and `createElement` constructing the page's class, upgrades
+//! of elements already in the document, of markup inserted by script once
+//! it is connected, and of clones, and the `connectedCallback`,
+//! `disconnectedCallback` and `attributeChangedCallback` reactions at the
+//! end of each DOM call. `adoptedCallback` never runs (there is only one
+//! document to adopt into), and `attachInternals` gives an
+//! `ElementInternals` that treats every control as valid. Elements the page
+//! loader parses are upgraded after each parsing step
+//! ([`JsRuntime::upgrade_custom_elements`]).
+//!
 //! `document.implementation.createHTMLDocument()` makes a second, inert
 //! document in the page's arena for building markup off the page (jQuery
 //! parses HTML strings in one). Its scripts never run and it has no URL,

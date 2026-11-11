@@ -44,6 +44,7 @@ impl Drop for NodeWrapper<'_> {
         // borrowed: they are only borrowed briefly, without running JS.
         self.dom.wrappers.borrow_mut().remove(&self.id);
         self.dom.set_observed(self.id, false);
+        self.dom.set_custom(self.id, false);
         self.dom.add_candidate(self.id);
     }
 }
@@ -88,6 +89,11 @@ pub(crate) struct DomData<'js> {
     pub(crate) document: Node<'js>,
     /// Takes mutation records (see the `mutation` module).
     pub(crate) mutation_hook: RefCell<Option<Function<'js>>>,
+    /// Takes custom element reactions (see the `custom` module).
+    pub(crate) ce_hook: RefCell<Option<Function<'js>>>,
+    /// Wrappers of removed custom elements, kept alive until their
+    /// reactions are delivered.
+    pub(crate) ce_held: RefCell<Vec<Node<'js>>>,
     /// Told when the document changed (see the `layout` module).
     pub(crate) layout_hook: RefCell<Option<Function<'js>>>,
     element: Object<'js>,
@@ -126,6 +132,8 @@ pub(crate) fn init<'js>(
         exception,
         document,
         mutation_hook: RefCell::new(None),
+        ce_hook: RefCell::new(None),
+        ce_held: RefCell::new(Vec::new()),
         layout_hook: RefCell::new(None),
         element: protos.get("Element")?,
         html_element: protos.get("HTMLElement")?,
@@ -205,7 +213,7 @@ impl DomState {
     }
 
     /// The wrappers of `ids` that are alive.
-    fn cached_all<'js>(&self, ctx: &Ctx<'js>, ids: &[NodeId]) -> Vec<Node<'js>> {
+    pub(crate) fn cached_all<'js>(&self, ctx: &Ctx<'js>, ids: &[NodeId]) -> Vec<Node<'js>> {
         let raws: Vec<qjs::JSValue> = {
             let wrappers = self.wrappers.borrow();
             ids.iter()

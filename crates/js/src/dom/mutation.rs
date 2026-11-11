@@ -167,9 +167,15 @@ impl DomState {
     }
 }
 
-/// Hands the queued records to the JS hook. Call it after every change,
-/// once the document is no longer borrowed.
+/// Hands the queued mutation records and then the custom element
+/// reactions to their JS hooks. Call it after every change, once the
+/// document is no longer borrowed.
 pub(crate) fn deliver<'js>(ctx: &Ctx<'js>, dom: &Rc<DomState>) -> Result<()> {
+    deliver_records(ctx, dom)?;
+    super::custom::deliver(ctx, dom)
+}
+
+fn deliver_records<'js>(ctx: &Ctx<'js>, dom: &Rc<DomState>) -> Result<()> {
     if !dom.has_pending_records() {
         return Ok(());
     }

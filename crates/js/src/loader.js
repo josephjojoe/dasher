@@ -34,6 +34,7 @@
     setReadyState: internals.setReadyState,
     setCurrentScript: internals.setCurrentScript,
     setDocumentInfo: internals.setDocumentInfo,
+    upgradeCustomElements: internals.upgradeCustomElements,
     // A null target is the window.
     fire(target, type, bubbles, cancelable) {
       const init = { bubbles, cancelable };

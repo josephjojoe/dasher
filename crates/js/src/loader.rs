@@ -124,6 +124,7 @@ pub(crate) struct LoaderHooks<'js> {
     set_ready_state: Function<'js>,
     set_current_script: Function<'js>,
     set_document_info: Function<'js>,
+    upgrade_custom_elements: Function<'js>,
     fire: Function<'js>,
     document: Value<'js>,
 }
@@ -141,6 +142,7 @@ impl<'js> LoaderHooks<'js> {
             set_ready_state: hooks.get("setReadyState")?,
             set_current_script: hooks.get("setCurrentScript")?,
             set_document_info: hooks.get("setDocumentInfo")?,
+            upgrade_custom_elements: hooks.get("upgradeCustomElements")?,
             fire: hooks.get("fire")?,
             document: hooks.get("document")?,
         })
@@ -227,6 +229,23 @@ impl JsRuntime {
             LoaderHooks::get(ctx)?
                 .set_ready_state
                 .call::<_, ()>((state.as_str(),))
+        });
+        self.perform_microtask_checkpoint();
+    }
+
+    /// Upgrades the custom elements in the document that a definition
+    /// covers but that are not custom yet, then runs a microtask
+    /// checkpoint, so components render. The page loader calls this after
+    /// each parsing step: elements it parses are not upgraded otherwise.
+    /// Does nothing until the page defines a custom element.
+    pub fn upgrade_custom_elements(&self) {
+        if !self.shared().dom.custom_elements_defined() {
+            return;
+        }
+        let _ = self.run_task(|ctx| {
+            LoaderHooks::get(ctx)?
+                .upgrade_custom_elements
+                .call::<_, ()>(())
         });
         self.perform_microtask_checkpoint();
     }
