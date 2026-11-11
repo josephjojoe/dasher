@@ -22,6 +22,7 @@ dasher-test-server = { path = "crates/test-server" }
 # Third-party crates shared across the workspace.
 bytes = "1"
 compact_str = "0.10"
+encoding_rs = "0.8"
 html5ever = "0.40"
 http-body-util = "0.1"
 hyper = "1"

@@ -1,0 +1,13 @@
+<!doctype html>
+<script>
+  window.events = [];
+  const name = (e) => e.target.getAttribute('src');
+  document.addEventListener('error', (e) => events.push('error ' + name(e)), true);
+  document.addEventListener('load', (e) => events.push('load ' + name(e)), true);
+</script>
+<script src="missing.js"></script>
+<script src="throws.js"></script>
+<script src="ok.js"></script>
+<script src=""></script>
+<script src="http://[bad"></script>
+<script>events.push('parsed');</script>

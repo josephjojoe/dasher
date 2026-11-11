@@ -1,0 +1,1 @@
+window.late = performance.now();

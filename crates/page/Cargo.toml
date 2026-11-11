@@ -11,7 +11,14 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bytes.workspace = true
 dasher-css.workspace = true
 dasher-dom.workspace = true
 dasher-js.workspace = true
 dasher-net.workspace = true
+encoding_rs.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+dasher-test-server.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }

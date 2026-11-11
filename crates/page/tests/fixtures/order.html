@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head>
+<script>
+  window.log = [];
+  const note = (what) => log.push(what + ':' + document.readyState);
+  document.addEventListener('readystatechange', () => log.push('readystatechange:' + document.readyState));
+  document.addEventListener('DOMContentLoaded', () => note('DOMContentLoaded'));
+  addEventListener('load', () => note('load'));
+  note('inline');
+</script>
+<script src="slow-defer.js" defer></script>
+<script src="async.js" async></script>
+<script src="blocking.js"></script>
+</head><body>
+<p id="after-blocking">after</p>
+<script src="defer.js" defer></script>
+<script>
+  note('inline2 ' + (document.getElementById('after-blocking') !== null));
+  const add = (src, async) => {
+    const s = document.createElement('script');
+    s.src = src;
+    if (async !== undefined) s.async = async;
+    s.addEventListener('load', () => note('onload ' + src));
+    document.head.append(s);
+  };
+  add('slow-ordered.js', false);
+  add('ordered.js', false);
+</script>
+<noscript><script>note('noscript')</script><p id="fallback">no js</p></noscript>
+<script type="text/x-template">note('template')</script>
+<script src="nomodule.js" nomodule></script>
+<template><script>note('in template')</script></template>
+</body></html>
