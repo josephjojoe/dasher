@@ -109,7 +109,7 @@ fn observers_and_channels() {
 fn css_crypto_subtle_and_blob_urls() {
     let js = page();
     js.run_script(
-        "var rejected; crypto.subtle.digest('SHA-256', new Uint8Array(1)).catch((e) => { rejected = e.name; });",
+        "var rejected; crypto.subtle.sign('HMAC', null, new Uint8Array(1)).catch((e) => { rejected = e.name; });",
         "a.js",
     )
     .unwrap();

@@ -82,8 +82,9 @@
 //! - `localStorage` and `sessionStorage`, kept in memory per origin in a
 //!   [`StorageStore`] that pages of one session can share.
 //! - `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`,
-//!   `btoa`, `crypto.getRandomValues`/`randomUUID`, `structuredClone`,
-//!   `postMessage`, `MessageChannel` and `requestIdleCallback`.
+//!   `btoa`, `crypto.getRandomValues`/`randomUUID`/`subtle.digest`,
+//!   `structuredClone`, `postMessage`, `MessageChannel` and
+//!   `requestIdleCallback`.
 //! - Streams: `ReadableStream`, `WritableStream`, `TransformStream`, their
 //!   readers, writers and controllers, the queuing strategies,
 //!   `TextEncoderStream` and `TextDecoderStream`. Byte streams work as
@@ -97,9 +98,9 @@
 //!   never format anything don't carry it in their heap.
 //!
 //! Everything that is only a stand-in (dialogs, `ResizeObserver`,
-//! `WebSocket`, `crypto.subtle`, navigator extras and so on) is defined in
-//! `src/stubs.js`. Its header lists every stub, plus the APIs left out on
-//! purpose (workers, `indexedDB`, `caches`).
+//! `WebSocket`, the rest of `crypto.subtle`, navigator extras and so on) is
+//! defined in `src/stubs.js`. Its header lists every stub, plus the APIs
+//! left out on purpose (workers, `indexedDB`, `caches`).
 //!
 //! The JS side is compiled to bytecode once per process. Call
 //! [`precompile`] at start-up to keep that cost off the first page.
