@@ -139,6 +139,14 @@ fn adjacent_position(ctx: &Ctx<'_>, position: &str) -> Result<AdjacentPosition> 
 // Each records the changes it makes for mutation observers while the
 // document is borrowed, then delivers them once the borrow is released.
 
+/// `document.compatMode` for a quirks mode.
+fn compat_mode(quirks: QuirksMode) -> &'static str {
+    match quirks {
+        QuirksMode::Quirks => "BackCompat",
+        _ => "CSS1Compat",
+    }
+}
+
 /// The script elements under `moved` that just became connected and have
 /// not run, for the page loader to prepare, and the links that load
 /// something, which get a load event.
@@ -1079,6 +1087,45 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
             wrap(&ctx, &d, n)
         },
     )?;
+    // Replaces the children of `n`, a document made by script, with a
+    // document parsed from `text`, as HTML or XML. Returns the compat mode
+    // for HTML; for XML, null or why the text is not well-formed.
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "parseInto",
+        move |ctx: Ctx<'js>, n: Node<'js>, text: String, xml: bool| -> Result<Value<'js>> {
+            let target = id(&ctx, &n)?;
+            let outcome = {
+                let mut doc = d.doc_mut();
+                if doc.kind(target) != NodeKind::Document || target == doc.root() {
+                    return Err(throw_dom(
+                        &ctx,
+                        "InvalidStateError",
+                        "Only documents made by script can be parsed into.",
+                    ));
+                }
+                let removed = remove_children(&ctx, &d, &mut doc, target);
+                let outcome = if xml {
+                    doc.parse_xml_into(target, &text)
+                        .err()
+                        .map(|e| e.to_string())
+                } else {
+                    let quirks = doc.parse_document_into(target, &text);
+                    Some(compat_mode(quirks).to_owned())
+                };
+                d.bump();
+                let added: Vec<NodeId> = doc.children(target).collect();
+                d.child_list(&doc, target, &added, &removed, None, None);
+                outcome
+            };
+            deliver(&ctx, &d)?;
+            match outcome {
+                Some(s) => rquickjs::String::from_str(ctx, &s).map(|s| s.into_value()),
+                None => Ok(Value::new_null(ctx)),
+            }
+        },
+    )?;
     let d = Rc::clone(dom);
     def(
         obj,
@@ -1237,9 +1284,8 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     let d = Rc::clone(dom);
     def(obj, "title", move || d.doc().title())?;
     let d = Rc::clone(dom);
-    def(obj, "compatMode", move || match d.doc().quirks_mode() {
-        QuirksMode::Quirks => "BackCompat",
-        _ => "CSS1Compat",
+    def(obj, "compatMode", move || {
+        compat_mode(d.doc().quirks_mode())
     })?;
     let d = Rc::clone(dom);
     def(obj, "baseHref", move || -> Nullable<String> {
