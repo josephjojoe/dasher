@@ -218,9 +218,40 @@ impl Document {
     }
 }
 
+/// The document a [`Sink`] builds into.
+// There is one per parse, so the size of the `Lent` variant does not matter.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum DocSlot<'a> {
+    /// Borrowed for the whole parse.
+    Borrowed(&'a mut Document),
+    /// Lent to the sink for one step of an incremental parse, and empty in
+    /// between (see [`DocumentParser`](crate::DocumentParser)).
+    Lent(Option<Document>),
+}
+
+impl std::ops::Deref for DocSlot<'_> {
+    type Target = Document;
+
+    fn deref(&self) -> &Document {
+        match self {
+            DocSlot::Borrowed(doc) => doc,
+            DocSlot::Lent(doc) => doc.as_ref().expect("document is lent to the parser"),
+        }
+    }
+}
+
+impl std::ops::DerefMut for DocSlot<'_> {
+    fn deref_mut(&mut self) -> &mut Document {
+        match self {
+            DocSlot::Borrowed(doc) => doc,
+            DocSlot::Lent(doc) => doc.as_mut().expect("document is lent to the parser"),
+        }
+    }
+}
+
 /// The html5ever tree sink that builds into a [`Document`].
-struct Sink<'a> {
-    doc: RefCell<&'a mut Document>,
+pub(crate) struct Sink<'a> {
+    pub(crate) doc: RefCell<DocSlot<'a>>,
     /// The document node html5ever builds under: the real one for document
     /// parsing, a scratch one for fragments.
     document: NodeId,
@@ -236,6 +267,10 @@ struct Sink<'a> {
 
 impl<'a> Sink<'a> {
     fn new(doc: &'a mut Document, document: NodeId, fragment: bool) -> Self {
+        Self::with_slot(DocSlot::Borrowed(doc), document, fragment)
+    }
+
+    pub(crate) fn with_slot(doc: DocSlot<'a>, document: NodeId, fragment: bool) -> Self {
         Sink {
             doc: RefCell::new(doc),
             document,
@@ -249,6 +284,17 @@ impl<'a> Sink<'a> {
     fn intern_qual_name(doc: &mut Document, name: &QualName) -> (Name, Name, Name) {
         let prefix = name.prefix.as_ref().map_or(Name::EMPTY, |p| doc.intern(p));
         (doc.intern(&name.ns), prefix, doc.intern(&name.local))
+    }
+
+    /// Gives back the memory text nodes over-allocated while they grew.
+    pub(crate) fn shrink_grown_text(&self) {
+        let mut doc = self.doc.borrow_mut();
+        for id in self.grown_text.take() {
+            // In an incremental parse, script may have changed the node since.
+            if let Some(s) = doc.text_mut(id) {
+                s.shrink_to_fit();
+            }
+        }
     }
 
     /// Appends text to `prev` if it is a text node, else returns false.
@@ -266,7 +312,7 @@ impl<'a> Sink<'a> {
 
 /// An element's name as html5ever atoms.
 #[derive(Debug)]
-struct AtomName {
+pub(crate) struct AtomName {
     ns: Namespace,
     local: LocalName,
 }
@@ -290,12 +336,7 @@ impl TreeSink for Sink<'_> {
         Self: 'b;
 
     fn finish(self) -> Option<NodeId> {
-        let doc = self.doc.into_inner();
-        for id in self.grown_text.into_inner() {
-            if let Some(s) = doc.text_mut(id) {
-                s.shrink_to_fit();
-            }
-        }
+        self.shrink_grown_text();
         self.first_element.get()
     }
 

@@ -21,6 +21,15 @@
 //! assert_eq!(doc.outer_html(list), r#"<ul id="list"><li class="item">two</li><li class="item">three</li></ul>"#);
 //! ```
 //!
+//! # Incremental parsing
+//!
+//! [`Document::parse`] builds a whole document at once. A page loader uses
+//! [`DocumentParser`] instead: it takes input in chunks as it arrives,
+//! pauses after every `</script>` so the script can run against the tree
+//! built so far, and accepts `document.write()` output at the insertion
+//! point. It borrows the document only while it parses, so scripts can
+//! change the tree between steps.
+//!
 //! # Memory
 //!
 //! Footprint matters more than speed here, so the layout is deliberately
@@ -51,9 +60,11 @@ mod node;
 mod parse;
 mod query;
 mod serialize;
+mod stream;
 
 pub use document::{Children, Descendants, Document, QuirksMode};
 pub use error::DomError;
 pub use name::{Name, Names};
 pub use node::{Attr, Doctype, NodeId, NodeKind};
 pub use parse::{AdjacentPosition, ParseOptions};
+pub use stream::{DocumentParser, ParseStep};
