@@ -3121,8 +3121,9 @@
     'onmessage', 'onmessageerror', 'onoffline', 'ononline', 'onpagehide', 'onpageshow',
     'onpopstate', 'onrejectionhandled', 'onstorage', 'onunhandledrejection', 'onunload',
   ];
+  const BODY_WINDOW_HANDLERS = [...WINDOW_HANDLERS, 'onblur', 'onerror', 'onfocus', 'onload', 'onresize', 'onscroll'];
   for (const C of [I.HTMLBodyElement, I.HTMLFrameSetElement]) {
-    for (const name of [...WINDOW_HANDLERS, 'onblur', 'onerror', 'onfocus', 'onload', 'onresize', 'onscroll']) {
+    for (const name of BODY_WINDOW_HANDLERS) {
       defineProperty(C.prototype, name, {
         get() { return globalThis[name]; },
         set(v) { globalThis[name] = v; },
@@ -3132,6 +3133,133 @@
     }
   }
   reflect(I.HTMLBodyElement, { text: 'string', link: 'string', vLink: ['string', 'vlink'], aLink: ['string', 'alink'], bgColor: ['string', 'bgcolor'], background: 'string' });
+
+  // ---------------------------------------------------------------------
+  // Event handler content attributes: `<button onclick="...">`,
+  // `<body onload="...">`. events.js keeps the handlers; this decides which
+  // attributes set one, and compiles them.
+  // https://html.spec.whatwg.org/#event-handler-content-attributes
+
+  const ELEMENT_HANDLER_TYPES = new Set(GLOBAL_HANDLERS.map((name) => name.slice(2)));
+  const WINDOW_HANDLER_TYPES = new Set(BODY_WINDOW_HANDLERS.map((name) => name.slice(2)));
+
+  function isBodyLike(el) {
+    return el instanceof I.HTMLBodyElement || el instanceof I.HTMLFrameSetElement;
+  }
+
+  // What the handler that the content attribute `on<type>` of `el` sets
+  // belongs to: the element, or the window for the body's window-reflecting
+  // ones. Null if the attribute sets no handler.
+  function handlerTarget(el, type) {
+    if (WINDOW_HANDLER_TYPES.has(type) && isBodyLike(el)) return globalThis;
+    if (ELEMENT_HANDLER_TYPES.has(type) &&
+        (el instanceof HTMLElement || el instanceof SVGElement || el instanceof MathMLElement)) {
+      return el;
+    }
+    return null;
+  }
+
+  internals.handlerAttribute = (target, type) => {
+    let el;
+    if (target === globalThis) {
+      if (!WINDOW_HANDLER_TYPES.has(type)) return null;
+      el = N.docPart(2);
+      if (el === null || !isBodyLike(el)) return null;
+    } else if (target instanceof Element && handlerTarget(target, type) === target) {
+      el = target;
+    } else {
+      return null;
+    }
+    const source = N.getAttr(el, 'on' + type);
+    return source === null ? null : [el, source];
+  };
+
+  // Elements whose form owner is on a handler's scope chain.
+  const FORM_ASSOCIATED = [
+    I.HTMLButtonElement, I.HTMLFieldSetElement, I.HTMLInputElement, I.HTMLObjectElement,
+    I.HTMLOutputElement, I.HTMLSelectElement, I.HTMLTextAreaElement,
+  ];
+  const EMPTY_SCOPE = Object.freeze(Object.create(null));
+
+  // Compiles the body of the `on<type>` attribute of `el` into the
+  // handler function, with the element, its form owner and the document on
+  // its scope chain. Elements of documents other than the page's get none.
+  // https://html.spec.whatwg.org/#getting-the-current-value-of-the-event-handler
+  internals.compileHandler = (el, type, source, forWindow) => {
+    if (el.ownerDocument !== documentNode) return null;
+    let form = null;
+    if (FORM_ASSOCIATED.some((C) => el instanceof C)) form = el.form;
+    const params = forWindow && type === 'error' ? 'event, source, lineno, colno, error' : 'event';
+    // Sloppy code, as `with` needs; the scopes come in through `arguments`
+    // so no extra name is visible to the body.
+    const scoped = new Function(
+      'with (arguments[0]) with (arguments[1]) with (arguments[2]) return function on' + type +
+      '(' + params + ') {\n' + native.modules.rewrite(source) + '\n};');
+    return scoped(documentNode, form === null ? EMPTY_SCOPE : form, el);
+  };
+
+  // Whether `name` starts with "on", ignoring ASCII case.
+  function onPrefixed(name) {
+    return name.length > 2 && (name.charCodeAt(0) | 32) === 111 && (name.charCodeAt(1) | 32) === 110;
+  }
+
+  // If setting or removing the attribute `name` (no namespace) of `el`
+  // changes an event handler, returns [target, type] after picking up the
+  // handler the attribute set before (so it keeps its place). `exact` is
+  // for the namespace-aware methods, which do not lower-case the name.
+  function handlerChange(el, name, exact) {
+    if (!onPrefixed(name)) return null;
+    if (!exact && N.elementName(el)[1] === HTML_NS) name = name.toLowerCase();
+    if (!name.startsWith('on')) return null;
+    const type = name.slice(2);
+    const target = handlerTarget(el, type);
+    if (target === null) return null;
+    internals.existingHandler(target, type);
+    return [target, type];
+  }
+
+  // Every attribute change goes through these natives, so wrapping them
+  // catches every change to a handler attribute.
+  {
+    const { setAttr, removeAttr, setAttrNS, removeAttrNS } = N;
+    const changed = internals.attributeHandlerChanged;
+    N.setAttr = (el, name, value) => {
+      const h = handlerChange(el, name, false);
+      setAttr(el, name, value);
+      if (h !== null) changed(h[0], h[1], el, value);
+    };
+    N.removeAttr = (el, name) => {
+      const h = handlerChange(el, name, false);
+      const removed = removeAttr(el, name);
+      if (h !== null && removed) changed(h[0], h[1], el, null);
+      return removed;
+    };
+    N.setAttrNS = (el, ns, name, value) => {
+      const h = ns === null ? handlerChange(el, name, true) : null;
+      setAttrNS(el, ns, name, value);
+      if (h !== null) changed(h[0], h[1], el, value);
+    };
+    N.removeAttrNS = (el, ns, local) => {
+      const h = ns === null ? handlerChange(el, local, true) : null;
+      const removed = removeAttrNS(el, ns, local);
+      if (h !== null && removed) changed(h[0], h[1], el, null);
+      return removed;
+    };
+  }
+
+  // The parser inserted the body: its window-reflecting handler attributes
+  // (`<body onload>`) take over the window's handlers now, replacing any a
+  // script set before, as if set at this point.
+  internals.bodyInserted = (body) => {
+    if (!isBodyLike(body)) return;
+    const count = N.attrCount(body);
+    for (let i = 0; i < count; i++) {
+      const [name, ns, , , value] = N.attr(body, i);
+      if (ns !== null || !name.startsWith('on')) continue;
+      const type = name.slice(2);
+      if (WINDOW_HANDLER_TYPES.has(type)) internals.attributeHandlerChanged(globalThis, type, body, value);
+    }
+  };
 
   // Image, Audio and Option constructors.
   function Image(width, height) {

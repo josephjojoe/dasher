@@ -124,6 +124,7 @@ pub(crate) struct LoaderHooks<'js> {
     set_ready_state: Function<'js>,
     set_current_script: Function<'js>,
     set_document_info: Function<'js>,
+    body_inserted: Function<'js>,
     fire: Function<'js>,
     document: Value<'js>,
 }
@@ -141,6 +142,7 @@ impl<'js> LoaderHooks<'js> {
             set_ready_state: hooks.get("setReadyState")?,
             set_current_script: hooks.get("setCurrentScript")?,
             set_document_info: hooks.get("setDocumentInfo")?,
+            body_inserted: hooks.get("bodyInserted")?,
             fire: hooks.get("fire")?,
             document: hooks.get("document")?,
         })
@@ -242,6 +244,20 @@ impl JsRuntime {
             LoaderHooks::get(ctx)?
                 .set_document_info
                 .call::<_, ()>((object,))
+        });
+    }
+
+    /// Tells scripts the parser has inserted `body`, the document's
+    /// `<body>` (or `<frameset>`) element. Its window event handler
+    /// attributes, such as `<body onload="init()">`, then set the window's
+    /// handlers, replacing any a script set before. Call it once, as soon
+    /// as the parser has inserted the body and before any script runs
+    /// again. Without the call those attributes still work, but do not
+    /// override handlers set earlier.
+    pub fn body_inserted(&self, body: NodeId) {
+        let _ = self.run_task(|ctx| {
+            let body = dom::wrap(ctx, &self.shared().dom, body)?;
+            LoaderHooks::get(ctx)?.body_inserted.call::<_, ()>((body,))
         });
     }
 

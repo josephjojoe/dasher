@@ -185,6 +185,13 @@
 //! that scripts insert are never fetched, but get a `load` event as if
 //! they had loaded empty, since scripts wait for it.
 //!
+//! Event handler attributes (`<button onclick="...">`, `<img onerror>`,
+//! `<body onload>` for the window) are compiled the first time their
+//! handler runs or is read, with the element, its form and the document on
+//! the scope chain, and run in their place among the event listeners. The
+//! `on*` properties override them, and changing an attribute updates its
+//! handler. Elements of the second document never run theirs.
+//!
 //! Every node keeps one JS wrapper for as long as script can reach it, so
 //! identity and expando properties are stable, but wrappers do not keep
 //! detached subtrees alive: once a detached subtree has no reachable
@@ -234,6 +241,9 @@
 //!   `document.characterSet`, `contentType` and `referrer`;
 //! - [`hold_detached_nodes`](JsRuntime::hold_detached_nodes), which keeps
 //!   node ids the parser still uses valid while scripts change the tree;
+//! - [`body_inserted`](JsRuntime::body_inserted), once the parser has
+//!   inserted the body, so `<body onload="...">` and its kin replace the
+//!   window handlers scripts set before it;
 //! - the module graph functions (see [ES modules](#es-modules)),
 //!   [`register_import_map`](JsRuntime::register_import_map) and
 //!   [`link_inserted`](JsRuntime::link_inserted) for parser-inserted
