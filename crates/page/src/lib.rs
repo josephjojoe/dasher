@@ -62,15 +62,32 @@
 //! inserted scripts), and [`Page::follow_navigation`] follows navigations
 //! requested later.
 //!
+//! # Settling
+//!
+//! The `load` event says little about whether a client-rendered page has
+//! its content. [`Page::settle`] keeps the page running until the
+//! conditions in [`SettleOptions`] hold together, within a timeout:
+//!
+//! - network idle: no more than N requests in flight for a quiet period
+//!   ([`NetworkIdle`]);
+//! - DOM quiet: scripts have not changed the document for a while;
+//! - a CSS selector matches;
+//! - a JavaScript predicate is truthy.
+//!
+//! The default waits for both kinds of quiet, 500ms each, for up to 10s.
+//! Quiet periods are page time, so under the virtual clock a page that is
+//! only waiting on timers settles without real waiting.
+//!
 //! [`ClockMode::Virtual`]: dasher_js::ClockMode::Virtual
 //!
 //! ```no_run
 //! use dasher_net::Client;
-//! use dasher_page::{Page, PageOptions};
+//! use dasher_page::{Page, PageOptions, SettleOptions};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let session = Client::new()?.session();
-//! let page = Page::load(&session, "https://example.com/", PageOptions::default()).await?;
+//! let mut page = Page::load(&session, "https://example.com/", PageOptions::default()).await?;
+//! page.settle(&SettleOptions::default()).await?;
 //! let title = page.js().eval_json("document.title")?;
 //! let html = page.html();
 //! # let _ = (title, html);
@@ -81,5 +98,9 @@
 mod charset;
 mod page;
 mod script;
+mod settle;
 
 pub use page::{DEFAULT_MAX_NAVIGATIONS, LoadError, Page, PageOptions};
+pub use settle::{
+    DEFAULT_QUIET, DEFAULT_SETTLE_TIMEOUT, NetworkIdle, SettleError, SettleOptions, SettleOutcome,
+};

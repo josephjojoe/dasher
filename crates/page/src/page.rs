@@ -84,7 +84,7 @@ impl std::error::Error for LoadError {
 }
 
 /// Why loading stopped early.
-enum Stop {
+pub(crate) enum Stop {
     /// The page asked to go elsewhere, and may. The request is left
     /// pending in the runtime.
     Navigate,
@@ -103,10 +103,10 @@ enum Stop {
 pub struct Page {
     // Field order is drop order: scripts in flight go before the runtime.
     scripts: Scripts,
-    js: JsRuntime,
+    pub(crate) js: JsRuntime,
     session: Session,
     options: PageOptions,
-    deadline: Option<Instant>,
+    pub(crate) deadline: Option<Instant>,
     navigations_left: usize,
     status: StatusCode,
     headers: HeaderMap,
@@ -231,7 +231,7 @@ impl Page {
     }
 
     /// Lifts the loading time limit, so the host can go on using the page.
-    fn clear_deadline(&mut self) {
+    pub(crate) fn clear_deadline(&mut self) {
         self.deadline = None;
         self.js.set_deadline(None);
     }
@@ -560,7 +560,7 @@ impl Page {
 
     /// Fails with [`Stop::Navigate`] if the page asked to navigate and may.
     /// A request past the navigation budget is dropped.
-    fn check_navigation(&self) -> Result<(), Stop> {
+    pub(crate) fn check_navigation(&self) -> Result<(), Stop> {
         if self.js.navigation_request().is_none() {
             return Ok(());
         }
@@ -584,7 +584,11 @@ impl Page {
     ///
     /// For [`Until::Body`], returns the next chunk of the document, or
     /// `None` at its end.
-    async fn spin(&mut self, wait: &mut Wait, until: Until) -> Result<Option<Bytes>, Stop> {
+    pub(crate) async fn spin(
+        &mut self,
+        wait: &mut Wait,
+        until: Until,
+    ) -> Result<Option<Bytes>, Stop> {
         let mut loop_active = true;
         loop {
             self.prepare_inserted();
@@ -639,7 +643,7 @@ impl Page {
 
 /// What [`Page::spin`] waits for.
 #[derive(Clone, Copy, Debug)]
-enum Until {
+pub(crate) enum Until {
     /// The next chunk of the document.
     Body,
     /// Script `id` to have loaded.
@@ -651,13 +655,13 @@ enum Until {
 }
 
 /// State that outlives one [`Page::spin`].
-struct Wait {
+pub(crate) struct Wait {
     body: Option<BodyReader>,
-    outcome: Option<RunOutcome>,
+    pub(crate) outcome: Option<RunOutcome>,
 }
 
 impl Wait {
-    fn new(body: Option<BodyReader>) -> Self {
+    pub(crate) fn new(body: Option<BodyReader>) -> Self {
         Self {
             body,
             outcome: None,
@@ -667,7 +671,7 @@ impl Wait {
 
 /// Reads the document body on its own task, so waiting for the next chunk
 /// can be abandoned and resumed without losing data.
-struct BodyReader {
+pub(crate) struct BodyReader {
     chunks: mpsc::Receiver<Bytes>,
     task: JoinHandle<()>,
 }

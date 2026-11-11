@@ -1,0 +1,22 @@
+<!doctype html>
+<title>Content fetched after load</title>
+<ul id="items"></ul>
+<p id="status">loading</p>
+<script>
+  // Nothing is fetched until a while after the load event, and the details
+  // only once the list has arrived: a page that "loads" before its content.
+  addEventListener('load', () => {
+    setTimeout(async () => {
+      const items = await (await fetch('/api/items')).json();
+      const list = document.getElementById('items');
+      for (const item of items) {
+        const li = document.createElement('li');
+        li.textContent = item;
+        list.append(li);
+      }
+      const detail = await (await fetch('/api/detail')).json();
+      document.getElementById('status').textContent = detail.status;
+      window.ready = true;
+    }, 200);
+  });
+</script>

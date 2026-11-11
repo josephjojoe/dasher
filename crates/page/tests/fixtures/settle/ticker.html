@@ -1,0 +1,14 @@
+<!doctype html>
+<title>Never quiet</title>
+<p id="clock">0</p>
+<script>
+  // The DOM changes forever; the content arrives once.
+  let ticks = 0;
+  setInterval(() => { document.getElementById('clock').textContent = ++ticks; }, 100);
+  fetch('/api/items').then((r) => r.json()).then((items) => {
+    const p = document.createElement('p');
+    p.id = 'loaded';
+    p.textContent = items.join(',');
+    document.body.append(p);
+  });
+</script>
