@@ -4,10 +4,10 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use dasher_dom::{Document, DocumentParser, NodeId, ParseOptions, ParseStep};
+use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep};
 use dasher_js::{
-    DocumentInfo, DocumentWrite, EventTarget, JsRuntime, ReadyState, RunLimits, RunOutcome,
-    RuntimeOptions, ScriptError, WindowOptions,
+    DocumentInfo, DocumentWrite, EventTarget, JsRuntime, PendingOperation, ReadyState, RunLimits,
+    RunOutcome, RuntimeOptions, ScriptError, WindowOptions,
 };
 use dasher_net::{HeaderMap, Request, ResourceType, Response, Session, StatusCode, Url};
 use encoding_rs::Encoding;
@@ -392,6 +392,7 @@ impl Page {
                 }
                 ParseStep::NeedInput if eof => break,
                 ParseStep::NeedInput => {
+                    self.preload_links(false);
                     let chunk = self.spin(&mut wait, Until::Body).await?;
                     eof = chunk.is_none();
                     let bytes = chunk.unwrap_or_default();
@@ -402,6 +403,7 @@ impl Page {
         self.js.with_document_mut(|doc| parser.finish(doc));
         drop(parser);
         self.js.hold_detached_nodes(false);
+        self.preload_links(true);
 
         self.js.set_ready_state(ReadyState::Interactive);
         self.check_navigation()?;
@@ -440,18 +442,35 @@ impl Page {
         let (element, base) = self.js.with_document_mut(|doc| {
             let element = ScriptElement::read(doc, script);
             // Scripts in template contents never run.
-            let runs = doc.is_connected(script)
-                && element.script_type == Some(ScriptType::Classic)
-                && !element.no_module
-                && !doc.script_already_started(script);
+            let runs =
+                doc.is_connected(script) && element.runs() && !doc.script_already_started(script);
             if runs {
                 doc.set_script_already_started(script);
             }
             (runs.then_some(element), base_url(doc, &document_url))
         });
+        self.preload_links(false);
         let Some(element) = element else {
             return Ok(());
         };
+        match element.script_type {
+            Some(ScriptType::Module) => {
+                // Parser-inserted module scripts are deferred unless async.
+                let order = if element.is_async {
+                    Order::Asap
+                } else {
+                    Order::Deferred
+                };
+                let operation = self.js.task_sender().begin_operation();
+                self.prepare_module(script, &element, &base, order, operation);
+                return self.check_navigation();
+            }
+            Some(ScriptType::ImportMap) => {
+                self.prepare_import_map(script, &element, &base);
+                return self.check_navigation();
+            }
+            _ => {}
+        }
         let Some(src) = element.src.as_deref() else {
             self.run_parser_script(script, &element.text, document_url.as_str(), parser);
             return self.check_navigation();
@@ -514,6 +533,77 @@ impl Page {
         url
     }
 
+    /// Starts loading a module script's graph and files it under `order`.
+    fn prepare_module(
+        &mut self,
+        script: NodeId,
+        element: &ScriptElement,
+        base: &Url,
+        order: Order,
+        operation: PendingOperation,
+    ) {
+        let credentials = element.module_credentials();
+        let (graph, external) = match element.src.as_deref() {
+            Some(src) => {
+                let Some(url) = self.script_url(script, src, base) else {
+                    return;
+                };
+                (self.js.fetch_module_graph(url.as_str(), credentials), true)
+            }
+            None => {
+                let graph =
+                    self.js
+                        .fetch_inline_module_graph(&element.text, base.as_str(), credentials);
+                (graph, false)
+            }
+        };
+        self.scripts
+            .module(script, graph, external, order, operation);
+    }
+
+    /// Registers an inline import map. External ones are not supported, by
+    /// browsers either: they get an `error` event.
+    fn prepare_import_map(&self, script: NodeId, element: &ScriptElement, base: &Url) {
+        if element.src.is_some() {
+            self.js.log(
+                dasher_js::ConsoleLevel::Error,
+                String::from("External import maps are not supported"),
+            );
+            self.js
+                .fire_event(EventTarget::Node(script), "error", false, false);
+            return;
+        }
+        self.js.register_import_map(&element.text, base.as_str());
+    }
+
+    /// Hands the `<link rel=modulepreload>` elements the parser has inserted
+    /// to the runtime, which starts fetching their modules. Those in
+    /// `<head>`, where they belong, are looked for at every pause of the
+    /// parser; the rest of the document only when `everywhere` is set, at
+    /// the end of parsing. The runtime ignores links it has seen.
+    fn preload_links(&self, everywhere: bool) {
+        let links: Vec<NodeId> = self.js.with_document(|doc| {
+            let root = if everywhere {
+                Some(doc.root())
+            } else {
+                doc.head()
+            };
+            root.into_iter()
+                .flat_map(|root| doc.descendants(root))
+                .filter(|&n| {
+                    doc.is_html(n, Name::LINK)
+                        && doc.attribute(n, "rel").is_some_and(|rel| {
+                            rel.split_ascii_whitespace()
+                                .any(|t| t.eq_ignore_ascii_case("modulepreload"))
+                        })
+                })
+                .collect()
+        });
+        for link in links {
+            self.js.link_inserted(link);
+        }
+    }
+
     /// Prepares the scripts that scripts inserted since the last call.
     fn prepare_inserted(&mut self) {
         let inserted = self.js.take_inserted_scripts();
@@ -525,11 +615,10 @@ impl Page {
             let element = script.element;
             let (prepared, base) = self.js.with_document_mut(|doc| {
                 let prepared = ScriptElement::read(doc, element);
-                // Module scripts are not supported yet; data blocks and
-                // nomodule scripts never run.
-                let runs = prepared.script_type == Some(ScriptType::Classic)
-                    && !prepared.no_module
-                    && prepared.src.is_some()
+                // Inline classic scripts ran as they were inserted.
+                let runs = prepared.runs()
+                    && (prepared.src.is_some()
+                        || prepared.script_type != Some(ScriptType::Classic))
                     && !doc.script_already_started(element);
                 if runs {
                     doc.set_script_already_started(element);
@@ -539,16 +628,27 @@ impl Page {
             let Some(prepared) = prepared else {
                 continue;
             };
-            let src = prepared.src.as_deref().unwrap_or_default();
-            let Some(url) = self.script_url(element, src, &base) else {
-                continue;
-            };
-            let params = FetchParams::new(&prepared, url, &document_url, self.encoding);
             let order = if script.non_blocking || prepared.is_async {
                 Order::Asap
             } else {
                 Order::Ordered
             };
+            match prepared.script_type {
+                Some(ScriptType::Module) => {
+                    self.prepare_module(element, &prepared, &base, order, script.operation);
+                    continue;
+                }
+                Some(ScriptType::ImportMap) => {
+                    self.prepare_import_map(element, &prepared, &base);
+                    continue;
+                }
+                _ => {}
+            }
+            let src = prepared.src.as_deref().unwrap_or_default();
+            let Some(url) = self.script_url(element, src, &base) else {
+                continue;
+            };
+            let params = FetchParams::new(&prepared, url, &document_url, self.encoding);
             self.scripts
                 .fetch(&self.session, element, params, order, script.operation);
         }
@@ -593,7 +693,7 @@ impl Page {
             }
             self.check_navigation()?;
             match until {
-                Until::Script(id) if self.scripts.is_ready(id) => return Ok(None),
+                Until::Script(id) if self.scripts.is_ready(&self.js, id) => return Ok(None),
                 Until::AsapScriptsDone if !self.scripts.has_pending_asap() => return Ok(None),
                 Until::Run(_) if wait.outcome.is_some() => return Ok(None),
                 _ => {}
@@ -613,6 +713,7 @@ impl Page {
                 }
                 () = scripts.next_fetched(), if fetching => {}
                 () = js.script_inserted() => {}
+                () = js.module_graph_settled() => {}
                 outcome = js.run(limits), if loop_active => match outcome {
                     RunOutcome::NavigationRequested => {}
                     RunOutcome::DeadlineExceeded | RunOutcome::Interrupted => {

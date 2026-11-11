@@ -1,0 +1,1 @@
+note('side ' + document.currentScript);

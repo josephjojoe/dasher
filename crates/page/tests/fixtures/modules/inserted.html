@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head>
+<script>
+  window.log = [];
+  const note = (what) => log.push(what);
+  const add = (attrs, text) => {
+    const s = document.createElement('script');
+    Object.assign(s, attrs);
+    if (text) s.textContent = text;
+    s.addEventListener('load', () => note('load ' + (attrs.src || 'inline')));
+    s.addEventListener('error', () => note('error ' + (attrs.src || 'inline')));
+    document.head.append(s);
+  };
+  // Inserted module scripts run in insertion order unless async.
+  add({ type: 'module', src: 'assets/slow-module.js', async: false });
+  add({ type: 'module', src: 'assets/async-module.js', async: false });
+  add({ type: 'module', src: 'assets/missing.js' });
+  add({ type: 'module' }, 'import "./assets/missing.js"; note("never");');
+  add({ type: 'module' }, 'import { greet } from "./assets/vendor.js"; note("inline " + greet());');
+</script>
+</head><body></body></html>

@@ -1,11 +1,15 @@
 //! Script elements: what kind each one is, fetching external ones, and the
-//! lists that decide when each runs.
+//! lists that decide when each runs. Module scripts share the lists with
+//! classic ones; their graphs are fetched by the JS runtime.
 //! <https://html.spec.whatwg.org/#prepare-the-script-element>
 
 use std::collections::{HashMap, VecDeque};
 
 use dasher_dom::{Document, Name, NodeId};
-use dasher_js::{ConsoleLevel, EventTarget, JsRuntime, PendingOperation};
+use dasher_js::{
+    ConsoleLevel, EventTarget, JsRuntime, ModuleCredentials, ModuleGraph, ModuleGraphStatus,
+    PendingOperation,
+};
 use dasher_net::{Credentials, Request, ResourceType, Session, Url};
 use encoding_rs::Encoding;
 use tokio::task::JoinSet;
@@ -71,6 +75,24 @@ pub(crate) struct ScriptElement {
 }
 
 impl ScriptElement {
+    /// Whether the script runs at all: data blocks never do, and
+    /// `nomodule` classic scripts are for browsers without modules.
+    pub(crate) fn runs(&self) -> bool {
+        match self.script_type {
+            Some(ScriptType::Classic) => !self.no_module,
+            Some(ScriptType::Module | ScriptType::ImportMap) => true,
+            None => false,
+        }
+    }
+
+    /// The credentials mode module requests use, from `crossorigin`.
+    pub(crate) fn module_credentials(&self) -> ModuleCredentials {
+        match self.cross_origin.as_deref() {
+            Some(v) if v.eq_ignore_ascii_case("use-credentials") => ModuleCredentials::Include,
+            _ => ModuleCredentials::SameOrigin,
+        }
+    }
+
     pub(crate) fn read(doc: &Document, id: NodeId) -> Self {
         let attr = |name: &str| doc.attribute(id, name);
         let text = doc
@@ -128,11 +150,20 @@ enum Fetched {
     Failed(String),
 }
 
+/// A script waiting for its turn.
+#[derive(Debug)]
+enum Source {
+    /// A classic script at this URL, and its source once fetched.
+    Classic(Url, Option<Fetched>),
+    /// A module script's graph, which the runtime fetches. `external` is
+    /// whether the script has a `src` (only those fire `load`).
+    Module { graph: ModuleGraph, external: bool },
+}
+
 #[derive(Debug)]
 struct Entry {
     element: NodeId,
-    url: Url,
-    fetched: Option<Fetched>,
+    source: Source,
     /// Keeps the event loop busy until the script has run.
     _operation: PendingOperation,
 }
@@ -195,7 +226,6 @@ impl Scripts {
         operation: PendingOperation,
     ) -> ScriptId {
         let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
         let session = session.clone();
         let FetchParams {
             url,
@@ -213,12 +243,41 @@ impl Scripts {
             };
             (id, fetched)
         });
+        self.add(element, Source::Classic(url, None), order, operation)
+    }
+
+    /// Files a module script whose graph the runtime is fetching under
+    /// `order`.
+    pub(crate) fn module(
+        &mut self,
+        element: NodeId,
+        graph: ModuleGraph,
+        external: bool,
+        order: Order,
+        operation: PendingOperation,
+    ) -> ScriptId {
+        self.add(
+            element,
+            Source::Module { graph, external },
+            order,
+            operation,
+        )
+    }
+
+    fn add(
+        &mut self,
+        element: NodeId,
+        source: Source,
+        order: Order,
+        operation: PendingOperation,
+    ) -> ScriptId {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
         self.entries.insert(
             id,
             Entry {
                 element,
-                url,
-                fetched: None,
+                source,
                 _operation: operation,
             },
         );
@@ -245,15 +304,24 @@ impl Scripts {
         // A fetch task only ends early if it is aborted, which only happens
         // when the whole set is dropped.
         if let Ok((id, fetched)) = joined {
-            if let Some(entry) = self.entries.get_mut(&id) {
-                entry.fetched = Some(fetched);
+            if let Some(Entry {
+                source: Source::Classic(_, slot),
+                ..
+            }) = self.entries.get_mut(&id)
+            {
+                *slot = Some(fetched);
             }
         }
     }
 
     /// Whether script `id` has loaded (or failed to) and can run.
-    pub(crate) fn is_ready(&self, id: ScriptId) -> bool {
-        self.entries.get(&id).is_none_or(|e| e.fetched.is_some())
+    pub(crate) fn is_ready(&self, js: &JsRuntime, id: ScriptId) -> bool {
+        self.entries.get(&id).is_none_or(|e| match &e.source {
+            Source::Classic(_, fetched) => fetched.is_some(),
+            Source::Module { graph, .. } => {
+                js.module_graph_status(*graph) != ModuleGraphStatus::Loading
+            }
+        })
     }
 
     /// The next deferred script, which runs once it is ready.
@@ -270,13 +338,13 @@ impl Scripts {
     /// whether any ran.
     pub(crate) fn run_ready(&mut self, js: &JsRuntime) -> bool {
         let mut ran = false;
-        while let Some(i) = self.asap.iter().position(|&id| self.is_ready(id)) {
+        while let Some(i) = self.asap.iter().position(|&id| self.is_ready(js, id)) {
             let id = self.asap.remove(i);
             self.execute(js, id);
             ran = true;
         }
         while let Some(&id) = self.in_order.front() {
-            if !self.is_ready(id) {
+            if !self.is_ready(js, id) {
                 break;
             }
             self.in_order.pop_front();
@@ -287,24 +355,34 @@ impl Scripts {
     }
 
     /// Runs script `id`, which must be ready, then fires `load` at its
-    /// element; or, if it failed to load, logs why and fires `error`.
+    /// element if it is external; or, if it failed to load, logs why and
+    /// fires `error`.
     pub(crate) fn execute(&mut self, js: &JsRuntime, id: ScriptId) {
         let Some(entry) = self.entries.remove(&id) else {
             return;
         };
-        match entry.fetched {
-            Some(Fetched::Ok(source)) => {
-                let _ = js.run_script_element(entry.element, &source, entry.url.as_str());
-                js.fire_event(EventTarget::Node(entry.element), "load", false, false);
+        let target = EventTarget::Node(entry.element);
+        match entry.source {
+            Source::Classic(url, Some(Fetched::Ok(source))) => {
+                let _ = js.run_script_element(entry.element, &source, url.as_str());
+                js.fire_event(target, "load", false, false);
             }
-            Some(Fetched::Failed(reason)) => {
+            Source::Classic(url, Some(Fetched::Failed(reason))) => {
                 js.log(
                     ConsoleLevel::Error,
-                    format!("Failed to load script {}: {reason}", entry.url),
+                    format!("Failed to load script {url}: {reason}"),
                 );
-                js.fire_event(EventTarget::Node(entry.element), "error", false, false);
+                js.fire_event(target, "error", false, false);
             }
-            None => debug_assert!(false, "script {id} ran before it loaded"),
+            Source::Classic(_, None) => debug_assert!(false, "script {id} ran before it loaded"),
+            // The runtime logged why a module graph failed.
+            Source::Module { graph, external } => {
+                if !js.run_module_graph(graph) {
+                    js.fire_event(target, "error", false, false);
+                } else if external {
+                    js.fire_event(target, "load", false, false);
+                }
+            }
         }
     }
 }

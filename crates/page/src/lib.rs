@@ -26,20 +26,28 @@
 //!    - external scripts without `async` or `defer` block the parser until
 //!      they have loaded and run;
 //!    - `defer` scripts run after parsing, in document order;
-//!    - `async` scripts run as soon as they load.
+//!    - `async` scripts run as soon as they load;
+//!    - module scripts (`type="module"`, inline or external) are deferred:
+//!      they run after parsing, in document order together with `defer`
+//!      scripts, once their whole module graph has loaded. With `async`
+//!      they run as soon as it has. Their imports, dynamic `import()` and
+//!      `<link rel=modulepreload>` hints load through the page's session
+//!      (see `dasher_js`'s module docs);
+//!    - inline import maps (`type="importmap"`) apply to the module
+//!      specifiers resolved after them.
 //!
-//!    Data blocks (`type="text/template"` and the like), `nomodule` scripts
-//!    and scripts in `<template>` never run. Module scripts are not
-//!    supported yet.
+//!    Data blocks (`type="text/template"` and the like), `nomodule`
+//!    classic scripts and scripts in `<template>` never run.
 //! 4. Scripts that scripts insert are loaded too: by default they run as
 //!    soon as they load, and those with `async = false` in insertion order.
 //!    External scripts fire `load` at their element after running, and
 //!    `error` if they could not be fetched (or answered with a non-2xx
-//!    status), which is also logged to the console.
+//!    status), which is also logged to the console. A module script whose
+//!    graph could not be fetched fires `error`, inline or not.
 //! 5. Then, as in "the end" of the HTML standard: `readyState` goes to
-//!    `interactive`, deferred scripts run, `DOMContentLoaded` fires, the
-//!    async scripts are waited for, `readyState` goes to `complete`, and
-//!    `load` and `pageshow` fire at the window.
+//!    `interactive`, deferred scripts and modules run, `DOMContentLoaded`
+//!    fires, the async scripts are waited for, `readyState` goes to
+//!    `complete`, and `load` and `pageshow` fire at the window.
 //!
 //! While loading, the event loop runs whenever the loader waits for the
 //! network, so timers, `fetch()` and XHR make progress as they would in a
