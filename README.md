@@ -41,6 +41,9 @@ synthetic values. They are chosen so that content gated behind visibility or
 scrolling still loads: by default everything counts as visible and in the
 viewport, and the document is treated as tall enough to scroll.
 
+[COMPATIBILITY.md](COMPATIBILITY.md) lists the web APIs pages may expect that
+dasher does not support yet.
+
 ## Design
 
 dasher's own code covers the DOM, the event loop, the JS bindings, the page
