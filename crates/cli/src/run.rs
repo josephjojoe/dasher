@@ -95,6 +95,12 @@ fn browser(options: &Options) -> dasher::Result<Browser> {
     if options.realtime {
         builder = builder.clock(ClockMode::Realtime);
     }
+    if let Some(mib) = options.memory_limit {
+        builder = builder.memory_limit((mib > 0).then(|| mib.saturating_mul(1024 * 1024)));
+    }
+    if let Some(nodes) = options.max_dom_nodes {
+        builder = builder.max_dom_nodes((nodes > 0).then_some(nodes));
+    }
     builder.build()
 }
 

@@ -238,6 +238,44 @@ fn failures_set_the_exit_status() {
 }
 
 #[test]
+fn pages_over_their_limits_fail_cleanly() {
+    let server = server();
+    let url = server.url("/app.html");
+
+    let output = dasher(&[&url, "--max-dom-nodes", "10"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("the page went over its limit of 10 DOM nodes"),
+        "{stderr}"
+    );
+
+    let output = dasher(&[
+        &url,
+        "--memory-limit",
+        "16",
+        "--json",
+        "-e",
+        "const a = []; for (;;) a.push('x'.repeat(4096) + a.length)",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let out: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        out["error"], "the page ran out of JS heap (limit 16 MiB)",
+        "{out}"
+    );
+
+    // 0 lifts a limit.
+    stdout(&dasher(&[
+        &url,
+        "--max-dom-nodes",
+        "0",
+        "--memory-limit",
+        "0",
+    ]));
+}
+
+#[test]
 fn timeouts_return_the_page_as_far_as_it_got() {
     let server = server();
     let output = dasher(&[

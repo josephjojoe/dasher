@@ -33,6 +33,10 @@ Browser:
                             wildcard: '*://*.doubleclick.net/*' (repeatable)
       --realtime            run timers in real time instead of skipping
                             ahead when the page is only waiting on them
+      --memory-limit <MiB>  cap the page's JS heap; 0 for no cap [default: 256]
+      --max-dom-nodes <n>   cap the nodes in the page's DOM; 0 for no cap
+                            [default: 500000]. A page over either limit is
+                            stopped and the run fails
 
 Output:
   -e, --eval <js>           print the value of a JS expression or function
@@ -83,6 +87,10 @@ pub struct Options {
     pub proxy: Option<String>,
     pub block: Vec<String>,
     pub realtime: bool,
+    /// In MiB; `Some(0)` lifts the limit, `None` keeps the default.
+    pub memory_limit: Option<usize>,
+    /// `Some(0)` lifts the limit, `None` keeps the default.
+    pub max_dom_nodes: Option<usize>,
     pub eval: Option<String>,
     pub json: bool,
     pub verbose: bool,
@@ -106,6 +114,8 @@ impl Options {
             proxy: None,
             block: Vec::new(),
             realtime: false,
+            memory_limit: None,
+            max_dom_nodes: None,
             eval: None,
             json: false,
             verbose: false,
@@ -162,6 +172,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             "--proxy" => options.proxy = Some(value("a proxy URL")?),
             "--block" => options.block.push(value("a URL pattern")?),
             "--realtime" => options.realtime = true,
+            "--memory-limit" => options.memory_limit = Some(number(&name, &value("MiB")?)?),
+            "--max-dom-nodes" => options.max_dom_nodes = Some(number(&name, &value("a count")?)?),
             "-e" | "--eval" => options.eval = Some(value("an expression")?),
             "--json" => options.json = true,
             "-v" | "--verbose" => options.verbose = true,
@@ -274,6 +286,9 @@ mod tests {
             "--block",
             "*track*",
             "--realtime",
+            "--memory-limit",
+            "64",
+            "--max-dom-nodes=0",
             "-e",
             "document.title",
             "--json",
@@ -303,6 +318,8 @@ mod tests {
         assert_eq!(options.proxy.as_deref(), Some("http://proxy:3128"));
         assert_eq!(options.block, ["*ads*", "*track*"]);
         assert!(options.realtime && options.json && options.verbose);
+        assert_eq!(options.memory_limit, Some(64));
+        assert_eq!(options.max_dom_nodes, Some(0));
         assert_eq!(options.eval.as_deref(), Some("document.title"));
     }
 
