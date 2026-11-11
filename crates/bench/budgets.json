@@ -1,0 +1,11 @@
+{
+  "idle_rss_mib": 8,
+  "peak_rss_mib": {
+    "static": 12,
+    "large": 28,
+    "spa": 20,
+    "feed": 16
+  },
+  "job_growth_mib": 0.75,
+  "binary_size_mib": 6
+}

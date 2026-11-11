@@ -47,8 +47,10 @@ jobs:
 
   release:
     # Guards the deployment target: a fully static musl binary built with the
-    # size-tuned release profile.
-    name: release build (musl)
+    # size-tuned release profile. Then benchmarks it on the fixture suite and
+    # fails if memory or binary size goes over crates/bench/budgets.json; the
+    # results land in the job summary and as an artifact.
+    name: release build and benchmarks (musl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -57,10 +59,21 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked --target x86_64-unknown-linux-musl -p dasher-cli
-      - name: Report binary size
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl -p dasher-cli -p dasher-bench
+      - name: Check the binary
         run: |
           bin=target/x86_64-unknown-linux-musl/release/dasher
           file "$bin"
           "$bin" --version
-          echo "dasher binary: $(stat -c %s "$bin") bytes" >> "$GITHUB_STEP_SUMMARY"
+      - name: Benchmark
+        run: >
+          target/x86_64-unknown-linux-musl/release/dasher-bench
+          --budgets crates/bench/budgets.json
+          --json bench.json
+          --markdown "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmarks
+          path: bench.json
+          if-no-files-found: ignore
