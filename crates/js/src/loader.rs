@@ -125,6 +125,7 @@ pub(crate) struct LoaderHooks<'js> {
     set_current_script: Function<'js>,
     set_document_info: Function<'js>,
     upgrade_custom_elements: Function<'js>,
+    body_inserted: Function<'js>,
     fire: Function<'js>,
     document: Value<'js>,
 }
@@ -143,6 +144,7 @@ impl<'js> LoaderHooks<'js> {
             set_current_script: hooks.get("setCurrentScript")?,
             set_document_info: hooks.get("setDocumentInfo")?,
             upgrade_custom_elements: hooks.get("upgradeCustomElements")?,
+            body_inserted: hooks.get("bodyInserted")?,
             fire: hooks.get("fire")?,
             document: hooks.get("document")?,
         })
@@ -261,6 +263,16 @@ impl JsRuntime {
             LoaderHooks::get(ctx)?
                 .set_document_info
                 .call::<_, ()>((object,))
+        });
+    }
+
+    /// Tells scripts the parser has inserted `body`, the document's
+    /// `<body>` (or `<frameset>`) element, so its window event handler
+    /// attributes set the window's handlers.
+    pub(crate) fn body_inserted(&self, body: NodeId) {
+        let _ = self.run_task(|ctx| {
+            let body = dom::wrap(ctx, &self.shared().dom, body)?;
+            LoaderHooks::get(ctx)?.body_inserted.call::<_, ()>((body,))
         });
     }
 

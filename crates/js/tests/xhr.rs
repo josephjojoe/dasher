@@ -59,6 +59,20 @@ fn server() -> FixtureServer {
         .route("/cookie", |req| {
             FixtureResponse::text(req.header("cookie").unwrap_or("none").to_owned())
         })
+        .route("/feed", |_| {
+            FixtureResponse::ok(
+                "application/rss+xml; charset=utf-8",
+                "<rss><channel><item><title>One</title></item><item><title>Two</title></item></channel></rss>",
+            )
+        })
+        .route("/broken.xml", |_| {
+            FixtureResponse::ok("text/xml", "<rss><channel></rss>")
+        })
+        .route("/page.html", |_| {
+            FixtureResponse::html(
+                "<title>Fetched</title><p id=p>hi<script>window.ran = true</script>",
+            )
+        })
         .route("/slow", |_| FixtureResponse::text("slow"))
         .path_latency("/slow", Duration::from_millis(300))
         .start()
@@ -394,4 +408,51 @@ async fn same_origin_requests_send_cookies_without_credentials() {
     )
     .await;
     assert_eq!(json(&js, "out"), r#"["ok","session=abc"]"#);
+}
+
+#[tokio::test]
+async fn documents_parsed_from_responses() {
+    let server = server();
+    let js = page(Some(session()));
+    run(
+        &js,
+        &format!(
+            r#"
+            var out = {{}};
+            function get(path, type, done) {{
+                const xhr = new XMLHttpRequest();
+                xhr.open('GET', {origin:?} + path);
+                xhr.responseType = type;
+                xhr.onload = () => done(xhr);
+                xhr.send();
+            }}
+            get('/feed', '', (xhr) => {{
+                const doc = xhr.responseXML;
+                out.feed = [doc instanceof XMLDocument, doc === xhr.responseXML, doc.contentType,
+                    doc.URL === {feed:?}, doc.documentElement.tagName,
+                    [...doc.getElementsByTagName('title')].map((t) => t.textContent)];
+            }});
+            get('/feed', 'document', (xhr) => {{ out.feedDocument = xhr.response.querySelectorAll('item').length; }});
+            get('/broken.xml', '', (xhr) => {{ out.broken = xhr.responseXML; }});
+            // HTML is only parsed for responseType 'document'.
+            get('/page.html', '', (xhr) => {{ out.htmlXml = xhr.responseXML; }});
+            get('/page.html', 'document', (xhr) => {{
+                const doc = xhr.response;
+                out.html = [doc instanceof HTMLDocument, doc.title, doc.getElementById('p').textContent,
+                    doc.querySelector('script') !== null, window.ran === undefined, doc !== document];
+            }});
+            get('/api/items', '', (xhr) => {{ out.json = xhr.responseXML; }});
+            "#,
+            origin = server.origin(),
+            feed = server.url("/feed"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        json(
+            &js,
+            "Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : 1)))"
+        ),
+        r#"{"broken":null,"feed":[true,true,"application/rss+xml",true,"rss",["One","Two"]],"feedDocument":2,"html":[true,"Fetched","hiwindow.ran = true",true,true,true],"htmlXml":null,"json":null}"#
+    );
 }

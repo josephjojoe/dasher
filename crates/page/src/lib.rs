@@ -66,6 +66,20 @@
 //! `http(s)` URLs are ignored. [`PageOptions::timeout`] bounds the whole
 //! load; a page that runs out of time is returned as far as it got.
 //!
+//! Declarative refreshes, `<meta http-equiv="refresh" content="0;
+//! url=/next">` and the `Refresh` response header, are navigations too,
+//! counted against the same budget. As in browsers, the first valid one
+//! wins (the header before any meta) and its delay starts once the `load`
+//! event has fired. `load` then keeps the page running until the refresh
+//! comes due and loads its target. The delay is page time, so under
+//! [`ClockMode::Virtual`] it costs no real time. Only short delays are
+//! followed, those up to [`PageOptions::max_refresh_delay`] (10 seconds by
+//! default), and a refresh that reloads the same document only when it is
+//! immediate: longer delays and delayed self-reloads are the auto-refresh
+//! of pages that poll for updates, and are ignored (with a console
+//! message). Meta elements are looked for when parsing ends and again
+//! after `load`; ones scripts insert later are not followed.
+//!
 //! A page that goes over a resource limit while loading (it fills its JS
 //! heap, or it or its scripts build more DOM nodes than
 //! [`RuntimeOptions::max_dom_nodes`](dasher_js::RuntimeOptions::max_dom_nodes)
@@ -126,11 +140,12 @@
 
 mod charset;
 mod page;
+mod refresh;
 mod script;
 mod scroll;
 mod settle;
 
-pub use page::{DEFAULT_MAX_NAVIGATIONS, LoadError, Page, PageOptions};
+pub use page::{DEFAULT_MAX_NAVIGATIONS, DEFAULT_MAX_REFRESH_DELAY, LoadError, Page, PageOptions};
 pub use scroll::{AutoScrollOptions, AutoScrollReport, AutoScrollStop, DEFAULT_MAX_SCROLLS};
 pub use settle::{
     DEFAULT_QUIET, DEFAULT_SETTLE_TIMEOUT, NetworkIdle, SettleError, SettleOptions, SettleOutcome,

@@ -169,11 +169,18 @@
 //! loader parses are upgraded after each parsing step
 //! ([`JsRuntime::upgrade_custom_elements`]).
 //!
-//! `document.implementation.createHTMLDocument()` makes a second, inert
-//! document in the page's arena for building markup off the page (jQuery
-//! parses HTML strings in one). Its scripts never run and it has no URL,
-//! window or cookies. Nodes move between it and the page freely; a
-//! detached node's `ownerDocument` is always the page's document.
+//! Scripts can make more documents: `DOMParser` (HTML, and XML through a
+//! small parser of dasher's own), `document.implementation`'s
+//! `createHTMLDocument()` and `createDocument()`, `new Document()`, and
+//! `XMLHttpRequest`'s `responseXML` and `responseType = 'document'`. They
+//! live in the page's arena as inert trees of their own: their scripts
+//! never run, events in them do not reach `window`, and they have no
+//! window, cookies or loading. Script can query and change them, and nodes
+//! move between them and the page without copying. `ownerDocument` follows
+//! the nodes: a node belongs to the document whose tree it is in, and a
+//! detached node to the document that made, adopted or last held it. A
+//! document is freed once nothing reaches it; its nodes count towards the
+//! page's node limit.
 //!
 //! Geometry is synthetic, chosen so content gated on visibility or
 //! scrolling still loads; [`WindowOptions::layout`] picks how (see
@@ -188,17 +195,26 @@
 //! `MutationObserver` sees every change scripts make to the tree, with the
 //! standard's records (`childList`, `attributes` and `characterData`, with
 //! `subtree`, `attributeFilter` and old values) delivered in a microtask.
-//! Changes the host makes through
-//! [`with_document_mut`](JsRuntime::with_document_mut) are not observed.
-//! The same changes, when made to nodes in the document, are counted for
-//! the host as [`DomActivity`] (see [`JsRuntime::dom_activity`]), so the
-//! page layer can tell when a page has stopped changing.
+//! It also sees what the page loader's parser builds through
+//! [`with_parser`](JsRuntime::with_parser), as in browsers. Other changes
+//! the host makes through [`with_document_mut`](JsRuntime::with_document_mut)
+//! are not observed. The changes scripts make, when made to nodes in the
+//! document, are counted for the host as [`DomActivity`] (see
+//! [`JsRuntime::dom_activity`]), so the page layer can tell when a page has
+//! stopped changing.
 //!
 //! Inline classic script elements that a script inserts into the document
 //! run as they are inserted. Other inserted scripts are left alone unless a
 //! page loader takes them over (see below). Stylesheet and preload links
 //! that scripts insert are never fetched, but get a `load` event as if
 //! they had loaded empty, since scripts wait for it.
+//!
+//! Event handler attributes (`<button onclick="...">`, `<img onerror>`,
+//! `<body onload>` for the window) are compiled the first time their
+//! handler runs or is read, with the element, its form and the document on
+//! the scope chain, and run in their place among the event listeners. The
+//! `on*` properties override them, and changing an attribute updates its
+//! handler. Elements of extra documents never run theirs.
 //!
 //! Every node keeps one JS wrapper for as long as script can reach it, so
 //! identity and expando properties are stable, but wrappers do not keep

@@ -354,6 +354,9 @@
   tag(EventTarget, 'EventTarget');
 
   function invoke(target, event, s, phase, capture) {
+    // Event handlers are bubble-phase listeners; one set by a content
+    // attribute nothing has read yet joins the list here.
+    if (!capture) existingHandler(target, s.type);
     const list = listenersFor(target, s.type, false);
     if (list === undefined || list.length === 0) return;
     s.currentTarget = target;
@@ -515,21 +518,124 @@
     });
   }
 
-  // Event handler IDL attributes (`onload`, `onabort`, ...).
+  // Event handlers: the `on*` IDL attributes (`onload`, `onabort`, ...)
+  // and, for elements, the `on*` content attributes that set them.
   // https://html.spec.whatwg.org/#event-handler-attributes
+  //
+  // A handler is a record { value, source, owner, listener } per target and
+  // type. `value` is the function, or `source` the uncompiled body of a
+  // content attribute on the element `owner`, compiled the first time the
+  // handler runs or is read. `listener` is the handler's place among the
+  // target's event listeners while it is active.
+  //
+  // Content attributes reach here two ways. Changes made through the DOM
+  // call `attributeHandlerChanged`. Attributes the element was created with
+  // (by the parser, innerHTML or cloning) are only looked at when the
+  // handler is first needed, through `internals.handlerAttribute`; since
+  // they were set before script could add any listener, their handler goes
+  // first in the list.
 
   const handlerMaps = new WeakMap();
 
+  function handlerRecord(target, type, create) {
+    let map = handlerMaps.get(target);
+    if (map === undefined) {
+      if (!create) return undefined;
+      map = new Map();
+      handlerMaps.set(target, map);
+    }
+    let handler = map.get(type);
+    if (handler === undefined && create) {
+      handler = { value: null, source: null, owner: null, listener: null };
+      map.set(type, handler);
+    }
+    return handler;
+  }
+
+  function activateHandler(target, type, handler, first) {
+    if (handler.listener !== null) return;
+    const listener = {
+      callback: (event) => runHandler(handler, target, event),
+      capture: false,
+      once: false,
+      passive: false,
+      removed: false,
+    };
+    const list = listenersFor(target, type, true);
+    if (first) list.unshift(listener);
+    else list.push(listener);
+    handler.listener = listener;
+  }
+
+  function deactivateHandler(target, type, handler) {
+    handler.value = null;
+    handler.source = null;
+    handler.owner = null;
+    if (handler.listener !== null) removeListener(target, type, handler.listener);
+    handler.listener = null;
+  }
+
+  // The handler for `type` on `target`, if it has one, picking up a content
+  // attribute nothing has looked at yet.
+  function existingHandler(target, type) {
+    const handler = handlerRecord(target, type, false);
+    if (handler !== undefined) return handler;
+    const attribute = internals.handlerAttribute(target, type);
+    if (attribute === null) return undefined;
+    const created = handlerRecord(target, type, true);
+    created.owner = attribute[0];
+    created.source = attribute[1];
+    activateHandler(target, type, created, true);
+    return created;
+  }
+
+  // The content attribute that sets the handler for `type` on `target` was
+  // set to `value` on `owner`, or removed if `value` is null. Call it once
+  // the attribute has changed, and `existingHandler` just before, so an
+  // attribute the element was created with keeps its place.
+  // https://html.spec.whatwg.org/#event-handler-attributes:concept-element-attributes-change-ext
+  function attributeHandlerChanged(target, type, owner, value) {
+    const handler = handlerRecord(target, type, value !== null);
+    if (handler === undefined) return;
+    if (value === null) {
+      deactivateHandler(target, type, handler);
+      return;
+    }
+    handler.value = null;
+    handler.source = value;
+    handler.owner = owner;
+    activateHandler(target, type, handler, false);
+  }
+
+  // The handler's function, compiling an uncompiled one. A body that does
+  // not compile is reported and leaves the handler null.
+  // https://html.spec.whatwg.org/#getting-the-current-value-of-the-event-handler
+  function handlerValue(handler, target, type) {
+    if (handler.source !== null) {
+      const source = handler.source;
+      handler.source = null;
+      try {
+        handler.value = internals.compileHandler(handler.owner, type, source, target === globalThis);
+      } catch (error) {
+        handler.value = null;
+        reportError(error);
+      }
+      handler.owner = null;
+    }
+    return handler.value;
+  }
+
   function runHandler(handler, target, event) {
+    const callback = handlerValue(handler, target, event.type);
+    if (callback === null) return;
     let result;
-    if (handler.value === null) return;
     if (event.type === 'error' && target === globalThis && event instanceof ErrorEvent) {
-      result = ReflectApply(handler.value, target,
+      result = ReflectApply(callback, target,
         [event.message, event.filename, event.lineno, event.colno, event.error]);
       if (result === true) event.preventDefault();
       return;
     }
-    result = ReflectApply(handler.value, target, [event]);
+    result = ReflectApply(callback, target, [event]);
     if (result === false) event.preventDefault();
   }
 
@@ -537,36 +643,20 @@
     const type = name.slice(2);
     defineProperty(proto, name, {
       get() {
-        const map = handlerMaps.get(receiver(this));
-        const handler = map && map.get(type);
-        return handler ? handler.value : null;
+        const target = receiver(this);
+        const handler = existingHandler(target, type);
+        return handler === undefined ? null : handlerValue(handler, target, type);
       },
       set(value) {
         const target = receiver(this);
-        let map = handlerMaps.get(target);
-        if (map === undefined) {
-          map = new Map();
-          handlerMaps.set(target, map);
-        }
-        let handler = map.get(type);
-        if (handler === undefined) {
-          handler = { value: null, listener: null };
-          map.set(type, handler);
-        }
-        handler.value = typeof value === 'function' ? value : null;
-        if (handler.value === null) {
-          if (handler.listener !== null) removeListener(target, type, handler.listener);
-          handler.listener = null;
-        } else if (handler.listener === null) {
-          const listener = {
-            callback: (event) => runHandler(handler, target, event),
-            capture: false,
-            once: false,
-            passive: false,
-            removed: false,
-          };
-          listenersFor(target, type, true).push(listener);
-          handler.listener = listener;
+        const handler = existingHandler(target, type) || handlerRecord(target, type, true);
+        if (typeof value === 'function') {
+          handler.value = value;
+          handler.source = null;
+          handler.owner = null;
+          activateHandler(target, type, handler, false);
+        } else {
+          deactivateHandler(target, type, handler);
         }
       },
       configurable: true,
@@ -718,6 +808,14 @@
     rejectionOutstanding,
     rejectionHandled,
     defineEventHandlers,
+    attributeHandlerChanged,
+    existingHandler,
+    // The content attribute that sets the handler for a type on a target,
+    // as [element, source], or null. The DOM bindings replace it.
+    handlerAttribute: () => null,
+    // Compiles a content attribute's handler body. The DOM bindings
+    // replace it.
+    compileHandler: () => null,
     // The "get the parent" hook of event dispatch. The DOM bindings
     // replace it to give nodes their propagation path.
     eventParent: () => null,

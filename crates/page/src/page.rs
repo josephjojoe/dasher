@@ -15,10 +15,16 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::charset;
+use crate::refresh::{self, Refresh};
 use crate::script::{FetchParams, Order, ScriptElement, ScriptId, ScriptType, Scripts, base_url};
 
 /// Default for [`PageOptions::max_navigations`].
 pub const DEFAULT_MAX_NAVIGATIONS: usize = 5;
+
+/// Default for [`PageOptions::max_refresh_delay`]: long enough for "you
+/// will be redirected in 5 seconds" interstitials, short of the 30 seconds
+/// and up that pages polling for updates refresh at.
+pub const DEFAULT_MAX_REFRESH_DELAY: Duration = Duration::from_secs(10);
 
 /// How a [`Page`] is loaded.
 #[derive(Clone, Debug)]
@@ -27,11 +33,18 @@ pub struct PageOptions {
     /// [`RuntimeOptions::network`] are ignored: the page sets them to the
     /// document's URL and its session.
     pub runtime: RuntimeOptions,
-    /// How many script-triggered navigations (`location.href = …`,
-    /// `location.replace()`, `location.reload()`) are followed. Once they
-    /// are used up, further requests are dropped and the current document
-    /// stays.
+    /// How many navigations a page may trigger, through scripts
+    /// (`location.href = …`, `location.replace()`, `location.reload()`) or
+    /// declarative refreshes. Once they are used up, further requests are
+    /// dropped and the current document stays.
     pub max_navigations: usize,
+    /// The longest declarative refresh delay that is followed:
+    /// `<meta http-equiv="refresh" content="5; url=/next">` or a `Refresh`
+    /// header with a delay up to this sends the page to its URL that long
+    /// (in page time) after `load`. Longer ones are ignored, as are
+    /// refreshes that reload the same document unless their delay is 0.
+    /// `None` follows no refreshes.
+    pub max_refresh_delay: Option<Duration>,
     /// How long loading may take in all, navigations included. When it
     /// runs out, loading stops where it is and the page is returned as it
     /// stands (see [`Page::timed_out`]). `None` waits as long as it takes.
@@ -43,6 +56,7 @@ impl Default for PageOptions {
         Self {
             runtime: RuntimeOptions::default(),
             max_navigations: DEFAULT_MAX_NAVIGATIONS,
+            max_refresh_delay: Some(DEFAULT_MAX_REFRESH_DELAY),
             timeout: Some(Duration::from_secs(30)),
         }
     }
@@ -120,6 +134,8 @@ pub struct Page {
     headers: HeaderMap,
     encoding: &'static Encoding,
     timed_out: bool,
+    /// The document's declarative refresh, once one has been found.
+    refresh: Option<Refresh>,
 }
 
 impl fmt::Debug for Page {
@@ -205,16 +221,21 @@ impl Page {
             headers: response.headers().clone(),
             encoding: encoding_rs::UTF_8,
             timed_out: false,
+            refresh: None,
         };
         let referrer = referrer.map(String::from).unwrap_or_default();
-        match page.run_load(response, referrer).await {
+        let mut loaded = page.run_load(response, referrer).await;
+        page.js.set_document_write(DocumentWrite::Insert);
+        page.js.hold_detached_nodes(false);
+        if loaded.is_ok() {
+            loaded = page.await_refresh().await;
+        }
+        match loaded {
             // A navigation request stays pending for `navigate`.
             Ok(()) | Err(Stop::Navigate) => {}
             Err(Stop::Halted) => page.timed_out = true,
             Err(Stop::Limit(limit)) => return Err(LoadError::LimitExceeded(limit)),
         }
-        page.js.set_document_write(DocumentWrite::Insert);
-        page.js.hold_detached_nodes(false);
         Ok(page)
     }
 
@@ -314,8 +335,9 @@ impl Page {
         self.js.ready_state()
     }
 
-    /// Whether loading stopped before the `load` event because the time
-    /// limit ran out (or the runtime was interrupted).
+    /// Whether loading stopped before the `load` event, or while waiting
+    /// for a [refresh](PageOptions::max_refresh_delay) to come due, because
+    /// the time limit ran out (or the runtime was interrupted).
     pub fn timed_out(&self) -> bool {
         self.timed_out
     }
@@ -358,6 +380,15 @@ impl Page {
         let _loading = self.js.task_sender().begin_operation();
         let content_type = response.content_type().map(str::to_owned);
         let plain_text = content_type.as_deref().is_some_and(is_text_type);
+        // A Refresh header counts before any meta element.
+        self.refresh = response
+            .headers()
+            .get("refresh")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                let url = response.url();
+                Refresh::parse(v, url, url)
+            });
         let body = BodyReader::start(response);
         let mut wait = Wait::new(Some(body));
 
@@ -400,7 +431,8 @@ impl Page {
         parser.push(&charset::decode_chunk(&mut decoder, &head, eof));
         drop(head);
         loop {
-            let step = self.js.with_document_mut(|doc| parser.resume(doc));
+            // What the parser inserts is reported to mutation observers.
+            let step = self.js.with_parser(&mut parser, |p, doc| p.resume(doc));
             // Parsing alone can build too many nodes.
             if let Some(limit) = self.js.limit_exceeded() {
                 return Err(Stop::Limit(limit));
@@ -422,11 +454,12 @@ impl Page {
                 }
             }
         }
-        self.js.with_document_mut(|doc| parser.finish(doc));
+        self.js.with_parser(&mut parser, |p, doc| p.finish(doc));
         drop(parser);
         self.js.upgrade_custom_elements();
         self.js.hold_detached_nodes(false);
         self.preload_links(true);
+        self.find_refresh();
 
         self.js.set_ready_state(ReadyState::Interactive);
         self.check_navigation()?;
@@ -446,7 +479,66 @@ impl Page {
         self.js
             .fire_event(EventTarget::Window, "pageshow", false, false);
         self.js.set_document_write(DocumentWrite::Insert);
-        self.check_navigation()
+        self.check_navigation()?;
+        // Scripts may have inserted one.
+        self.find_refresh();
+        Ok(())
+    }
+
+    /// Looks for a `<meta http-equiv="refresh">`, unless the document
+    /// already has a refresh.
+    fn find_refresh(&mut self) {
+        if self.refresh.is_some() {
+            return;
+        }
+        let document_url = self.document_url();
+        self.refresh = self.js.with_document(|doc| {
+            refresh::find_meta(doc, &base_url(doc, &document_url), &document_url)
+        });
+    }
+
+    /// Schedules the document's refresh, if it has one that is to be
+    /// followed, and runs the page until it comes due and asks to
+    /// navigate (or the page asks to go elsewhere first).
+    async fn await_refresh(&mut self) -> Result<(), Stop> {
+        let Some(refresh) = self.refresh.take() else {
+            return Ok(());
+        };
+        let reloads = refresh.reloads(&self.document_url());
+        let skip = if self.options.max_refresh_delay.is_none() {
+            Some("refreshes are off")
+        } else if self.options.max_refresh_delay < Some(refresh.delay) {
+            Some("its delay is too long")
+        } else if !matches!(refresh.url.scheme(), "http" | "https") {
+            Some("not an http(s) URL")
+        } else if reloads && !refresh.delay.is_zero() {
+            Some("it reloads the page after a delay")
+        } else if self.navigations_left == 0 {
+            Some("too many navigations")
+        } else {
+            None
+        };
+        if let Some(reason) = skip {
+            self.js.log(
+                dasher_js::ConsoleLevel::Info,
+                format!(
+                    "Not following refresh to {} after {}s: {reason}",
+                    refresh.url,
+                    refresh.delay.as_secs()
+                ),
+            );
+            return Ok(());
+        }
+        self.js
+            .schedule_refresh(refresh.url.as_str(), refresh.delay);
+        let mut wait = Wait::new(None);
+        self.spin(&mut wait, Until::Run(RunLimits::default()))
+            .await?;
+        match wait.outcome {
+            Some(RunOutcome::DeadlineExceeded | RunOutcome::Interrupted) => Err(Stop::Halted),
+            Some(RunOutcome::LimitExceeded(limit)) => Err(Stop::Limit(limit)),
+            _ => Ok(()),
+        }
     }
 
     /// Prepares a script element the parser just closed and, if the parser

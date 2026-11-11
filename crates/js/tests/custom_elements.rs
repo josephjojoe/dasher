@@ -446,3 +446,28 @@ fn custom_elements_are_freed_when_unreachable() {
         nodes(&js)
     );
 }
+
+#[test]
+fn other_documents_have_no_custom_elements() {
+    let js = page("");
+    run(
+        &js,
+        "customElements.define('x-log', class extends Logged {}); \
+         globalThis.other = document.implementation.createHTMLDocument(''); \
+         globalThis.made = other.createElement('x-log'); \
+         other.body.innerHTML = '<x-log id=o></x-log>'; \
+         globalThis.imported = other.importNode(document.createElement('x-log'), true); \
+         globalThis.parsed = new DOMParser().parseFromString('<x-log id=p></x-log>', 'text/html');",
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "(() => { const C = customElements.get('x-log'); \
+               return [take(), made instanceof C, other.getElementById('o') instanceof C, imported instanceof C, \
+                 parsed.getElementById('p') instanceof C, \
+                 document.importNode(other.getElementById('o')) instanceof C, \
+                 document.body.appendChild(document.adoptNode(other.getElementById('o'))) instanceof C]; })()"
+        ),
+        r#"[["construct "],false,false,false,false,true,true]"#
+    );
+}

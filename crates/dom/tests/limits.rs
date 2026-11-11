@@ -69,3 +69,13 @@ fn deep_clones_stop_past_the_limit() {
     assert!(doc.node_limit_exceeded());
     assert!(doc.len() < before + 200, "{} nodes", doc.len() - before);
 }
+
+#[test]
+fn parsing_a_second_document_stops_past_the_limit() {
+    let mut doc = Document::parse("<p>page</p>");
+    doc.set_node_limit(Some(1000));
+    let other = doc.create_document();
+    doc.parse_document_into(other, &"<p>x</p>".repeat(100_000));
+    assert!(doc.node_limit_exceeded());
+    assert!(doc.len() < 10_000, "{} nodes", doc.len());
+}

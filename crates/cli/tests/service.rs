@@ -39,7 +39,15 @@ fn post(addr: &str, path: &str, body: &str) -> (u16, Value) {
 fn serve_answers_jobs_and_stops_on_sigterm() {
     let site = site();
     let mut child = Command::new(env!("CARGO_BIN_EXE_dasher"))
-        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        // The fixture site is on localhost.
+        .args([
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--allow-private-addresses",
+        ])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -108,6 +116,7 @@ fn a_binary_named_bootstrap_is_a_lambda_runtime() {
     std::fs::copy(env!("CARGO_BIN_EXE_dasher"), &bootstrap).unwrap();
     let output = Command::new(&bootstrap)
         .env("AWS_LAMBDA_RUNTIME_API", api.addr().to_string())
+        .env("DASHER_ALLOW_PRIVATE_ADDRESSES", "true")
         .output()
         .unwrap();
     std::fs::remove_dir_all(&dir).unwrap();

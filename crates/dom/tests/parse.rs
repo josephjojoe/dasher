@@ -394,3 +394,48 @@ fn parse_fragment_returns_a_detached_fragment() {
     assert_eq!(doc.inner_html(frag), "a<b>c</b>");
     assert_eq!(doc.first_child(body), None);
 }
+
+#[test]
+fn documents_parse_into_a_second_document_node() {
+    let mut doc = Document::parse("<!DOCTYPE html><title>Page</title>");
+    let other = doc.create_document();
+    let quirks = doc.parse_document_into(
+        other,
+        "<title>Other</title><body><noscript><p>x</p></noscript><script>run()</script>",
+    );
+    // No doctype: the new document is in quirks mode, the page is not.
+    assert_eq!(quirks, QuirksMode::Quirks);
+    assert_eq!(doc.quirks_mode(), QuirksMode::NoQuirks);
+    assert_eq!(
+        doc.inner_html(other),
+        "<html><head><title>Other</title></head><body>\
+         <noscript><p>x</p></noscript><script>run()</script></body></html>"
+    );
+    // Its nodes are not the page's: not connected, and not seen by the
+    // document-level queries.
+    let script = doc
+        .descendants(other)
+        .find(|&n| doc.is_html(n, Name::SCRIPT))
+        .unwrap();
+    assert!(!doc.is_connected(script));
+    assert!(doc.script_already_started(script), "scripts never run");
+    assert_eq!(doc.title(), "Page");
+    assert_eq!(doc.tree_root(script), other);
+    // Scripting was off: noscript content is markup.
+    let noscript = doc
+        .descendants(other)
+        .find(|&n| doc.is_html(n, Name::NOSCRIPT))
+        .unwrap();
+    assert!(doc.is_html(doc.first_child(noscript).unwrap(), Name::P));
+}
+
+#[test]
+fn parsing_into_a_document_keeps_its_doctype() {
+    let mut doc = Document::parse("<p>quirky page");
+    let other = doc.create_document();
+    let quirks = doc.parse_document_into(other, "<!DOCTYPE html><p>hi");
+    assert_eq!(quirks, QuirksMode::NoQuirks);
+    assert_eq!(doc.quirks_mode(), QuirksMode::Quirks);
+    let dt = doc.first_child(other).unwrap();
+    assert_eq!(doc.doctype(dt).unwrap().name.as_ref(), "html");
+}

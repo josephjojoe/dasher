@@ -197,6 +197,7 @@ impl Page {
             runtime: self.runtime_options(),
             max_navigations: self.browser.max_navigations(),
             timeout: Some(timeout),
+            ..PageOptions::default()
         };
         let page = dasher_page::Page::load(&self.session, url, page_options).await?;
         let mut timed_out = page.timed_out();

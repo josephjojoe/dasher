@@ -27,7 +27,8 @@ view, where `querySelector` and `innerHTML` stop at shadow roots.
 | `adoptedCallback`, scoped custom element registries | `adoptedCallback` never runs (there is one document); `new CustomElementRegistry()` throws |
 | Form-associated custom elements | `attachInternals()` works, but every control counts as valid and its value is never submitted |
 | `:defined`, `:host`, `::part()`, `::slotted()` in selectors | `:defined` matches every element; the shadow-scoped ones never match |
-| `DOMParser`, `XMLSerializer`, XML documents, `responseXML` | `DOMParser` is undefined; `document.implementation.createHTMLDocument()` is the only way to make a second document |
+| `XMLSerializer` | Undefined; use `outerHTML` |
+| DTD entities and processing instructions in XML documents | Entities a DTD declares are an error (as in browsers without the DTD); processing instructions are dropped |
 | `document.evaluate` / XPath | Undefined |
 | `Range` constructor | Undefined (`document.createRange()` exists) |
 | `FileReader` | Undefined; use `blob.text()` / `arrayBuffer()` |

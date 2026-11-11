@@ -50,7 +50,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use dasher_css::SelectorList;
-use dasher_dom::{Document, NodeId};
+use dasher_dom::{Document, DocumentParser, NodeId, NodeKind};
 use rquickjs::{Ctx, Function, Object, qjs};
 
 use crate::clock::Clock;
@@ -114,6 +114,15 @@ pub(crate) struct DomState {
     layout_seen: Cell<u32>,
     /// The node limit every document of the page gets.
     node_limit: Option<usize>,
+    /// Whether scripts were told the parser inserted the body.
+    body_seen: Cell<bool>,
+    /// Set once script has made a document besides the page's.
+    extra_documents: Cell<bool>,
+    /// The node documents of detached trees that belong to a document other
+    /// than the page's: tree root -> that document node. A tree under a
+    /// document node belongs to it, and any other tree to the page. Empty
+    /// unless script uses extra documents.
+    owners: RefCell<HashMap<NodeId, NodeId>>,
 }
 
 impl DomState {
@@ -136,6 +145,9 @@ impl DomState {
             hold: Cell::new(false),
             layout_watch: Cell::new(false),
             layout_seen: Cell::new(0),
+            body_seen: Cell::new(false),
+            extra_documents: Cell::new(false),
+            owners: RefCell::default(),
         }
     }
 
@@ -190,6 +202,57 @@ impl DomState {
         Ok(list)
     }
 
+    /// Notes that script made a document besides the page's.
+    pub(crate) fn note_extra_document(&self) {
+        self.extra_documents.set(true);
+    }
+
+    /// `id`'s node document: the document node at the root of its tree, or
+    /// for a detached tree the document it was made in or last adopted by.
+    pub(crate) fn owner_document(&self, doc: &Document, id: NodeId) -> NodeId {
+        if !self.extra_documents.get() {
+            return doc.root();
+        }
+        let root = group_root(doc, id);
+        if doc.kind(root) == NodeKind::Document {
+            return root;
+        }
+        self.owners
+            .borrow()
+            .get(&root)
+            .copied()
+            .unwrap_or(doc.root())
+    }
+
+    /// Makes `owner` the node document of the detached tree rooted at `root`.
+    pub(crate) fn set_owner(&self, doc: &Document, root: NodeId, owner: NodeId) {
+        if doc.parent(root).is_some() || self::owner(doc, root).is_some() {
+            return;
+        }
+        let mut owners = self.owners.borrow_mut();
+        if owner == doc.root() || doc.kind(root) == NodeKind::Document {
+            owners.remove(&root);
+        } else {
+            owners.insert(root, owner);
+        }
+    }
+
+    /// Keeps node documents in step after the tree at `root` was taken out
+    /// of `from`: it still belongs to the document it was in.
+    pub(crate) fn removed_from(&self, doc: &Document, root: NodeId, from: NodeId) {
+        if self.extra_documents.get() {
+            self.set_owner(doc, root, self.owner_document(doc, from));
+        }
+    }
+
+    /// Keeps node documents in step after `node` was inserted: it now
+    /// belongs to the document of its new tree.
+    pub(crate) fn inserted(&self, doc: &Document, node: NodeId) {
+        if self.extra_documents.get() && doc.parent(node).is_some() {
+            self.owners.borrow_mut().remove(&node);
+        }
+    }
+
     /// Queues `id`'s tree to be released if it turns out to be garbage.
     pub(crate) fn add_candidate(&self, id: NodeId) {
         self.candidates.borrow_mut().push(id);
@@ -224,6 +287,12 @@ impl DomState {
                 .filter(|&r| !any_in_tree(doc, r, |n| wrappers.contains_key(&n)))
                 .collect()
         };
+        if !garbage.is_empty() && !self.owners.borrow().is_empty() {
+            // Forget released trees, and the documents that owned them.
+            self.owners.borrow_mut().retain(|&tree, &mut owner| {
+                !garbage.contains(&group_root(doc, tree)) && !garbage.contains(&owner)
+            });
+        }
         for root in garbage {
             doc.release(root);
         }
@@ -333,6 +402,64 @@ impl JsRuntime {
         result
     }
 
+    /// Runs `f`, which parses into the page's document with `parser`, with
+    /// write access to the document as [`with_document_mut`] gives.
+    ///
+    /// Unlike other host changes, what the parser builds is reported to
+    /// `MutationObserver`s, as browsers report it: a `childList` record for
+    /// each node inserted (or moved, for misnested markup), a
+    /// `characterData` record when text is added to a text node that was
+    /// there before this call, and an `attributes` record for each
+    /// attribute a repeated `<html>` or `<body>` tag adds. If any are
+    /// queued, a microtask checkpoint follows, as one does in browsers
+    /// before the parser runs a script and after it parses each chunk of
+    /// input, so observers have seen the new nodes before the next script
+    /// runs. While nothing is observed the parser logs nothing.
+    ///
+    /// Once the parser has inserted the body, before those records go out,
+    /// the body's window event handler attributes (`<body onload="...">`)
+    /// set the window's handlers, replacing any that scripts set before, as
+    /// in browsers.
+    ///
+    /// [`with_document_mut`]: Self::with_document_mut
+    pub fn with_parser<R>(
+        &self,
+        parser: &mut DocumentParser,
+        f: impl FnOnce(&mut DocumentParser, &mut Document) -> R,
+    ) -> R {
+        let dom = Rc::clone(&self.shared().dom);
+        let observed = dom.is_observed();
+        parser.log_changes(observed);
+        let result = self.with_document_mut(|doc| f(parser, doc));
+        self.note_parsed_body();
+        if observed {
+            dom.parser_changes(&dom.doc(), &parser.take_changes());
+            if dom.has_pending_records() {
+                self.with(|ctx| {
+                    if let Err(e) = mutation::deliver(&ctx, &dom) {
+                        self.shared().report_uncaught(&ctx, e);
+                    }
+                });
+                self.perform_microtask_checkpoint();
+            }
+        }
+        result
+    }
+
+    /// The first time the document has a body, tells scripts (see
+    /// [`with_parser`](Self::with_parser)).
+    fn note_parsed_body(&self) {
+        let dom = &self.shared().dom;
+        if dom.body_seen.get() {
+            return;
+        }
+        let Some(body) = dom.doc().body() else {
+            return;
+        };
+        dom.body_seen.set(true);
+        self.body_inserted(body);
+    }
+
     /// While `hold` is set, nodes detached from the document are not freed,
     /// even once nothing refers to them, so node ids the host keeps across
     /// script runs stay valid. The page loader holds them while it parses,
@@ -358,9 +485,11 @@ impl JsRuntime {
         // The document node keeps its wrapper, and so its observers.
         let root = dom.doc.borrow().root();
         dom.observed.borrow_mut().retain(|&n| n == root);
+        dom.owners.borrow_mut().clear();
         dom.pending.borrow_mut().clear();
         dom.ce_custom.borrow_mut().clear();
         dom.ce_reactions.borrow_mut().clear();
+        dom.body_seen.set(false);
         dom.bump();
         drop(old);
     }
@@ -398,6 +527,8 @@ mod tests {
             pool.push(document.createDocumentFragment(), document.createDocumentFragment());
             const template = document.createElement('template');
             pool.push(template, template.content);
+            const other = document.implementation.createHTMLDocument('');
+            pool.push(other.body, other.createElement('p'), other.createDocumentFragment());
             const host = document.createElement('my-host');
             pool.push(host, host.attachShadow({ mode: 'open' }));
             customElements.define('x-r', class extends HTMLElement {
@@ -408,7 +539,7 @@ mod tests {
             const pick = () => pool[rand(pool.length)];
             globalThis.step = () => {
               const a = pick(), b = pick();
-              const op = rand(12);
+              const op = rand(14);
               try {
                 switch (op) {
                   case 0: a.appendChild(b); break;
@@ -422,7 +553,9 @@ mod tests {
                   case 8: a.replaceChildren(b, 'y'); break;
                   case 9: if (pool.length > 10) pool.splice(rand(pool.length - 1) + 1, 1); break;
                   case 10: a.append(b.cloneNode(true)); break;
-                  case 11: if (!a.shadowRoot && a.attachShadow) { pool.push(a.attachShadow({ mode: 'open', clonable: true })); } break;
+                  case 11: pool.push(document.adoptNode(b)); break;
+                  case 12: { const c = other.importNode(b, true); a.append(c); pool.push(c); break; }
+                  case 13: if (!a.shadowRoot && a.attachShadow) { pool.push(a.attachShadow({ mode: 'open', clonable: true })); } break;
                 }
               } catch (e) {
                 if (!(e instanceof DOMException) && !(e instanceof TypeError)) throw e;

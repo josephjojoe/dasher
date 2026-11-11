@@ -143,6 +143,42 @@ async fn script_load_failures_fire_error_and_parsing_goes_on() {
 }
 
 #[tokio::test]
+async fn inline_handler_attributes_run() {
+    let server = FixtureServer::builder()
+        // The body's attribute replaces the handler a head script set.
+        .route("/body-onload", |_| {
+            bytes_page(
+                "text/html",
+                b"<script>window.log = []; window.onload = () => log.push('head script');</script>\
+                  <body onload=\"log.push('attr', document.readyState)\">\
+                  <button onclick=\"log.push('click', this.tagName)\"></button>",
+            )
+        })
+        // A script after the body replaces the attribute's handler.
+        .route("/script-after-body", |_| {
+            bytes_page(
+                "text/html",
+                b"<script>window.log = [];</script><body onload=\"log.push('attr')\">\
+                  <script>window.onload = () => log.push('body script');</script>",
+            )
+        })
+        .start()
+        .unwrap();
+
+    let page = load(&server, "/body-onload").await;
+    page.js()
+        .run_script("document.querySelector('button').click()", "test.js")
+        .unwrap();
+    assert_eq!(
+        json(&page, "log"),
+        r#"["attr","complete","click","BUTTON"]"#
+    );
+
+    let page = load(&server, "/script-after-body").await;
+    assert_eq!(json(&page, "log"), r#"["body script"]"#);
+}
+
+#[tokio::test]
 async fn honours_the_declared_or_sniffed_charset() {
     let server = FixtureServer::builder()
         .route("/latin1-header", |_| {
@@ -464,4 +500,48 @@ async fn parsed_custom_elements_are_upgraded_before_the_next_script() {
         json(&page, "log"),
         r#"["construct a","connected a","construct b","connected b","script sees 2 true","construct d","connected d","late c"]"#
     );
+}
+
+#[tokio::test]
+async fn mutation_observers_see_what_the_parser_inserts() {
+    // An observer registered in the head processes items as they arrive,
+    // as ad, anti-flicker and "upgrade elements as they load" scripts do.
+    let page_html = r#"<!DOCTYPE html><html><head><script>
+        globalThis.log = [];
+        new MutationObserver((records) => {
+          for (const r of records) {
+            for (const n of r.addedNodes) {
+              if (n.nodeType === 1 && n.classList.contains('item')) {
+                n.dataset.seen = 'yes';
+                log.push('saw ' + n.id);
+              }
+            }
+          }
+        }).observe(document.documentElement, { childList: true, subtree: true });
+      </script></head><body>
+      <div class=item id=a></div><div class=item id=b></div>
+      <script src=/blocking.js></script>
+      <div class=item id=c></div>
+    </body></html>"#;
+    let server = FixtureServer::builder()
+        .route("/observe", move |_| FixtureResponse::html(page_html))
+        .route("/blocking.js", |_| {
+            FixtureResponse::ok(
+                "text/javascript",
+                "log.push('script, a seen: ' + document.getElementById('a').dataset.seen);",
+            )
+        })
+        .path_latency("/blocking.js", Duration::from_millis(50))
+        .start()
+        .unwrap();
+    let page = load(&server, "/observe").await;
+    assert_eq!(
+        serde_list(&json(&page, "log")),
+        ["saw a", "saw b", "script, a seen: yes", "saw c"]
+    );
+    assert_eq!(
+        json(&page, "document.querySelectorAll('[data-seen=yes]').length"),
+        "3"
+    );
+    assert_eq!(page.js().take_errors(), []);
 }

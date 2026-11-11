@@ -152,7 +152,7 @@ fn mutation_errors_are_dom_exceptions() {
         attempt(() => document.querySelector('div['));
         attempt(() => a.querySelector('##'));
         attempt(() => document.documentElement.outerHTML = '<p>');
-        attempt(() => new Document());
+        attempt(() => new Document().appendChild(document.createTextNode('x')));
         attempt(() => new Node());
         attempt(() => a.insertAdjacentHTML('nowhere', 'x'));
         errors
@@ -160,7 +160,7 @@ fn mutation_errors_are_dom_exceptions() {
     );
     assert_eq!(
         out,
-        r#"["HierarchyRequestError:3","NotFoundError:8","NotFoundError:8","HierarchyRequestError:3","InvalidCharacterError:5","InvalidCharacterError:5","TypeError","SyntaxError:12","SyntaxError:12","NoModificationAllowedError:7","NotSupportedError:9","TypeError","SyntaxError:12"]"#
+        r#"["HierarchyRequestError:3","NotFoundError:8","NotFoundError:8","HierarchyRequestError:3","InvalidCharacterError:5","InvalidCharacterError:5","TypeError","SyntaxError:12","SyntaxError:12","NoModificationAllowedError:7","HierarchyRequestError:3","TypeError","SyntaxError:12"]"#
     );
 }
 
@@ -1090,6 +1090,170 @@ fn create_html_document_builds_an_inert_document() {
 }
 
 #[test]
+fn nodes_keep_the_document_they_were_made_in() {
+    let js = page("<div id=target></div>");
+    run(
+        &js,
+        r#"
+        window.doc = document.implementation.createHTMLDocument('');
+        window.made = doc.createElement('p');
+        made.innerHTML = '<b>x</b><i>y</i>';
+        "#,
+    );
+    // Detached nodes made by a document belong to it, all the way down,
+    // and so do nodes taken out of one of its trees.
+    assert_eq!(
+        eval(
+            &js,
+            "[made.ownerDocument === doc, made.firstChild.ownerDocument === doc,              doc.createTextNode('t').ownerDocument === doc,              doc.createDocumentFragment().ownerDocument === doc,              doc.createComment('c').ownerDocument === doc,              made.cloneNode(true).lastChild.ownerDocument === doc,              (() => { const b = made.firstChild; b.remove(); return b.ownerDocument === doc; })(),              (() => { doc.body.append(made); made.remove(); return made.ownerDocument === doc; })(),              document.createElement('a').ownerDocument === document, doc.ownerDocument]"
+        ),
+        "[true,true,true,true,true,true,true,true,true,null]"
+    );
+    // Inserting into the page's tree, importing or adopting moves nodes to
+    // the page's document, and back.
+    assert_eq!(
+        eval(
+            &js,
+            "(() => {                const target = document.getElementById('target');                const a = doc.createElement('a'); target.append(a); a.remove();                const imported = document.importNode(made, true);                const adopted = document.adoptNode(doc.createElement('em'));                const back = doc.adoptNode(document.createElement('u'));                const html = doc.importNode(document.documentElement, false);                return [a.ownerDocument === document, imported.ownerDocument === document,                  imported.firstChild.ownerDocument === document, made.ownerDocument === doc,                  adopted.ownerDocument === document, back.ownerDocument === doc,                  html.ownerDocument === doc];              })()"
+        ),
+        "[true,true,true,true,true,true,true]"
+    );
+    // A node made by a document that is gone falls back to the page's.
+    run(
+        &js,
+        "window.orphan = document.implementation.createHTMLDocument('').createElement('div');          delete window.doc;",
+    );
+    js.run_gc();
+    run(
+        &js,
+        "document.body.appendChild(document.createElement('i'));",
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[orphan.ownerDocument === document, made.ownerDocument === document,              orphan.ownerDocument.createElement('x').ownerDocument === document]"
+        ),
+        "[true,true,true]"
+    );
+}
+
+#[test]
+fn dom_parser_parses_inert_html_documents() {
+    let js = page("<title>Page</title><div id=target></div>");
+    run(
+        &js,
+        r#"
+        window.parsed = new DOMParser().parseFromString(
+            '<title>Parsed</title><div id=a class=x>one<img src=x onerror="window.ran = 1"></div>' +
+            '<script>window.ran = 2</script><noscript><b>markup</b></noscript>', 'text/html');
+        "#,
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[parsed instanceof Document, parsed instanceof HTMLDocument, parsed === document, \
+             parsed.title, parsed.compatMode, parsed.contentType, parsed.URL, parsed.readyState, \
+             parsed.body.children.length, parsed.querySelector('.x').id, parsed.getElementById('a').ownerDocument === parsed, \
+             parsed.querySelector('noscript b').textContent, parsed.defaultView, document.title, \
+             new DOMParser().parseFromString('<!DOCTYPE html><p>', 'text/html').compatMode, \
+             String(new DOMParser())]"
+        ),
+        r#"[true,true,false,"Parsed","BackCompat","text/html","https://example.com/dir/page.html","complete",3,"a",true,"markup",null,"Page","CSS1Compat","[object DOMParser]"]"#
+    );
+    // Moving the nodes into the page adopts them, and its scripts still
+    // never run.
+    run(
+        &js,
+        "const t = document.getElementById('target'); \
+         t.append(document.adoptNode(parsed.getElementById('a'))); \
+         t.append(parsed.querySelector('script')); \
+         t.append(document.importNode(parsed.body, true));",
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[window.ran, document.querySelectorAll('#target #a').length, \
+             document.getElementById('a').ownerDocument === document, parsed.body.children.length, \
+             document.querySelector('#target body') !== null]"
+        ),
+        "[null,1,true,1,true]"
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "(() => { try { new DOMParser().parseFromString('x', 'text/plain'); } catch (e) { return e.name; } })()"
+        ),
+        json("TypeError")
+    );
+}
+
+#[test]
+fn xml_documents() {
+    let js = page("");
+    run(
+        &js,
+        r##"
+        window.xml = new DOMParser().parseFromString(
+            '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><Title>A &amp; B</Title></entry>' +
+            '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg></feed>', 'application/xml');
+        "##,
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[xml instanceof XMLDocument, xml.contentType, xml.documentElement.tagName, \
+             xml.documentElement.namespaceURI, xml.getElementsByTagName('Title')[0].textContent, \
+             xml.getElementsByTagName('title').length, xml.querySelector('circle') instanceof SVGElement, \
+             xml.querySelector('entry') instanceof HTMLElement, xml.createElement('Mixed').tagName, \
+             xml.createElement('x').namespaceURI]"
+        ),
+        r#"[true,"application/xml","feed","http://www.w3.org/2005/Atom","A & B",0,true,false,"Mixed",null]"#
+    );
+    // Malformed XML gives a document with a parsererror element.
+    assert_eq!(
+        eval(
+            &js,
+            "(() => { const d = new DOMParser().parseFromString('<a><b></a>', 'text/xml'); \
+             const e = d.getElementsByTagName('parsererror'); \
+             return [e.length, d.documentElement.tagName, /XML Parsing Error: .*<\\/a>.* line 1/.test(e[0].textContent)]; })()"
+        ),
+        r#"[1,"parsererror",true]"#
+    );
+    // new Document() and createDocument() make empty XML documents.
+    assert_eq!(
+        eval(
+            &js,
+            "(() => { \
+               const d = new Document(); \
+               const x = document.implementation.createDocument('http://www.w3.org/2000/svg', 'svg', null); \
+               const e = document.implementation.createDocument(null, '', null); \
+               d.appendChild(d.createElement('root')).appendChild(d.createTextNode('t')); \
+               return [d instanceof Document, d instanceof XMLDocument, d.contentType, d.documentElement.outerHTML, \
+                 x instanceof XMLDocument, x.contentType, x.documentElement.namespaceURI, e.childNodes.length, \
+                 d.documentElement.ownerDocument === d]; \
+             })()"
+        ),
+        r#"[true,false,"application/xml","<root>t</root>",true,"image/svg+xml","http://www.w3.org/2000/svg",0,true]"#
+    );
+}
+
+#[test]
+fn writing_to_a_document_made_by_script() {
+    let js = page("<p>page</p>");
+    assert_eq!(
+        eval(
+            &js,
+            "(() => { \
+               const d = document.implementation.createHTMLDocument(''); \
+               d.open(); d.write('<!DOCTYPE html><title>W</title><p id=a>one'); d.writeln('</p><p>two</p>'); d.close(); \
+               return [d.title, d.body.innerHTML, d.compatMode, document.body.innerHTML]; \
+             })()"
+        ),
+        r#"["W","<p id=\"a\">one</p><p>two</p>\n","CSS1Compat","<p>page</p>"]"#
+    );
+}
+
+#[test]
 fn documents_from_create_html_document_are_freed_once_unreachable() {
     let js = page("");
     let base = nodes(&js);
@@ -1121,5 +1285,53 @@ fn documents_from_create_html_document_are_freed_once_unreachable() {
         nodes(&js) <= base + 2,
         "{} nodes, {base} at start",
         nodes(&js)
+    );
+    // The same for parsed documents and nodes they made.
+    let base = nodes(&js);
+    run(
+        &js,
+        r#"
+        for (let i = 0; i < 20; i++) {
+            const d = new DOMParser().parseFromString('<p>x</p>'.repeat(20), 'text/html');
+            new DOMParser().parseFromString('<r>' + '<i>x</i>'.repeat(20) + '</r>', 'text/xml');
+            window.made = d.createElement('div');
+            made.innerHTML = '<b>y</b>';
+        }
+        "#,
+    );
+    js.run_gc();
+    run(
+        &js,
+        "delete window.made; document.body.appendChild(document.createElement('i'));",
+    );
+    js.run_gc();
+    run(
+        &js,
+        "document.body.appendChild(document.createElement('i'));",
+    );
+    assert!(
+        nodes(&js) <= base + 2,
+        "{} nodes, {base} at start",
+        nodes(&js)
+    );
+}
+
+#[test]
+fn mixin_members_marked_unscopable_are_hidden_from_with() {
+    let js = page("<p id=p></p>");
+    let out = eval(
+        &js,
+        r#"
+        const u = Element.prototype[Symbol.unscopables];
+        const p = document.getElementById('p');
+        // `with` needs sloppy code.
+        const lookup = new Function('el', 'with (el) return [typeof remove, typeof append, typeof querySelector]');
+        [Object.keys(u).sort(), Object.getPrototypeOf(u), Object.keys(Document.prototype[Symbol.unscopables]).sort(),
+         Object.keys(CharacterData.prototype[Symbol.unscopables]).sort(), lookup(p)]
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"[["after","append","before","prepend","remove","replaceChildren","replaceWith"],null,["append","prepend","replaceChildren"],["after","before","remove","replaceWith"],["undefined","undefined","function"]]"#
     );
 }

@@ -423,6 +423,7 @@ pub(crate) fn after_insert<'js>(
     moved: &[NodeId],
     plan: Move,
 ) {
+    dom.inserted(doc, node);
     let whole = match plan {
         Move::SameTree => return,
         Move::WholeTree | Move::Fragment => dom.cached(ctx, node),
@@ -458,9 +459,16 @@ pub(crate) fn after_insert<'js>(
     }
 }
 
-/// Regroups wrappers after the subtree at `root` was detached. If nothing in
-/// it has a wrapper, it is queued to be freed.
-pub(crate) fn after_remove(ctx: &Ctx<'_>, dom: &DomState, doc: &Document, root: NodeId) {
+/// Regroups wrappers after the subtree at `root` was detached from `from`.
+/// If nothing in it has a wrapper, it is queued to be freed.
+pub(crate) fn after_remove(
+    ctx: &Ctx<'_>,
+    dom: &DomState,
+    doc: &Document,
+    root: NodeId,
+    from: NodeId,
+) {
+    dom.removed_from(doc, root, from);
     let wrappers = wrapped_under(ctx, dom, doc, &[root]);
     let Some((first, rest)) = wrappers.split_first() else {
         dom.add_candidate(root);
@@ -516,20 +524,27 @@ pub(crate) fn detach_all(ctx: &Ctx<'_>, dom: &DomState) {
 }
 
 /// Checks that the rings match the trees: each wrapper's ring holds exactly
-/// the live wrappers of its tree, and the links are mirrored.
+/// the live wrappers of its tree, and the links are mirrored. Also checks
+/// the node documents of detached trees.
 #[cfg(test)]
 pub(crate) fn check_groups(ctx: &Ctx<'_>, dom: &DomState) -> std::result::Result<(), String> {
     let ids: Vec<NodeId> = dom.wrappers.borrow().keys().copied().collect();
     let doc = dom.doc();
+    let mut by_root: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for &id in &ids {
+        by_root.entry(group_root(&doc, id)).or_default().push(id);
+    }
+    for list in by_root.values_mut() {
+        list.sort_unstable();
+    }
+    // Each ring is walked once, from the first of its wrappers met.
+    let mut seen = std::collections::HashSet::new();
+    for &id in &ids {
+        if seen.contains(&id) {
+            continue;
+        }
         let node = dom.cached(ctx, id).ok_or("cache entry vanished")?;
-        let root = group_root(&doc, id);
-        let mut expected: Vec<NodeId> = ids
-            .iter()
-            .copied()
-            .filter(|&other| group_root(&doc, other) == root)
-            .collect();
-        expected.sort_unstable();
+        let expected = &by_root[&group_root(&doc, id)];
         let mut ring = vec![id];
         let mut n = next(&node);
         while n != node {
@@ -542,11 +557,22 @@ pub(crate) fn check_groups(ctx: &Ctx<'_>, dom: &DomState) -> std::result::Result
             }
             n = next(&n);
         }
+        seen.extend(ring.iter().copied());
         ring.sort_unstable();
-        if ring != expected {
+        if &ring != expected {
             return Err(format!(
                 "ring of {id:?} is {ring:?}, but its tree has wrappers {expected:?}"
             ));
+        }
+    }
+    // Node documents name live detached roots and live document nodes
+    // (looking at a released node panics).
+    for (&tree, &owner) in dom.owners.borrow().iter() {
+        if doc.kind(owner) != NodeKind::Document {
+            return Err(format!("{tree:?} is owned by {owner:?}, not a document"));
+        }
+        if doc.kind(tree) == NodeKind::Document || doc.parent(tree).is_some() {
+            return Err(format!("{tree:?} has an owner but is not a detached root"));
         }
     }
     Ok(())

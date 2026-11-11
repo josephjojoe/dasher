@@ -31,8 +31,6 @@
   }
 
   const KEY = Symbol('dom');
-  // Set once createHTMLDocument has made a second document.
-  let otherDocuments = false;
   function illegal(key) {
     if (key !== KEY) throw new TypeError('Illegal constructor');
   }
@@ -319,12 +317,7 @@
       return N.isConnected(this);
     }
     get ownerDocument() {
-      if (N.nodeType(this) === 9) return null;
-      if (!otherDocuments) return documentNode;
-      // Nodes in a document made by createHTMLDocument belong to it.
-      // Detached nodes are taken to belong to the page's document.
-      const root = N.rootNode(this);
-      return N.nodeType(root) === 9 ? root : documentNode;
+      return N.nodeType(this) === 9 ? null : N.ownerDocument(this);
     }
     getRootNode(options) {
       let root = N.rootNode(this);
@@ -441,12 +434,15 @@
   tag(Node, 'Node');
 
   // Copies the JS-side state that cloning carries over (form control values).
-  function cloneWithState(node, deep) {
+  // `into`: the document the copy belongs to, if not the source's.
+  function cloneWithState(node, deep, into) {
     const copy = N.clone(node, deep);
     const hook = internals.cloningSteps;
     if (typeof hook === 'function') hook(node, copy);
-    // Copies of custom elements are upgraded before the copy is returned.
-    internals.upgradeCustomElementsIn(copy);
+    if (into !== undefined) N.setOwner(copy, into);
+    // Copies of custom elements are upgraded before the copy is returned,
+    // in the page's document (the only one with custom elements).
+    if (N.ownerDocument(copy) === documentNode) internals.upgradeCustomElementsIn(copy);
     return copy;
   }
 
@@ -539,12 +535,27 @@
     },
   };
 
+  // The mixin members the DOM marks [Unscopable], which `with` scopes (such
+  // as inline event handlers' element scope) skip, so `remove()` in an
+  // `onclick` attribute does not mean the element's.
+  const UNSCOPABLE = new Map([
+    [ParentNode, ['prepend', 'append', 'replaceChildren']],
+    [ChildNode, ['before', 'after', 'replaceWith', 'remove']],
+  ]);
+
   function mixin(target, source) {
+    const proto = target.prototype;
     for (const key of Reflect.ownKeys(source)) {
       const desc = Object.getOwnPropertyDescriptor(source, key);
       desc.enumerable = true;
-      defineProperty(target.prototype, key, desc);
+      defineProperty(proto, key, desc);
     }
+    const unscopable = UNSCOPABLE.get(source);
+    if (unscopable === undefined) return;
+    if (!Object.prototype.hasOwnProperty.call(proto, Symbol.unscopables)) {
+      defineProperty(proto, Symbol.unscopables, { value: Object.create(null), configurable: true });
+    }
+    for (const name of unscopable) proto[Symbol.unscopables][name] = true;
   }
 
   // ---------------------------------------------------------------------
@@ -910,7 +921,7 @@
     get prefix() { return splitName(attrState(this).name)[0]; },
     get namespaceURI() { return attrState(this).ns; },
     get ownerElement() { return attrState(this).owner; },
-    get ownerDocument() { return documentNode; },
+    get ownerDocument() { const o = attrState(this).owner; return o === null ? documentNode : o.ownerDocument; },
     get specified() { return true; },
     get value() {
       const a = attrState(this);
@@ -3228,8 +3239,9 @@
     'onmessage', 'onmessageerror', 'onoffline', 'ononline', 'onpagehide', 'onpageshow',
     'onpopstate', 'onrejectionhandled', 'onstorage', 'onunhandledrejection', 'onunload',
   ];
+  const BODY_WINDOW_HANDLERS = [...WINDOW_HANDLERS, 'onblur', 'onerror', 'onfocus', 'onload', 'onresize', 'onscroll'];
   for (const C of [I.HTMLBodyElement, I.HTMLFrameSetElement]) {
-    for (const name of [...WINDOW_HANDLERS, 'onblur', 'onerror', 'onfocus', 'onload', 'onresize', 'onscroll']) {
+    for (const name of BODY_WINDOW_HANDLERS) {
       defineProperty(C.prototype, name, {
         get() { return globalThis[name]; },
         set(v) { globalThis[name] = v; },
@@ -3239,6 +3251,136 @@
     }
   }
   reflect(I.HTMLBodyElement, { text: 'string', link: 'string', vLink: ['string', 'vlink'], aLink: ['string', 'alink'], bgColor: ['string', 'bgcolor'], background: 'string' });
+
+  // ---------------------------------------------------------------------
+  // Event handler content attributes: `<button onclick="...">`,
+  // `<body onload="...">`. events.js keeps the handlers; this decides which
+  // attributes set one, and compiles them.
+  // https://html.spec.whatwg.org/#event-handler-content-attributes
+
+  const ELEMENT_HANDLER_TYPES = new Set(GLOBAL_HANDLERS.map((name) => name.slice(2)));
+  const WINDOW_HANDLER_TYPES = new Set(BODY_WINDOW_HANDLERS.map((name) => name.slice(2)));
+
+  function isBodyLike(el) {
+    return el instanceof I.HTMLBodyElement || el instanceof I.HTMLFrameSetElement;
+  }
+
+  // What the handler that the content attribute `on<type>` of `el` sets
+  // belongs to: the element, or the window for the body's window-reflecting
+  // ones (none for a body of an extra document, which has no window). Null
+  // if the attribute sets no handler.
+  function handlerTarget(el, type) {
+    if (WINDOW_HANDLER_TYPES.has(type) && isBodyLike(el)) {
+      return el.ownerDocument === documentNode ? globalThis : null;
+    }
+    if (ELEMENT_HANDLER_TYPES.has(type) &&
+        (el instanceof HTMLElement || el instanceof SVGElement || el instanceof MathMLElement)) {
+      return el;
+    }
+    return null;
+  }
+
+  internals.handlerAttribute = (target, type) => {
+    let el;
+    if (target === globalThis) {
+      if (!WINDOW_HANDLER_TYPES.has(type)) return null;
+      el = N.docPart(2);
+      if (el === null || !isBodyLike(el)) return null;
+    } else if (target instanceof Element && handlerTarget(target, type) === target) {
+      el = target;
+    } else {
+      return null;
+    }
+    const source = N.getAttr(el, 'on' + type);
+    return source === null ? null : [el, source];
+  };
+
+  // Elements whose form owner is on a handler's scope chain.
+  const FORM_ASSOCIATED = [
+    I.HTMLButtonElement, I.HTMLFieldSetElement, I.HTMLInputElement, I.HTMLObjectElement,
+    I.HTMLOutputElement, I.HTMLSelectElement, I.HTMLTextAreaElement,
+  ];
+  const EMPTY_SCOPE = Object.freeze(Object.create(null));
+
+  // Compiles the body of the `on<type>` attribute of `el` into the
+  // handler function, with the element, its form owner and the document on
+  // its scope chain. Elements of documents other than the page's get none.
+  // https://html.spec.whatwg.org/#getting-the-current-value-of-the-event-handler
+  internals.compileHandler = (el, type, source, forWindow) => {
+    if (el.ownerDocument !== documentNode) return null;
+    let form = null;
+    if (FORM_ASSOCIATED.some((C) => el instanceof C)) form = el.form;
+    const params = forWindow && type === 'error' ? 'event, source, lineno, colno, error' : 'event';
+    // Sloppy code, as `with` needs; the scopes come in through `arguments`
+    // so no extra name is visible to the body.
+    const scoped = new Function(
+      'with (arguments[0]) with (arguments[1]) with (arguments[2]) return function on' + type +
+      '(' + params + ') {\n' + native.modules.rewrite(source) + '\n};');
+    return scoped(documentNode, form === null ? EMPTY_SCOPE : form, el);
+  };
+
+  // Whether `name` starts with "on", ignoring ASCII case.
+  function onPrefixed(name) {
+    return name.length > 2 && (name.charCodeAt(0) | 32) === 111 && (name.charCodeAt(1) | 32) === 110;
+  }
+
+  // If setting or removing the attribute `name` (no namespace) of `el`
+  // changes an event handler, returns [target, type] after picking up the
+  // handler the attribute set before (so it keeps its place). `exact` is
+  // for the namespace-aware methods, which do not lower-case the name.
+  function handlerChange(el, name, exact) {
+    if (!onPrefixed(name)) return null;
+    if (!exact && N.elementName(el)[1] === HTML_NS) name = name.toLowerCase();
+    if (!name.startsWith('on')) return null;
+    const type = name.slice(2);
+    const target = handlerTarget(el, type);
+    if (target === null) return null;
+    internals.existingHandler(target, type);
+    return [target, type];
+  }
+
+  // Every attribute change goes through these natives, so wrapping them
+  // catches every change to a handler attribute.
+  {
+    const { setAttr, removeAttr, setAttrNS, removeAttrNS } = N;
+    const changed = internals.attributeHandlerChanged;
+    N.setAttr = (el, name, value) => {
+      const h = handlerChange(el, name, false);
+      setAttr(el, name, value);
+      if (h !== null) changed(h[0], h[1], el, value);
+    };
+    N.removeAttr = (el, name) => {
+      const h = handlerChange(el, name, false);
+      const removed = removeAttr(el, name);
+      if (h !== null && removed) changed(h[0], h[1], el, null);
+      return removed;
+    };
+    N.setAttrNS = (el, ns, name, value) => {
+      const h = ns === null ? handlerChange(el, name, true) : null;
+      setAttrNS(el, ns, name, value);
+      if (h !== null) changed(h[0], h[1], el, value);
+    };
+    N.removeAttrNS = (el, ns, local) => {
+      const h = ns === null ? handlerChange(el, local, true) : null;
+      const removed = removeAttrNS(el, ns, local);
+      if (h !== null && removed) changed(h[0], h[1], el, null);
+      return removed;
+    };
+  }
+
+  // The parser inserted the body: its window-reflecting handler attributes
+  // (`<body onload>`) take over the window's handlers now, replacing any a
+  // script set before, as if set at this point.
+  internals.bodyInserted = (body) => {
+    if (!isBodyLike(body)) return;
+    const count = N.attrCount(body);
+    for (let i = 0; i < count; i++) {
+      const [name, ns, , , value] = N.attr(body, i);
+      if (ns !== null || !name.startsWith('on')) continue;
+      const type = name.slice(2);
+      if (WINDOW_HANDLER_TYPES.has(type)) internals.attributeHandlerChanged(globalThis, type, body, value);
+    }
+  };
 
   // Image, Audio and Option constructors.
   function Image(width, height) {
@@ -3772,6 +3914,51 @@
   // What the page loader knows about the document (see setDocumentInfo).
   const documentInfo = { characterSet: 'UTF-8', contentType: 'text/html', referrer: '' };
 
+  // Documents script makes besides the page's live in the page's arena as
+  // trees of their own: inert (no scripts run, no window, cookies or
+  // loading) but otherwise ordinary. Their URL, content type and compat
+  // mode are kept here.
+  const extraDocuments = new WeakMap();
+  const XML_TYPES = new Set(['text/xml', 'application/xml', 'application/xhtml+xml', 'image/svg+xml']);
+  const PARSER_ERROR_NS = 'http://www.mozilla.org/newlayout/xml/parsererror.xml';
+
+  function newDocument(contentType, proto, url) {
+    const doc = N.createDocument();
+    if (getPrototypeOf(doc) !== proto) setPrototypeOf(doc, proto);
+    extraDocuments.set(doc, { contentType, url, compatMode: 'CSS1Compat', written: undefined });
+    return doc;
+  }
+
+  // What is known about an extra document. One whose wrapper was remade
+  // (after the document became unreachable) has forgotten it.
+  function extraInfo(doc) {
+    let info = extraDocuments.get(doc);
+    if (info === undefined) {
+      info = { contentType: 'text/html', url: 'about:blank', compatMode: 'CSS1Compat', written: undefined };
+      extraDocuments.set(doc, info);
+    }
+    return info;
+  }
+
+  // A document parsed from `text`, as DOMParser and responseXML make them.
+  // XML that is not well-formed gives null, or with `errorDocument` a
+  // document holding a <parsererror> element, as browsers make for
+  // DOMParser.
+  function parseDocument(text, contentType, url, errorDocument) {
+    const html = contentType === 'text/html';
+    const doc = newDocument(contentType, html ? HTMLDocument.prototype : XMLDocument.prototype, url);
+    const outcome = N.parseInto(doc, text, !html);
+    if (html) {
+      extraInfo(doc).compatMode = outcome;
+    } else if (outcome !== null) {
+      if (!errorDocument) return null;
+      const error = N.createElementNS(PARSER_ERROR_NS, 'parsererror');
+      N.insert(error, N.createText('XML Parsing Error: ' + outcome + '\nLocation: ' + url), null);
+      N.insert(doc, error, null);
+    }
+    return doc;
+  }
+
   // A document's document element (0), head (1), body (2) or doctype (3).
   // Documents made by createHTMLDocument share the page's arena, as trees
   // of their own, so their parts are found here rather than natively.
@@ -3794,14 +3981,16 @@
   }
 
   class Document extends Node {
+    // A new, empty XML document. The object is a native wrapper, returned
+    // in place of `this`.
     constructor() {
-      throw domException('NotSupportedError', 'dasher has a single document per page; new documents cannot be created.');
+      return newDocument('application/xml', new.target.prototype, internals.documentURL());
     }
     get implementation() {
       return implementation;
     }
     get URL() {
-      return this === documentNode ? internals.documentURL() : 'about:blank';
+      return this === documentNode ? internals.documentURL() : extraInfo(this).url;
     }
     get documentURI() {
       return this.URL;
@@ -3819,7 +4008,7 @@
       void v;
     }
     get referrer() {
-      return documentInfo.referrer;
+      return this === documentNode ? documentInfo.referrer : '';
     }
     get cookie() {
       return this === documentNode ? N.cookie() : '';
@@ -3834,10 +4023,10 @@
         pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
     }
     get readyState() {
-      return readyState;
+      return this === documentNode ? readyState : 'complete';
     }
     get compatMode() {
-      return N.compatMode();
+      return this === documentNode ? N.compatMode() : extraInfo(this).compatMode;
     }
     get characterSet() {
       return documentInfo.characterSet;
@@ -3849,7 +4038,7 @@
       return documentInfo.characterSet;
     }
     get contentType() {
-      return documentInfo.contentType;
+      return this === documentNode ? documentInfo.contentType : extraInfo(this).contentType;
     }
     get doctype() {
       return docPart(this, 3);
@@ -3979,7 +4168,7 @@
       return '';
     }
     get currentScript() {
-      return currentScript;
+      return this === documentNode ? currentScript : null;
     }
     get images() {
       return cached(this, 'images', () => htmlCollection(this, KIND.selector, 'img', null));
@@ -4043,28 +4232,44 @@
     }
     createElement(localName, options) {
       requireArgs(arguments, 1, "'createElement' on 'Document'");
+      if (this !== documentNode) {
+        // XML documents keep the name's case, and only XHTML ones put
+        // elements in the HTML namespace.
+        const type = extraInfo(this).contentType;
+        if (type !== 'text/html') {
+          const name = str(localName);
+          if (name.includes(':')) {
+            throw domException('InvalidCharacterError', "The tag name provided ('" + name + "') is not a valid name.");
+          }
+          return owned(this, N.createElementNS(type === 'application/xhtml+xml' ? HTML_NS : null, name));
+        }
+        // Documents without a window have no custom elements.
+        return owned(this, created(N.createElement(str(localName))));
+      }
       return created(internals.createElement(str(localName), isOption(options)));
     }
     createElementNS(namespace, qualifiedName, options) {
       requireArgs(arguments, 2, "'createElementNS' on 'Document'");
       const ns = nullableStr(namespace);
       const name = str(qualifiedName);
-      if (ns === HTML_NS && !name.includes(':')) return created(internals.createElement(name, isOption(options), true));
-      return created(N.createElementNS(ns, name));
+      if (this === documentNode && ns === HTML_NS && !name.includes(':')) {
+        return created(internals.createElement(name, isOption(options), true));
+      }
+      return owned(this, created(N.createElementNS(ns, name)));
     }
     createDocumentFragment() {
-      return N.createFragment();
+      return owned(this, N.createFragment());
     }
     createTextNode(data) {
       requireArgs(arguments, 1, "'createTextNode' on 'Document'");
-      return N.createText(str(data));
+      return owned(this, N.createText(str(data)));
     }
     createCDATASection() {
       throw domException('NotSupportedError', 'This operation is not supported for HTML documents.');
     }
     createComment(data) {
       requireArgs(arguments, 1, "'createComment' on 'Document'");
-      return N.createComment(str(data));
+      return owned(this, N.createComment(str(data)));
     }
     createProcessingInstruction() {
       throw domException('NotSupportedError', 'Processing instructions are not supported.');
@@ -4100,7 +4305,8 @@
     }
     importNode(node, deep = false) {
       if (node instanceof Document) throw domException('NotSupportedError', 'A document cannot be imported.');
-      return cloneWithState(node, !!deep);
+      if (node instanceof Attr) return Attr.create(null, node.name, node.namespaceURI, node.value);
+      return cloneWithState(node, !!deep, this);
     }
     adoptNode(node) {
       if (node instanceof Document) throw domException('NotSupportedError', 'A document cannot be adopted.');
@@ -4109,7 +4315,9 @@
         if (owner !== null) owner.removeAttributeNode(node);
         return node;
       }
+      if (node instanceof ShadowRoot) throw domException('HierarchyRequestError', 'A shadow root cannot be adopted.');
       N.remove(node);
+      N.setOwner(node, this);
       return node;
     }
     elementFromPoint() {
@@ -4128,14 +4336,23 @@
       return typeof globalThis.getSelection === 'function' ? globalThis.getSelection() : null;
     }
     open() {
+      if (this !== documentNode) {
+        const info = extraInfo(this);
+        info.written = '';
+        N.parseInto(this, '', false);
+      }
       return this;
     }
-    close() {}
+    close() {
+      if (this !== documentNode) extraInfo(this).written = undefined;
+    }
     write(...text) {
-      documentWrite(text.map((t) => str(t)).join(''));
+      if (this === documentNode) documentWrite(text.map((t) => str(t)).join(''));
+      else writeExtra(this, text.map((t) => str(t)).join(''));
     }
     writeln(...text) {
-      documentWrite(text.map((t) => str(t)).join('') + '\n');
+      if (this === documentNode) documentWrite(text.map((t) => str(t)).join('') + '\n');
+      else writeExtra(this, text.map((t) => str(t)).join('') + '\n');
     }
     startViewTransition(callback) {
       const done = Promise.resolve().then(() => (typeof callback === 'function' ? callback() : undefined));
@@ -4150,6 +4367,13 @@
   }
   mixin(Document, ParentNode);
   tag(Document, 'Document');
+
+  // Gives a new node `doc` made its node document. Nodes belong to the
+  // page's document unless told otherwise.
+  function owned(doc, node) {
+    if (doc !== documentNode) N.setOwner(node, doc);
+    return node;
+  }
 
   // Scripts created by script are async unless told otherwise.
   // The `is` of createElement's options: a customized built-in element.
@@ -4184,6 +4408,17 @@
     if (body !== null) N.insertAdjacentHTML(body, 'beforeend', html);
   }
 
+  // document.write() on a document script made: everything written since
+  // open() is parsed again, so the tree always shows it all.
+  function writeExtra(doc, html) {
+    const info = extraInfo(doc);
+    if (info.contentType !== 'text/html') {
+      throw domException('InvalidStateError', 'write() is only supported on HTML documents.');
+    }
+    info.written = (info.written === undefined ? '' : info.written) + html;
+    info.compatMode = N.parseInto(doc, info.written, false);
+  }
+
   class DOMImplementation {
     constructor(key) {
       illegal(key);
@@ -4200,8 +4435,7 @@
     // URL, location, cookies or window, and nodes moved between it and the
     // page need no adopting.
     createHTMLDocument(title = undefined) {
-      const doc = N.createDocument();
-      otherDocuments = true;
+      const doc = newDocument('text/html', HTMLDocument.prototype, 'about:blank');
       N.insert(doc, N.createDoctype('html', '', ''), null);
       const html = N.createElement('html');
       N.insert(doc, html, null);
@@ -4215,12 +4449,38 @@
       N.insert(html, N.createElement('body'), null);
       return doc;
     }
-    createDocument() {
-      throw domException('NotSupportedError', 'dasher has a single document per page; new documents cannot be created.');
+    // An XML document, with a root element if `qualifiedName` is given.
+    createDocument(namespace, qualifiedName, doctype = null) {
+      requireArgs(arguments, 2, "'createDocument' on 'DOMImplementation'");
+      const ns = nullableStr(namespace) || null;
+      const type = ns === HTML_NS ? 'application/xhtml+xml' : ns === SVG_NS ? 'image/svg+xml' : 'application/xml';
+      const name = qualifiedName === null ? '' : str(qualifiedName);
+      // Check the names before making anything.
+      const root = name === '' ? null : N.createElementNS(ns, name);
+      const doc = newDocument(type, XMLDocument.prototype, 'about:blank');
+      if (doctype !== null && doctype !== undefined) {
+        if (!(doctype instanceof DocumentType)) throw new TypeError("Failed to execute 'createDocument' on 'DOMImplementation': parameter 3 is not of type 'DocumentType'.");
+        N.insert(doc, doctype, null);
+      }
+      if (root !== null) N.insert(doc, root, null);
+      return doc;
     }
   }
   tag(DOMImplementation, 'DOMImplementation');
   const implementation = new DOMImplementation(KEY);
+
+  class DOMParser {
+    parseFromString(string, type) {
+      requireArgs(arguments, 2, "'parseFromString' on 'DOMParser'");
+      const text = str(string);
+      const t = str(type);
+      if (t !== 'text/html' && !XML_TYPES.has(t)) {
+        throw new TypeError("Failed to execute 'parseFromString' on 'DOMParser': The provided value '" + t + "' is not a valid enum value of type DOMParserSupportedType.");
+      }
+      return parseDocument(text, t, internals.documentURL(), true);
+    }
+  }
+  tag(DOMParser, 'DOMParser');
 
   // document.fonts: every font counts as loaded.
   class FontFaceSet extends EventTarget {
@@ -4313,6 +4573,10 @@
   };
   internals.scrollTarget = () => documentNode;
 
+  // For XMLHttpRequest's responseXML: a document parsed from a response,
+  // or null if its XML is not well-formed.
+  internals.parseDocument = (text, contentType, url) => parseDocument(text, contentType, url, false);
+
   // The document base URL, honouring <base href>.
   const documentURLOf = internals.documentURL;
   const base = { version: -1, url: '', href: null };
@@ -4376,7 +4640,7 @@
     DocumentFragment, ShadowRoot, Attr, NamedNodeMap, DOMTokenList, DOMStringMap,
     CSSStyleDeclaration, CSSStyleSheet, CSSRule, StyleSheetList, Element, HTMLElement, SVGElement,
     SVGGraphicsElement, SVGSVGElement, MathMLElement, Document, HTMLDocument, XMLDocument,
-    DOMImplementation, FontFaceSet, DOMRect, DOMRectReadOnly, DOMRectList, TreeWalker,
+    DOMImplementation, DOMParser, FontFaceSet, DOMRect, DOMRectReadOnly, DOMRectList, TreeWalker,
     NodeIterator, NodeFilter, Image, Audio, Option, getComputedStyle, ...I, ...uiEvents,
   });
   defineProperty(globalThis, 'document', { get: () => documentNode, enumerable: true, configurable: false });

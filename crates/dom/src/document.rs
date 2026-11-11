@@ -284,11 +284,16 @@ impl Document {
             None => (Name::EMPTY, self.intern(qualified_name)),
         };
         let id = self.create_element_named(ns, local);
+        self.set_element_prefix(id, prefix);
+        id
+    }
+
+    /// Gives a new element a prefix (none for [`Name::EMPTY`]).
+    pub(crate) fn set_element_prefix(&mut self, id: NodeId, prefix: Name) {
         if prefix != Name::EMPTY {
             self.prefixes.insert(id, prefix);
             self.node_mut(id).flags |= flags::HAS_PREFIX;
         }
-        id
     }
 
     /// A new element from already-interned names.
@@ -628,7 +633,7 @@ impl Document {
 
     /// Appends an attribute unless the element already has one with this
     /// namespace and local name, as the parser does for repeated `<html>` and
-    /// `<body>` tags.
+    /// `<body>` tags. Returns whether it was added.
     pub(crate) fn add_attr_if_missing(
         &mut self,
         id: NodeId,
@@ -636,10 +641,12 @@ impl Document {
         prefix: Name,
         local: Name,
         value: &str,
-    ) {
-        if self.attr_index_ns(id, ns, local).is_none() {
+    ) -> bool {
+        let missing = self.attr_index_ns(id, ns, local).is_none();
+        if missing {
             self.push_attr(id, ns, prefix, local, value);
         }
+        missing
     }
 
     /// A new attribute record for one of this document's elements.
