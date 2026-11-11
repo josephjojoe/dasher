@@ -541,12 +541,27 @@
     },
   };
 
+  // The mixin members the DOM marks [Unscopable], which `with` scopes (such
+  // as inline event handlers' element scope) skip, so `remove()` in an
+  // `onclick` attribute does not mean the element's.
+  const UNSCOPABLE = new Map([
+    [ParentNode, ['prepend', 'append', 'replaceChildren']],
+    [ChildNode, ['before', 'after', 'replaceWith', 'remove']],
+  ]);
+
   function mixin(target, source) {
+    const proto = target.prototype;
     for (const key of Reflect.ownKeys(source)) {
       const desc = Object.getOwnPropertyDescriptor(source, key);
       desc.enumerable = true;
-      defineProperty(target.prototype, key, desc);
+      defineProperty(proto, key, desc);
     }
+    const unscopable = UNSCOPABLE.get(source);
+    if (unscopable === undefined) return;
+    if (!Object.prototype.hasOwnProperty.call(proto, Symbol.unscopables)) {
+      defineProperty(proto, Symbol.unscopables, { value: Object.create(null), configurable: true });
+    }
+    for (const name of unscopable) proto[Symbol.unscopables][name] = true;
   }
 
   // ---------------------------------------------------------------------

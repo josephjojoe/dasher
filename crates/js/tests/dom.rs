@@ -1021,3 +1021,23 @@ fn documents_from_create_html_document_are_freed_once_unreachable() {
         nodes(&js)
     );
 }
+
+#[test]
+fn mixin_members_marked_unscopable_are_hidden_from_with() {
+    let js = page("<p id=p></p>");
+    let out = eval(
+        &js,
+        r#"
+        const u = Element.prototype[Symbol.unscopables];
+        const p = document.getElementById('p');
+        // `with` needs sloppy code.
+        const lookup = new Function('el', 'with (el) return [typeof remove, typeof append, typeof querySelector]');
+        [Object.keys(u).sort(), Object.getPrototypeOf(u), Object.keys(Document.prototype[Symbol.unscopables]).sort(),
+         Object.keys(CharacterData.prototype[Symbol.unscopables]).sort(), lookup(p)]
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"[["after","append","before","prepend","remove","replaceChildren","replaceWith"],null,["append","prepend","replaceChildren"],["after","before","remove","replaceWith"],["undefined","undefined","function"]]"#
+    );
+}
