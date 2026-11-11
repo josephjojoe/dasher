@@ -57,6 +57,17 @@ fn id(ctx: &Ctx<'_>, node: &Node<'_>) -> Result<NodeId> {
     })
 }
 
+/// The element behind a wrapper; a `TypeError` for other nodes, which page
+/// code can pass by calling an `Element` method on them.
+fn element(ctx: &Ctx<'_>, dom: &DomState, node: &Node<'_>) -> Result<NodeId> {
+    let n = id(ctx, node)?;
+    if dom.doc().is_element(n) {
+        Ok(n)
+    } else {
+        Err(rquickjs::Exception::throw_type(ctx, "Illegal invocation"))
+    }
+}
+
 fn or_null<'js>(ctx: &Ctx<'js>, node: Option<Node<'js>>) -> Value<'js> {
     node.map_or_else(|| Value::new_null(ctx.clone()), Class::into_value)
 }
@@ -266,17 +277,7 @@ fn set_inner_html(ctx: &Ctx<'_>, dom: &DomState, node: NodeId, html: &str) {
     let mut doc = dom.doc_mut();
     let target = doc.template_contents(node).unwrap_or(node);
     remove_children(ctx, dom, &mut doc, target);
-    if doc.is_element(node) {
-        doc.set_inner_html(node, html);
-    } else {
-        // A fragment or document: parse as if in <body>.
-        let body = doc.create_element("body");
-        let fragment = doc.parse_fragment(body, html);
-        doc.append_child(target, fragment)
-            .expect("parsed content fits in a fragment");
-        doc.release(fragment);
-        doc.release(body);
-    }
+    doc.set_inner_html(node, html);
     dom.bump();
 }
 
@@ -783,7 +784,7 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "setInnerHTML",
         move |ctx: Ctx<'js>, n: Node<'js>, html: String| -> Result<()> {
-            set_inner_html(&ctx, &d, id(&ctx, &n)?, &html);
+            set_inner_html(&ctx, &d, element(&ctx, &d, &n)?, &html);
             Ok(())
         },
     )?;
@@ -792,7 +793,7 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "setOuterHTML",
         move |ctx: Ctx<'js>, n: Node<'js>, html: String| -> Result<()> {
-            set_outer_html(&ctx, &d, id(&ctx, &n)?, &html)
+            set_outer_html(&ctx, &d, element(&ctx, &d, &n)?, &html)
         },
     )?;
     let d = Rc::clone(dom);
@@ -801,7 +802,7 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "insertAdjacentHTML",
         move |ctx: Ctx<'js>, n: Node<'js>, position: String, html: String| -> Result<()> {
             let position = adjacent_position(&ctx, &position)?;
-            let n = id(&ctx, &n)?;
+            let n = element(&ctx, &d, &n)?;
             let result = d.doc_mut().insert_adjacent_html(n, position, &html);
             d.bump();
             result.map_err(|e| dom_error(&ctx, e))
@@ -812,7 +813,8 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "markScriptStarted",
         move |ctx: Ctx<'js>, n: Node<'js>| -> Result<()> {
-            d.doc_mut().set_script_already_started(id(&ctx, &n)?);
+            let n = element(&ctx, &d, &n)?;
+            d.doc_mut().set_script_already_started(n);
             Ok(())
         },
     )?;
@@ -953,7 +955,7 @@ fn install_attributes<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
                     &format!("'{name}' is not a valid attribute name."),
                 ));
             }
-            let n = id(&ctx, &n)?;
+            let n = element(&ctx, &d, &n)?;
             let mut doc = d.doc_mut();
             let name = html_lower(&doc, n, &name);
             doc.set_attribute(n, &name, &value);
@@ -1021,7 +1023,7 @@ fn install_attributes<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
                     "The namespace URI provided ('') is not valid for the qualified name provided.",
                 ));
             }
-            let n = id(&ctx, &n)?;
+            let n = element(&ctx, &d, &n)?;
             d.doc_mut().set_attribute_ns(n, &ns, &name, &value);
             d.bump();
             Ok(())

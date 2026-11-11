@@ -752,3 +752,62 @@ fn inserted_inline_scripts_run() {
     );
     assert_eq!(out, "[1,true,null,true,null,1,true]");
 }
+
+#[test]
+fn element_methods_on_other_nodes_throw() {
+    let js = page("<p>text</p>");
+    let out = eval(
+        &js,
+        r#"
+        const text = document.querySelector('p').firstChild;
+        const proto = Element.prototype;
+        const desc = (name) => Object.getOwnPropertyDescriptor(proto, name);
+        const attempts = [
+          () => proto.setAttribute.call(text, 'a', 'b'),
+          () => proto.setAttributeNS.call(text, null, 'a', 'b'),
+          () => desc('innerHTML').set.call(text, '<b>'),
+          () => desc('outerHTML').set.call(document, '<b>'),
+          () => proto.insertAdjacentHTML.call(text, 'afterbegin', '<b>'),
+          () => proto.appendChild.call({}, text),
+          () => Node.prototype.appendChild.call(text, document.createElement('i')),
+        ];
+        attempts.map((f) => { try { f(); return 'none'; } catch (e) { return e.name; } })
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","HierarchyRequestError"]"#
+    );
+    assert_eq!(eval(&js, "document.body.innerHTML"), json("<p>text</p>"));
+}
+
+#[test]
+#[ignore = "timing check, run by hand"]
+fn bulk_operations_scale() {
+    let js = page("<ul id=l></ul>");
+    let start = std::time::Instant::now();
+    run(
+        &js,
+        r#"
+        const l = document.getElementById('l');
+        for (let i = 0; i < 20000; i++) {
+          const li = document.createElement('li');
+          li.className = 'item';
+          li.textContent = 'item ' + i;
+          l.appendChild(li);
+        }
+        let n = 0;
+        for (let i = 0; i < l.childNodes.length; i++) n += l.childNodes[i].nodeType;
+        window.count = document.querySelectorAll('li.item').length + n;
+        for (const li of Array.from(l.children)) if (li.textContent.endsWith('7')) li.remove();
+        l.innerHTML = '<li>x</li>'.repeat(20000);
+        l.textContent = '';
+        "#,
+    );
+    js.run_gc();
+    eprintln!(
+        "{:?}, {} nodes left",
+        start.elapsed(),
+        js.with_document(Document::len)
+    );
+}
