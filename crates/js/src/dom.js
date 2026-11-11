@@ -240,10 +240,14 @@
   // right away, as they would in a browser. The others (external scripts,
   // modules) go to the page loader through internals.scriptConnected, with
   // the script's "non-blocking" flag; without a loader they are left alone.
+  // Module preload links come here too, for internals.linkConnected.
   function connected(scripts) {
     for (const script of scripts) {
       try {
-        if (!N.hasAttr(script, 'src') && scriptType(script) === 'classic') {
+        if (N.elementName(script)[0] === 'link') {
+          const hook = internals.linkConnected;
+          if (typeof hook === 'function') hook(script);
+        } else if (!N.hasAttr(script, 'src') && scriptType(script) === 'classic') {
           runInlineScript(script);
         } else {
           const hook = internals.scriptConnected;
@@ -286,7 +290,7 @@
     const previous = currentScript;
     currentScript = script;
     try {
-      indirectEval(text);
+      indirectEval(native.modules.rewrite(text));
     } catch (error) {
       native.reportError(error);
     } finally {

@@ -202,7 +202,38 @@
 //! - [`set_document_info`](JsRuntime::set_document_info) for
 //!   `document.characterSet`, `contentType` and `referrer`;
 //! - [`hold_detached_nodes`](JsRuntime::hold_detached_nodes), which keeps
-//!   node ids the parser still uses valid while scripts change the tree.
+//!   node ids the parser still uses valid while scripts change the tree;
+//! - the module graph functions (see [ES modules](#es-modules)),
+//!   [`register_import_map`](JsRuntime::register_import_map) and
+//!   [`link_inserted`](JsRuntime::link_inserted) for parser-inserted
+//!   modulepreload links.
+//!
+//! # ES modules
+//!
+//! Module scripts, static `import`/`export … from`, dynamic `import()`,
+//! `import.meta` (`url` and `resolve`), import maps and
+//! `<link rel=modulepreload>` all work, with module sources fetched
+//! through the runtime's session. The host starts a module script's graph
+//! with [`fetch_module_graph`](JsRuntime::fetch_module_graph) (or
+//! [`fetch_inline_module_graph`](JsRuntime::fetch_inline_module_graph)),
+//! waits for it with [`module_graph_status`](JsRuntime::module_graph_status)
+//! and [`module_graph_settled`](JsRuntime::module_graph_settled), and runs
+//! it with [`run_module_graph`](JsRuntime::run_module_graph).
+//!
+//! QuickJS links modules synchronously, so each graph is fetched in full
+//! first: every module is scanned for its static imports, which are
+//! resolved (relative to the importing module's final URL, or through the
+//! import map) and fetched in parallel. A module's source is dropped once
+//! QuickJS has compiled it. For the same reason, scripts' `import(` calls
+//! are renamed, before they are compiled, to a hidden global that fetches
+//! the requested graph asynchronously. `import()` in code that is not
+//! scanned (`eval`, `new Function`) still works, but blocks the page while
+//! each missing module is fetched.
+//!
+//! Module scripts are decoded as UTF-8 whatever their `Content-Type` says,
+//! and the MIME type is not checked. A failed fetch is logged to the
+//! console and fails the graph; an exception a module throws is reported
+//! like any uncaught exception.
 //!
 //! # Network
 //!
@@ -271,6 +302,7 @@ pub use error::{ErrorKind, ScriptError};
 pub use event_loop::{DEFAULT_FRAME_INTERVAL, LoopHandle, Stopped, Task};
 pub use glue::precompile;
 pub use loader::{DocumentInfo, DocumentWrite, EventTarget, InsertedScript, ReadyState};
+pub use modules::{ModuleCredentials, ModuleGraph, ModuleGraphStatus};
 pub use remote::{PendingOperation, SendTask, TaskSender};
 pub use run::{RunLimits, RunOutcome};
 pub use runtime::{

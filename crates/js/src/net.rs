@@ -68,6 +68,17 @@ impl NetState {
         &self.cookies
     }
 
+    /// The session requests go through, if the page has network access.
+    pub(crate) fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// The Tokio runtime to spawn a request on: the current one, or else
+    /// the one current when the runtime was created.
+    pub(crate) fn spawn_handle(&self) -> Option<Handle> {
+        Handle::try_current().ok().or_else(|| self.runtime.clone())
+    }
+
     fn next_id(&self) -> u32 {
         let id = self.last_id.get().wrapping_add(1).max(1);
         self.last_id.set(id);
@@ -396,7 +407,7 @@ fn send(shared: &Rc<Shared>, outgoing: Outgoing) -> u32 {
         deliver_later(shared, id, method, url, Err(failure));
         return id;
     };
-    let Some(runtime) = Handle::try_current().ok().or_else(|| net.runtime.clone()) else {
+    let Some(runtime) = net.spawn_handle() else {
         let failure = Failure::network("no Tokio runtime to run the request on");
         deliver_later(shared, id, method, url, Err(failure));
         return id;
@@ -479,7 +490,7 @@ fn send_sync(shared: &Rc<Shared>, outgoing: Outgoing) -> Result<(Head, Bytes), F
 
 /// Strips a UTF-8 byte order mark and decodes the rest, replacing invalid
 /// sequences.
-fn decode_utf8(bytes: &[u8]) -> String {
+pub(crate) fn decode_utf8(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     String::from_utf8_lossy(bytes).into_owned()
 }

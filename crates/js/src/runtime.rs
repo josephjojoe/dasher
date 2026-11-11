@@ -25,6 +25,7 @@ use crate::glue;
 use crate::heap::{self, HeapState};
 use crate::loader::{self, LoaderHooks, LoaderState};
 use crate::log::BoundedLog;
+use crate::modules::{self, ModuleState};
 use crate::net::{self, NetState};
 use crate::random;
 use crate::remote::Remote;
@@ -130,6 +131,7 @@ pub(crate) struct Shared {
     pub(crate) net: NetState,
     pub(crate) dom: Rc<DomState>,
     pub(crate) loader: LoaderState,
+    pub(crate) modules: ModuleState,
 }
 
 impl Shared {
@@ -148,6 +150,7 @@ impl Shared {
             net: NetState::new(options.network.clone()),
             dom: Rc::new(dom),
             loader: LoaderState::default(),
+            modules: ModuleState::default(),
         }
     }
 
@@ -272,6 +275,9 @@ pub(crate) struct JsData<'js> {
     /// page hears about them (`rejectionhandled`) at the end of the next
     /// microtask checkpoint.
     handled_late: RefCell<Vec<Value<'js>>>,
+    /// Errors of modules that failed to evaluate during this microtask
+    /// checkpoint (see [`note_module_error`]).
+    module_errors: RefCell<Vec<Value<'js>>>,
 }
 
 /// The JS hooks that tell the page about errors (see `events.js`).
@@ -406,6 +412,19 @@ fn track_rejection<'js>(ctx: Ctx<'js>, promise: Value<'js>, reason: Value<'js>, 
     }
 }
 
+/// Notes `reason` as the error of a module that failed to evaluate.
+///
+/// QuickJS runs a module body as an async function and drops the promise
+/// it rejects when the body throws. Nothing can handle that promise; the
+/// error reaches the page through the module's own promise instead. So
+/// rejections with a noted reason are not reported at the end of the
+/// microtask checkpoint.
+pub(crate) fn note_module_error<'js>(ctx: &Ctx<'js>, reason: Value<'js>) {
+    if let Some(data) = ctx.userdata::<JsData<'js>>() {
+        data.module_errors.borrow_mut().push(reason);
+    }
+}
+
 /// Removes `promise` from the promises handled after their rejection was
 /// reported, returning whether it was there.
 fn take_handled_late<'js>(ctx: &Ctx<'js>, promise: &Value<'js>) -> bool {
@@ -502,8 +521,9 @@ impl JsRuntime {
     /// an `error` event, and recorded in the error log unless a listener
     /// cancels that event.
     pub fn run_script(&self, source: &str, name: &str) -> Result<(), ScriptError> {
+        let source = modules::rewrite_classic(source);
         let result =
-            self.run_task(|ctx| ctx.eval_with_options::<(), _>(source, eval_options(name)));
+            self.run_task(|ctx| ctx.eval_with_options::<(), _>(&*source, eval_options(name)));
         self.perform_microtask_checkpoint();
         result
     }
@@ -587,12 +607,19 @@ impl JsRuntime {
     /// `unhandledrejection` for each when `dispatch` is set. Returns whether
     /// there were unhandled rejections.
     fn notify_rejections<'js>(&self, ctx: &Ctx<'js>, dispatch: bool) -> bool {
-        let Some((hooks, late, rejections)) = ctx
-            .userdata::<JsData<'js>>()
-            .map(|d| (d.errors.clone(), d.handled_late.take(), d.rejections.take()))
+        let Some((hooks, late, mut rejections, module_errors)) =
+            ctx.userdata::<JsData<'js>>().map(|d| {
+                (
+                    d.errors.clone(),
+                    d.handled_late.take(),
+                    d.rejections.take(),
+                    d.module_errors.take(),
+                )
+            })
         else {
             return false;
         };
+        rejections.retain(|(_, reason)| !module_errors.contains(reason));
         for promise in late {
             call_hook(ctx, &hooks.rejection_handled, (promise,));
         }
@@ -682,6 +709,7 @@ impl Drop for JsRuntime {
         self.shared.remote.close();
         self.shared.event_loop.clear();
         self.shared.net.abort_all();
+        self.shared.modules.abort_all();
     }
 }
 
@@ -717,6 +745,7 @@ fn install<'js>(
     window::install(ctx, &native, shared, &options.window)?;
     dom::install(ctx, &native, shared)?;
     loader::install(ctx, &native, shared)?;
+    modules::install(ctx, &native, shared)?;
 
     let mut scripts = glue::load(ctx)?.into_iter().map(Function::from_value);
     let prelude = scripts.next().ok_or(rquickjs::Error::Unknown)??;
@@ -733,6 +762,7 @@ fn install<'js>(
         errors: ErrorHooks::from_glue(&hooks)?,
         rejections: RefCell::default(),
         handled_late: RefCell::default(),
+        module_errors: RefCell::default(),
     };
     if ctx.store_userdata(data).is_err() {
         return Err(rquickjs::Error::Unknown);

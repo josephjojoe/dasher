@@ -9,6 +9,14 @@
   // prepare, and document.write() markup while the parser runs.
   internals.scriptConnected = (script, nonBlocking) => L.scriptInserted(script, nonBlocking);
   internals.documentWrite = (html) => L.write(internals.usv(html));
+  internals.linkConnected = (link) => native.modules.linkConnected(link);
+
+  // Scripts' import() calls are renamed to call this global (see
+  // src/modules/mod.rs), which fetches module graphs asynchronously.
+  Object.defineProperty(globalThis, native.modules.importName, {
+    value: native.modules.dynamicImport,
+    writable: false, enumerable: false, configurable: false,
+  });
 
   // Called by Rust.
   internals.loader = {

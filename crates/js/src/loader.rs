@@ -14,6 +14,7 @@ use rquickjs::{Ctx, Function, JsLifetime, Object, Value};
 
 use crate::dom;
 use crate::error::ScriptError;
+use crate::modules;
 use crate::remote::{PendingOperation, TaskSender};
 use crate::runtime::{JsRuntime, Shared, eval_options};
 
@@ -145,10 +146,17 @@ impl<'js> LoaderHooks<'js> {
         })
     }
 
-    fn get(ctx: &Ctx<'js>) -> rquickjs::Result<Self> {
+    pub(crate) fn get(ctx: &Ctx<'js>) -> rquickjs::Result<Self> {
         ctx.userdata::<LoaderHooks<'js>>()
             .map(|h| h.clone())
             .ok_or(rquickjs::Error::Unknown)
+    }
+
+    /// Fires a trusted `event` that neither bubbles nor can be canceled at
+    /// `target` (null for the window).
+    pub(crate) fn fire_simple(&self, target: Value<'js>, event: &str) -> rquickjs::Result<()> {
+        self.fire.call::<_, bool>((target, event, false, false))?;
+        Ok(())
     }
 }
 
@@ -289,7 +297,8 @@ impl JsRuntime {
             let hooks = LoaderHooks::get(ctx)?;
             let script = dom::wrap(ctx, &self.shared().dom, element)?;
             let previous: Value<'_> = hooks.set_current_script.call((script,))?;
-            let result = ctx.eval_with_options::<(), _>(source, eval_options(url));
+            let source = modules::rewrite_classic(source);
+            let result = ctx.eval_with_options::<(), _>(&*source, eval_options(url));
             // Take the exception off the context before calling back into JS.
             let thrown = result.is_err().then(|| ctx.catch());
             hooks.set_current_script.call::<_, ()>((previous,))?;
