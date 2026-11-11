@@ -418,6 +418,61 @@
     return dispatch(target, new Ctor(type, init), true);
   }
 
+  // Reporting exceptions to the page.
+  // https://html.spec.whatwg.org/#report-an-exception
+
+  // One stack frame: `at fn (file:line:col)` or `at file:line:col`.
+  const STACK_FRAME = /^\s*at (?:.*? \()?(.+?):(\d+):(\d+)\)?$/;
+  let reportingException = false;
+
+  // The script location an exception was thrown from, read off the first
+  // stack frame that has one, as [filename, lineno, colno].
+  function errorLocation(error) {
+    try {
+      const stack = error instanceof Error ? error.stack : undefined;
+      if (typeof stack === 'string') {
+        for (const line of stack.split('\n')) {
+          const m = STACK_FRAME.exec(line);
+          if (m !== null) return [m[1], +m[2], +m[3]];
+        }
+      }
+    } catch (_) {
+      // A throwing `stack` getter leaves the location unknown.
+    }
+    return ['', 0, 0];
+  }
+
+  function describeError(error) {
+    try {
+      return String(error);
+    } catch (_) {
+      return 'exception';
+    }
+  }
+
+  // Fires `error` at the global for an exception nobody caught. Returns
+  // whether a listener canceled it (or `onerror` returned true), in which
+  // case the exception counts as handled. An exception reported while the
+  // event is being dispatched gets no event of its own, so a throwing
+  // error handler cannot recurse.
+  function reportException(error) {
+    if (reportingException) return false;
+    reportingException = true;
+    try {
+      const [filename, lineno, colno] = errorLocation(error);
+      return !fire(globalThis, 'error', {
+        cancelable: true,
+        message: 'Uncaught ' + describeError(error),
+        filename,
+        lineno,
+        colno,
+        error,
+      }, ErrorEvent);
+    } finally {
+      reportingException = false;
+    }
+  }
+
   // Event handler IDL attributes (`onload`, `onabort`, ...).
   // https://html.spec.whatwg.org/#event-handler-attributes
 
@@ -614,6 +669,8 @@
     eventClass,
     dispatch,
     fire,
+    // Called by Rust for each exception that escapes to the event loop.
+    reportException,
     defineEventHandlers,
     // The "get the parent" hook of event dispatch. The DOM bindings
     // replace it to give nodes their propagation path.

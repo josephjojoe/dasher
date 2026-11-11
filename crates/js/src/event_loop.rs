@@ -25,8 +25,9 @@ pub const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
 /// A unit of host work run on the event loop with access to the JS context.
 ///
-/// Errors it returns are recorded in the runtime's error log, like an
-/// exception escaping any other task.
+/// Errors it returns are reported like an exception escaping any other
+/// task: fired at the global as an `error` event, then logged unless a
+/// listener canceled it.
 pub type Task = Box<dyn for<'js> FnOnce(Ctx<'js>) -> rquickjs::Result<()>>;
 
 /// Why the event loop stopped before running out of work.

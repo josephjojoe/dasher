@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use dasher_net::Session;
 use rquickjs::context::EvalOptions;
+use rquickjs::function::IntoArgs;
 use rquickjs::{
     Coerced, Context, Ctx, Exception, FromJs, Function, JsLifetime, Object, Runtime, Value, qjs,
 };
@@ -179,29 +180,72 @@ impl Shared {
         self.errors.borrow_mut().push(error);
     }
 
+    /// Reports `value`, an exception nobody caught: fires `error` at the
+    /// global and records it in the error log unless a listener canceled
+    /// the event.
+    pub(crate) fn report_exception<'js>(&self, ctx: &Ctx<'js>, value: Value<'js>) {
+        let error = error_from_value(ctx, value.clone(), ErrorKind::Uncaught);
+        if !(error.kind == ErrorKind::Uncaught && dispatch_error(ctx, value)) {
+            self.report(error);
+        }
+    }
+
+    /// Captures an error that escaped a task and reports it the way
+    /// [`report_exception`](Self::report_exception) does. Interrupts and
+    /// out-of-memory errors are recorded without an event.
+    pub(crate) fn report_uncaught<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        error: rquickjs::Error,
+    ) -> ScriptError {
+        let (captured, value) = self.capture_value(ctx, error);
+        let handled = captured.kind == ErrorKind::Uncaught
+            && value.is_some_and(|value| dispatch_error(ctx, value));
+        if !handled {
+            self.report(captured.clone());
+        }
+        captured
+    }
+
     /// Turns an engine error into a [`ScriptError`], taking the pending
     /// exception off the context if there is one.
     pub(crate) fn capture<'js>(&self, ctx: &Ctx<'js>, error: rquickjs::Error) -> ScriptError {
-        let mut captured = match error {
+        self.capture_value(ctx, error).0
+    }
+
+    /// Like [`capture`](Self::capture), also returning the thrown value when
+    /// there was one.
+    fn capture_value<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        error: rquickjs::Error,
+    ) -> (ScriptError, Option<Value<'js>>) {
+        let (mut captured, thrown) = match error {
             rquickjs::Error::Exception => {
                 let value = ctx.catch();
                 // When QuickJS cannot even allocate the error object for an
                 // allocation failure, it throws `null` instead.
                 if value.is_null() && self.heap.take_refused() {
-                    ScriptError::new(ErrorKind::OutOfMemory, "out of memory")
+                    let error = ScriptError::new(ErrorKind::OutOfMemory, "out of memory");
+                    (error, None)
                 } else {
-                    error_from_value(ctx, value, ErrorKind::Uncaught)
+                    let error = error_from_value(ctx, value.clone(), ErrorKind::Uncaught);
+                    (error, Some(value))
                 }
             }
-            rquickjs::Error::Allocation => {
-                ScriptError::new(ErrorKind::OutOfMemory, "out of memory")
-            }
-            other => ScriptError::new(ErrorKind::Internal, other.to_string()),
+            rquickjs::Error::Allocation => (
+                ScriptError::new(ErrorKind::OutOfMemory, "out of memory"),
+                None,
+            ),
+            other => (
+                ScriptError::new(ErrorKind::Internal, other.to_string()),
+                None,
+            ),
         };
         if self.interrupted.get() {
             captured.kind = ErrorKind::Interrupted;
         }
-        captured
+        (captured, thrown)
     }
 }
 
@@ -210,6 +254,7 @@ impl Shared {
 pub(crate) struct JsData<'js> {
     inspect: Function<'js>,
     hooks: LoopHooks<'js>,
+    report_exception: Function<'js>,
     /// Rejected promises that had no handler when they were rejected, with
     /// their reasons. Reported at the end of the next microtask checkpoint
     /// unless a handler is attached first.
@@ -229,6 +274,28 @@ impl<'js> JsData<'js> {
             .map(|d| d.hooks.clone())
             .ok_or(rquickjs::Error::Unknown)
     }
+}
+
+/// Calls a JS hook that answers yes or no. A hook that throws (which only
+/// happens when it is interrupted or runs out of memory) answers no.
+fn ask_hook<'js>(ctx: &Ctx<'js>, hook: Function<'js>, args: impl IntoArgs<'js>) -> bool {
+    match hook.call::<_, bool>(args) {
+        Ok(answer) => answer,
+        Err(_) => {
+            drop(ctx.catch());
+            false
+        }
+    }
+}
+
+/// Fires `error` at the global for `value`, an exception nobody caught.
+/// Returns whether a listener canceled the event.
+fn dispatch_error<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> bool {
+    // Exceptions raised while the glue is installed have no page to go to.
+    let hook = ctx
+        .userdata::<JsData<'js>>()
+        .map(|d| d.report_exception.clone());
+    hook.is_some_and(|hook| ask_hook(ctx, hook, (value,)))
 }
 
 /// Renders a JS value as text the way the console would.
@@ -309,7 +376,9 @@ fn eval_options(filename: &str) -> EvalOptions {
 /// Script errors never panic or unwind into the host. They are captured into
 /// an error log read with [`errors`](Self::errors) /
 /// [`take_errors`](Self::take_errors), and returned where the call produces a
-/// result.
+/// result. Before an uncaught exception is logged, the page gets an `error`
+/// event at the global; one that a listener cancels (or that `onerror`
+/// returns `true` for) counts as handled and stays out of the log.
 ///
 /// A runaway script is stopped by setting a [`deadline`](Self::set_deadline)
 /// or through an [`InterruptHandle`].
@@ -371,7 +440,9 @@ impl JsRuntime {
     /// checkpoint.
     ///
     /// `name` is used as the file name in stack traces. An exception the
-    /// script throws is recorded in the error log and returned.
+    /// script throws is always returned. It is also fired at the global as
+    /// an `error` event, and recorded in the error log unless a listener
+    /// cancels that event.
     pub fn run_script(&self, source: &str, name: &str) -> Result<(), ScriptError> {
         let result =
             self.run_task(|ctx| ctx.eval_with_options::<(), _>(source, eval_options(name)));
@@ -402,15 +473,14 @@ impl JsRuntime {
         result
     }
 
-    /// Runs `f` as a task: refuses to start past the deadline, and records
+    /// Runs `f` as a task: refuses to start past the deadline, and reports
     /// any error it raises.
     pub(crate) fn run_task(
         &self,
         f: impl for<'js> FnOnce(&Ctx<'js>) -> rquickjs::Result<()>,
     ) -> Result<(), ScriptError> {
         self.shared.begin()?;
-        self.with(|ctx| f(&ctx).map_err(|e| self.shared.capture(&ctx, e)))
-            .inspect_err(|e| self.shared.report(e.clone()))
+        self.with(|ctx| f(&ctx).map_err(|e| self.shared.report_uncaught(&ctx, e)))
     }
 
     /// Runs promise jobs and queued microtasks until none are left, then
@@ -429,8 +499,8 @@ impl JsRuntime {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(job) => job.0.with(|ctx| {
-                    let error = self.shared.capture(&ctx, rquickjs::Error::Exception);
-                    self.shared.report(error);
+                    self.shared
+                        .report_uncaught(&ctx, rquickjs::Error::Exception);
                 }),
             }
         }
@@ -523,7 +593,7 @@ fn install<'js>(
     native.set(
         "reportError",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, value: Value<'js>| {
-            s.report(error_from_value(&ctx, value, ErrorKind::Uncaught));
+            s.report_exception(&ctx, value);
         })?,
     )?;
 
@@ -544,6 +614,7 @@ fn install<'js>(
     let data = JsData {
         inspect: hooks.get("inspect")?,
         hooks: LoopHooks::from_prelude(&hooks)?,
+        report_exception: hooks.get("reportException")?,
         rejections: RefCell::default(),
     };
     if ctx.store_userdata(data).is_err() {

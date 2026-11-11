@@ -6,7 +6,8 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// An exception escaped a script, callback, task or microtask.
+    /// An exception escaped a script, callback, task or microtask, and no
+    /// listener canceled the `error` event fired for it at the global.
     Uncaught,
     /// A promise was rejected and still had no handler at the end of the
     /// microtask checkpoint that followed.

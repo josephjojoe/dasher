@@ -12,7 +12,9 @@
 //! runaway scripts at a [deadline](JsRuntime::set_deadline) or on request
 //! through an [`InterruptHandle`]. Exceptions, unhandled promise rejections
 //! and out-of-memory conditions are captured as [`ScriptError`]s, never
-//! propagated into the host.
+//! propagated into the host. Uncaught exceptions are first fired at the
+//! global as `error` events, as in browsers, and a page that cancels the
+//! event has handled the error, so it is not logged.
 //!
 //! The event loop runs tasks (due timers and host tasks) one at a time, each
 //! followed by a microtask checkpoint, and animation frame callbacks on a
