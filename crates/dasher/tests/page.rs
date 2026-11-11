@@ -164,6 +164,15 @@ async fn query_helpers_read_the_live_dom() {
         page.outer_html(".price").unwrap().as_deref(),
         Some(r#"<span class="price">25</span>"#)
     );
+    assert_eq!(
+        page.outer_htmls(".price").unwrap(),
+        [
+            r#"<span class="price">25</span>"#,
+            r#"<span class="price">40</span>"#
+        ]
+    );
+    assert_eq!(page.inner_htmls(".price").unwrap(), ["25", "40"]);
+    assert!(page.inner_htmls(".nothing").unwrap().is_empty());
     assert!(matches!(
         page.texts("a[").unwrap_err(),
         Error::InvalidSelector(s) if s == "a["
