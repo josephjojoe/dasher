@@ -473,6 +473,36 @@
     }
   }
 
+  // Promise rejections. Rust tracks which rejected promises have no
+  // handler and calls these at the end of microtask checkpoints.
+  // https://html.spec.whatwg.org/#unhandled-promise-rejections
+
+  // Promises whose rejection was reported as unhandled, mapped to their
+  // reasons, until a handler is attached.
+  const outstandingRejections = new WeakMap();
+
+  // Fires `unhandledrejection` at the global. Returns whether a listener
+  // canceled it, which marks the rejection handled.
+  function unhandledRejection(promise, reason) {
+    return !fire(globalThis, 'unhandledrejection', { cancelable: true, promise, reason },
+      PromiseRejectionEvent);
+  }
+
+  function rejectionOutstanding(promise, reason) {
+    outstandingRejections.set(promise, reason);
+  }
+
+  // A handler was attached to `promise` after its rejection was reported:
+  // queues a task to fire `rejectionhandled`.
+  function rejectionHandled(promise) {
+    if (!outstandingRejections.has(promise)) return;
+    const reason = outstandingRejections.get(promise);
+    outstandingRejections.delete(promise);
+    queueTask(() => {
+      fire(globalThis, 'rejectionhandled', { promise, reason }, PromiseRejectionEvent);
+    });
+  }
+
   // Event handler IDL attributes (`onload`, `onabort`, ...).
   // https://html.spec.whatwg.org/#event-handler-attributes
 
@@ -671,6 +701,10 @@
     fire,
     // Called by Rust for each exception that escapes to the event loop.
     reportException,
+    // Called by Rust as promise rejections are reported and handled.
+    unhandledRejection,
+    rejectionOutstanding,
+    rejectionHandled,
     defineEventHandlers,
     // The "get the parent" hook of event dispatch. The DOM bindings
     // replace it to give nodes their propagation path.

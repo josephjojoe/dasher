@@ -12,9 +12,11 @@
 //! runaway scripts at a [deadline](JsRuntime::set_deadline) or on request
 //! through an [`InterruptHandle`]. Exceptions, unhandled promise rejections
 //! and out-of-memory conditions are captured as [`ScriptError`]s, never
-//! propagated into the host. Uncaught exceptions are first fired at the
-//! global as `error` events, as in browsers, and a page that cancels the
-//! event has handled the error, so it is not logged.
+//! propagated into the host. As in browsers, uncaught exceptions are first
+//! fired at the global as `error` events and unhandled rejections as
+//! `unhandledrejection` events. A page that cancels the event has handled
+//! the error, so it is not logged. A rejection that gets a handler after
+//! it was reported fires `rejectionhandled`.
 //!
 //! The event loop runs tasks (due timers and host tasks) one at a time, each
 //! followed by a microtask checkpoint, and animation frame callbacks on a
@@ -32,8 +34,9 @@
 //! the same page clock as `performance.now()`.
 //!
 //! DOM events are implemented in JS glue evaluated after the prelude:
-//! `EventTarget`, `Event`, `CustomEvent`, `ErrorEvent`, `DOMException`,
-//! `AbortController` and `AbortSignal`. Each glue file (listed in order in
+//! `EventTarget`, `Event`, `CustomEvent`, `ErrorEvent`,
+//! `PromiseRejectionEvent`, `DOMException`, `AbortController` and
+//! `AbortSignal`. Each glue file (listed in order in
 //! `src/glue.rs`) receives the host functions and a shared `internals`
 //! object for the glue that follows it. `internals` provides trusted event
 //! dispatch, `on*` attributes, abort hooks, task queueing, URL parsing,

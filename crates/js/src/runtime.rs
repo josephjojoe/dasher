@@ -254,11 +254,35 @@ impl Shared {
 pub(crate) struct JsData<'js> {
     inspect: Function<'js>,
     hooks: LoopHooks<'js>,
-    report_exception: Function<'js>,
+    errors: ErrorHooks<'js>,
     /// Rejected promises that had no handler when they were rejected, with
     /// their reasons. Reported at the end of the next microtask checkpoint
     /// unless a handler is attached first.
     rejections: RefCell<Vec<(Value<'js>, Value<'js>)>>,
+    /// Promises that got a handler after their rejection was reported. The
+    /// page hears about them (`rejectionhandled`) at the end of the next
+    /// microtask checkpoint.
+    handled_late: RefCell<Vec<Value<'js>>>,
+}
+
+/// The JS hooks that tell the page about errors (see `events.js`).
+#[derive(Clone)]
+struct ErrorHooks<'js> {
+    report_exception: Function<'js>,
+    unhandled_rejection: Function<'js>,
+    rejection_outstanding: Function<'js>,
+    rejection_handled: Function<'js>,
+}
+
+impl<'js> ErrorHooks<'js> {
+    fn from_glue(hooks: &Object<'js>) -> rquickjs::Result<Self> {
+        Ok(Self {
+            report_exception: hooks.get("reportException")?,
+            unhandled_rejection: hooks.get("unhandledRejection")?,
+            rejection_outstanding: hooks.get("rejectionOutstanding")?,
+            rejection_handled: hooks.get("rejectionHandled")?,
+        })
+    }
 }
 
 // SAFETY: `JsData` only holds values bound to `'js`, and `Changed` is the same
@@ -276,9 +300,17 @@ impl<'js> JsData<'js> {
     }
 }
 
+/// Calls a JS hook for its side effects. A hook that throws (which only
+/// happens when it is interrupted or runs out of memory) does nothing.
+fn call_hook<'js>(ctx: &Ctx<'js>, hook: &Function<'js>, args: impl IntoArgs<'js>) {
+    if hook.call::<_, ()>(args).is_err() {
+        drop(ctx.catch());
+    }
+}
+
 /// Calls a JS hook that answers yes or no. A hook that throws (which only
 /// happens when it is interrupted or runs out of memory) answers no.
-fn ask_hook<'js>(ctx: &Ctx<'js>, hook: Function<'js>, args: impl IntoArgs<'js>) -> bool {
+fn ask_hook<'js>(ctx: &Ctx<'js>, hook: &Function<'js>, args: impl IntoArgs<'js>) -> bool {
     match hook.call::<_, bool>(args) {
         Ok(answer) => answer,
         Err(_) => {
@@ -294,8 +326,8 @@ fn dispatch_error<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> bool {
     // Exceptions raised while the glue is installed have no page to go to.
     let hook = ctx
         .userdata::<JsData<'js>>()
-        .map(|d| d.report_exception.clone());
-    hook.is_some_and(|hook| ask_hook(ctx, hook, (value,)))
+        .map(|d| d.errors.report_exception.clone());
+    hook.is_some_and(|hook| ask_hook(ctx, &hook, (value,)))
 }
 
 /// Renders a JS value as text the way the console would.
@@ -354,10 +386,27 @@ fn track_rejection<'js>(ctx: Ctx<'js>, promise: Value<'js>, reason: Value<'js>, 
     };
     let mut pending = data.rejections.borrow_mut();
     if handled {
+        let before = pending.len();
         pending.retain(|(p, _)| *p != promise);
+        if pending.len() == before {
+            // Its rejection was already reported as unhandled.
+            data.handled_late.borrow_mut().push(promise);
+        }
     } else {
         pending.push((promise, reason));
     }
+}
+
+/// Removes `promise` from the promises handled after their rejection was
+/// reported, returning whether it was there.
+fn take_handled_late<'js>(ctx: &Ctx<'js>, promise: &Value<'js>) -> bool {
+    let Some(data) = ctx.userdata::<JsData<'js>>() else {
+        return false;
+    };
+    let mut late = data.handled_late.borrow_mut();
+    let before = late.len();
+    late.retain(|p| p != promise);
+    late.len() != before
 }
 
 fn eval_options(filename: &str) -> EvalOptions {
@@ -486,6 +535,12 @@ impl JsRuntime {
     /// Runs promise jobs and queued microtasks until none are left, then
     /// reports promises rejected without a handler.
     ///
+    /// Each such rejection is fired at the global as an `unhandledrejection`
+    /// event, and recorded in the error log unless a listener cancels it.
+    /// Microtasks the listeners queue run before this returns. A promise
+    /// that gets a handler after its rejection was reported gets a
+    /// `rejectionhandled` event in a task of its own.
+    ///
     /// Stops early if the deadline passes or an interrupt is requested; the
     /// remaining jobs stay queued.
     pub fn perform_microtask_checkpoint(&self) {
@@ -494,6 +549,18 @@ impl JsRuntime {
         }
         // Moves the stack top to here; jobs run a few frames deeper.
         self.with(|_| ());
+        self.run_jobs();
+        if self.with(|ctx| self.notify_rejections(&ctx, true)) {
+            // Promises that the listeners or their microtasks leave rejected
+            // are logged without another round of events, so a listener that
+            // rejects cannot keep the checkpoint going forever.
+            self.run_jobs();
+            self.with(|ctx| self.notify_rejections(&ctx, false));
+        }
+    }
+
+    /// Runs promise jobs until none are left or JS is interrupted.
+    fn run_jobs(&self) {
         while !self.shared.interrupted() {
             match self.runtime.execute_pending_job() {
                 Ok(true) => {}
@@ -504,16 +571,42 @@ impl JsRuntime {
                 }),
             }
         }
-        self.with(|ctx| {
-            let rejections = ctx
-                .userdata::<JsData<'_>>()
-                .map(|d| d.rejections.take())
-                .unwrap_or_default();
-            for (_promise, reason) in rejections {
-                let error = error_from_value(&ctx, reason, ErrorKind::UnhandledRejection);
+    }
+
+    /// Tells the page about rejections handled since they were reported,
+    /// then reports the rejections that are still unhandled, firing
+    /// `unhandledrejection` for each when `dispatch` is set. Returns whether
+    /// there were unhandled rejections.
+    fn notify_rejections<'js>(&self, ctx: &Ctx<'js>, dispatch: bool) -> bool {
+        let Some((hooks, late, rejections)) = ctx
+            .userdata::<JsData<'js>>()
+            .map(|d| (d.errors.clone(), d.handled_late.take(), d.rejections.take()))
+        else {
+            return false;
+        };
+        for promise in late {
+            call_hook(ctx, &hooks.rejection_handled, (promise,));
+        }
+        let any = !rejections.is_empty();
+        for (promise, reason) in rejections {
+            let error = error_from_value(ctx, reason.clone(), ErrorKind::UnhandledRejection);
+            let handled = dispatch
+                && error.kind == ErrorKind::UnhandledRejection
+                && ask_hook(
+                    ctx,
+                    &hooks.unhandled_rejection,
+                    (promise.clone(), reason.clone()),
+                );
+            if !handled {
                 self.shared.report(error);
             }
-        });
+            // A listener that attached a handler while the event was
+            // dispatched has handled the rejection for good.
+            if !take_handled_late(ctx, &promise) {
+                call_hook(ctx, &hooks.rejection_outstanding, (promise, reason));
+            }
+        }
+        any
     }
 
     /// Whether promise jobs or microtasks are waiting to run.
@@ -614,8 +707,9 @@ fn install<'js>(
     let data = JsData {
         inspect: hooks.get("inspect")?,
         hooks: LoopHooks::from_prelude(&hooks)?,
-        report_exception: hooks.get("reportException")?,
+        errors: ErrorHooks::from_glue(&hooks)?,
         rejections: RefCell::default(),
+        handled_late: RefCell::default(),
     };
     if ctx.store_userdata(data).is_err() {
         return Err(rquickjs::Error::Unknown);
