@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head><title>App</title></head>
+<body>
+  <div id="app">loading</div>
+  <script src="/ads/tracker.js"></script>
+  <script>
+    console.log('booting');
+    fetch('/api/data')
+      .then((r) => r.json())
+      .then((data) => {
+        document.getElementById('app').innerHTML =
+          data.items.map((item) => `<p class="item">${item}</p>`).join('');
+        window.headers = data.headers;
+      });
+    setTimeout(() => {
+      const late = document.createElement('p');
+      late.id = 'late';
+      late.textContent = 'late';
+      document.body.appendChild(late);
+    }, 2000);
+  </script>
+</body>
+</html>

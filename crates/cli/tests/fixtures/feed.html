@@ -1,0 +1,17 @@
+<!doctype html>
+<title>Feed</title>
+<div id="feed"><article>post 0</article></div>
+<script>
+  let page = 0;
+  addEventListener('scroll', async () => {
+    if (page >= 3) return;
+    page += 1;
+    const n = page;
+    const posts = await (await fetch('/api/feed?page=' + n)).json();
+    for (const text of posts) {
+      const article = document.createElement('article');
+      article.textContent = text;
+      document.getElementById('feed').appendChild(article);
+    }
+  });
+</script>
