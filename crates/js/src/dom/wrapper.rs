@@ -43,6 +43,7 @@ impl Drop for NodeWrapper<'_> {
         // Runs in the GC finalizer, which never runs while these cells are
         // borrowed: they are only borrowed briefly, without running JS.
         self.dom.wrappers.borrow_mut().remove(&self.id);
+        self.dom.set_observed(self.id, false);
         self.dom.add_candidate(self.id);
     }
 }
@@ -85,6 +86,8 @@ impl<'js> JsClass<'js> for NodeWrapper<'js> {
 pub(crate) struct DomData<'js> {
     pub(crate) exception: Function<'js>,
     pub(crate) document: Node<'js>,
+    /// Takes mutation records (see the `mutation` module).
+    pub(crate) mutation_hook: RefCell<Option<Function<'js>>>,
     element: Object<'js>,
     html_element: Object<'js>,
     html_unknown: Object<'js>,
@@ -119,6 +122,7 @@ pub(crate) fn init<'js>(
     let data = DomData {
         exception,
         document,
+        mutation_hook: RefCell::new(None),
         element: protos.get("Element")?,
         html_element: protos.get("HTMLElement")?,
         html_unknown: protos.get("HTMLUnknownElement")?,

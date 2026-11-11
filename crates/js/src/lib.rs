@@ -141,6 +141,12 @@
 //! defaults, with no cascade. Geometry is synthetic: every rendered element
 //! is a visible box at the top of the viewport.
 //!
+//! `MutationObserver` sees every change scripts make to the tree, with the
+//! standard's records (`childList`, `attributes` and `characterData`, with
+//! `subtree`, `attributeFilter` and old values) delivered in a microtask.
+//! Changes the host makes through
+//! [`with_document_mut`](JsRuntime::with_document_mut) are not observed.
+//!
 //! Script elements that a script inserts into the document run if they are
 //! inline classic scripts, unless the page loader takes them over through
 //! the `internals.scriptConnected` hook.

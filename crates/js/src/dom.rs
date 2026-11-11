@@ -31,15 +31,18 @@
 //!
 //! Every change to the tree made from JS goes through [`DomState`]'s
 //! mutation methods, which keep the wrapper groups in step with the trees
-//! and bump the version that live collections use to notice changes.
+//! and bump the version that live collections use to notice changes. They
+//! also report each change for `MutationObserver` (see the `mutation`
+//! module).
 
 mod collection;
 mod inner_text;
+mod mutation;
 mod natives;
 mod wrapper;
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use dasher_css::SelectorList;
@@ -64,6 +67,11 @@ pub(crate) struct DomState {
     /// Bumped by every change to the tree or to attributes.
     version: Cell<u32>,
     selectors: RefCell<HashMap<String, Rc<SelectorList>>>,
+    /// Nodes with registered mutation observers. Each has a wrapper, whose
+    /// finalizer removes it.
+    observed: RefCell<HashSet<NodeId>>,
+    /// Mutation records waiting to be delivered to JS.
+    pending: RefCell<Vec<mutation::Record>>,
 }
 
 impl DomState {
@@ -74,6 +82,8 @@ impl DomState {
             candidates: RefCell::default(),
             version: Cell::new(0),
             selectors: RefCell::default(),
+            observed: RefCell::default(),
+            pending: RefCell::default(),
         }
     }
 
@@ -121,8 +131,12 @@ impl DomState {
     }
 
     /// Releases the trees of queued candidates that are detached and have
-    /// no wrapper left.
+    /// no wrapper left. Waits while mutation records, which may name nodes
+    /// of those trees, are queued.
     fn sweep(&self, doc: &mut Document) {
+        if self.has_pending_records() {
+            return;
+        }
         let candidates = std::mem::take(&mut *self.candidates.borrow_mut());
         if candidates.is_empty() {
             return;
@@ -251,6 +265,10 @@ impl JsRuntime {
         let old = std::mem::replace(&mut *dom.doc.borrow_mut(), document);
         dom.candidates.borrow_mut().clear();
         dom.selectors.borrow_mut().clear();
+        // The document node keeps its wrapper, and so its observers.
+        let root = dom.doc.borrow().root();
+        dom.observed.borrow_mut().retain(|&n| n == root);
+        dom.pending.borrow_mut().clear();
         dom.bump();
         drop(old);
     }
