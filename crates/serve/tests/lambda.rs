@@ -65,6 +65,8 @@ fn posted(api: &FixtureServer, id: &str, kind: &str) -> Option<Value> {
 fn quiet() -> LambdaConfig {
     LambdaConfig {
         log: false,
+        // The fixtures are on localhost.
+        block_private_addresses: false,
         ..LambdaConfig::default()
     }
 }

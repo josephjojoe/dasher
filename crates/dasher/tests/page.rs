@@ -113,6 +113,28 @@ async fn error_statuses_load_and_bad_urls_fail() {
 }
 
 #[tokio::test]
+async fn private_addresses_can_be_refused() {
+    let server = server();
+    let browser = Browser::builder()
+        .block_private_addresses(true)
+        .build()
+        .unwrap();
+    let mut page = browser.new_page();
+    let error = page.goto(&server.url("/blank.html")).await.unwrap_err();
+    let Error::Load(dasher::LoadError::Network(network)) = &error else {
+        panic!("expected a network error, got {error:?}");
+    };
+    assert!(network.is_blocked(), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("127.0.0.1 is a loopback address"),
+        "{error}"
+    );
+    assert_eq!(server.request_count(), 0);
+}
+
+#[tokio::test]
 async fn a_blank_page_has_no_document() {
     let mut page = browser().new_page();
     assert_eq!(page.content(), "<html><head></head><body></body></html>");

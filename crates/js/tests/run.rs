@@ -2,7 +2,9 @@
 
 use std::time::{Duration, Instant};
 
-use dasher_js::{ClockMode, JsRuntime, RunLimits, RunOutcome, RuntimeOptions};
+use dasher_js::{
+    ClockMode, JsRuntime, NavigationKind, NavigationRequest, RunLimits, RunOutcome, RuntimeOptions,
+};
 
 fn runtime(clock: ClockMode) -> JsRuntime {
     JsRuntime::new(RuntimeOptions {
@@ -88,6 +90,70 @@ async fn until_bounds_page_time_and_leaves_later_work() {
         RunOutcome::ReachedTime
     );
     assert!(started.elapsed() >= ms(40));
+}
+
+#[tokio::test]
+async fn scheduled_refresh_becomes_a_navigation_on_the_page_clock() {
+    let js = runtime(ClockMode::Virtual);
+    js.run_script("var n = 0; setInterval(() => n++, 1000);", "a.js")
+        .unwrap();
+    js.schedule_refresh("https://example.com/next", ms(4500));
+    let due = js.refresh_due().unwrap();
+    assert!(!js.is_idle());
+    let started = Instant::now();
+    assert_eq!(
+        js.run(RunLimits::default()).await,
+        RunOutcome::NavigationRequested
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(js.now() >= due);
+    // Timers due before the refresh ran first, and none after.
+    assert_eq!(json(&js, "n"), "4");
+    assert_eq!(js.refresh_due(), None);
+    assert_eq!(
+        js.take_navigation_request(),
+        Some(NavigationRequest {
+            url: "https://example.com/next".into(),
+            kind: NavigationKind::Replace,
+        })
+    );
+
+    // Real time is waited for.
+    let js = runtime(ClockMode::Realtime);
+    js.schedule_refresh("https://example.com/next", ms(60));
+    let started = Instant::now();
+    assert_eq!(
+        js.run(RunLimits::default()).await,
+        RunOutcome::NavigationRequested
+    );
+    assert!(started.elapsed() >= ms(50));
+}
+
+#[tokio::test]
+async fn scheduled_refresh_yields_to_an_earlier_navigation() {
+    let js = runtime(ClockMode::Manual);
+    js.schedule_refresh("https://example.com/refresh", ms(0));
+    js.run_script("location.href = 'https://example.com/script'", "a.js")
+        .unwrap();
+    assert_eq!(
+        js.take_navigation_request().unwrap().url,
+        "https://example.com/script"
+    );
+    // The host dropped the script's request; the refresh still comes due.
+    js.run_ready().unwrap();
+    assert_eq!(
+        js.take_navigation_request().unwrap().url,
+        "https://example.com/refresh"
+    );
+
+    js.schedule_refresh("https://example.com/later", ms(100));
+    js.run_script("location.href = 'https://example.com/script'", "a.js")
+        .unwrap();
+    js.advance(ms(200)).unwrap();
+    assert_eq!(
+        js.take_navigation_request().unwrap().url,
+        "https://example.com/script"
+    );
 }
 
 #[tokio::test]

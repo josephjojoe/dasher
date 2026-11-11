@@ -48,7 +48,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use dasher_css::SelectorList;
-use dasher_dom::{Document, NodeId, NodeKind};
+use dasher_dom::{Document, DocumentParser, NodeId, NodeKind};
 use rquickjs::{Ctx, Function, Object, qjs};
 
 use crate::clock::Clock;
@@ -376,6 +376,44 @@ impl JsRuntime {
         let result = f(&mut dom.doc_mut());
         dom.bump();
         self.with(|ctx| wrapper::regroup_all(&ctx, dom));
+        result
+    }
+
+    /// Runs `f`, which parses into the page's document with `parser`, with
+    /// write access to the document as [`with_document_mut`] gives.
+    ///
+    /// Unlike other host changes, what the parser builds is reported to
+    /// `MutationObserver`s, as browsers report it: a `childList` record for
+    /// each node inserted (or moved, for misnested markup), a
+    /// `characterData` record when text is added to a text node that was
+    /// there before this call, and an `attributes` record for each
+    /// attribute a repeated `<html>` or `<body>` tag adds. If any are
+    /// queued, a microtask checkpoint follows, as one does in browsers
+    /// before the parser runs a script and after it parses each chunk of
+    /// input, so observers have seen the new nodes before the next script
+    /// runs. While nothing is observed the parser logs nothing.
+    ///
+    /// [`with_document_mut`]: Self::with_document_mut
+    pub fn with_parser<R>(
+        &self,
+        parser: &mut DocumentParser,
+        f: impl FnOnce(&mut DocumentParser, &mut Document) -> R,
+    ) -> R {
+        let dom = Rc::clone(&self.shared().dom);
+        let observed = dom.is_observed();
+        parser.log_changes(observed);
+        let result = self.with_document_mut(|doc| f(parser, doc));
+        if observed {
+            dom.parser_changes(&dom.doc(), &parser.take_changes());
+            if dom.has_pending_records() {
+                self.with(|ctx| {
+                    if let Err(e) = mutation::deliver(&ctx, &dom) {
+                        self.shared().report_uncaught(&ctx, e);
+                    }
+                });
+                self.perform_microtask_checkpoint();
+            }
+        }
         result
     }
 

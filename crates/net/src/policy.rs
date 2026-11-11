@@ -13,6 +13,7 @@
 //! ([`RequestPolicy::filter`]).
 
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use hyper::Method;
@@ -188,6 +189,14 @@ pub enum BlockReason {
     UrlPattern(UrlPattern),
     /// The caller's filter refused the request.
     Filter,
+    /// The server's address is loopback, link-local, private or otherwise
+    /// not public, and the client refuses those (see
+    /// [`ClientBuilder::block_private_addresses`]). Unlike the other
+    /// reasons this is found when connecting, after DNS, so it applies to
+    /// what a host name resolves to.
+    ///
+    /// [`ClientBuilder::block_private_addresses`]: crate::ClientBuilder::block_private_addresses
+    PrivateAddress(IpAddr),
 }
 
 impl fmt::Display for BlockReason {
@@ -197,6 +206,11 @@ impl fmt::Display for BlockReason {
             Self::Scheme => f.write_str("only http and https URLs can be fetched"),
             Self::UrlPattern(p) => write!(f, "URL matches blocked pattern {:?}", p.as_str()),
             Self::Filter => f.write_str("refused by the request filter"),
+            Self::PrivateAddress(ip) => write!(
+                f,
+                "{ip} is a {} address, and private addresses are refused",
+                crate::guard::private_range(*ip).unwrap_or("private")
+            ),
         }
     }
 }

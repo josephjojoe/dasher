@@ -78,6 +78,8 @@ pub(crate) struct LoopState {
     frames: RefCell<Frames>,
     /// Timer nesting level of the running task; 0 when it is not a timer.
     timer_nesting: Cell<u32>,
+    /// A scheduled declarative refresh: when it is due and where it goes.
+    pub(crate) refresh: RefCell<Option<(Duration, String)>>,
 }
 
 impl LoopState {
@@ -89,6 +91,7 @@ impl LoopState {
             tasks: RefCell::default(),
             frames: RefCell::default(),
             timer_nesting: Cell::new(0),
+            refresh: RefCell::new(None),
         }
     }
 
@@ -112,12 +115,24 @@ impl LoopState {
             .map(|requested| self.frame_after(requested))
     }
 
-    /// When the next timer or animation frame is due, in page time.
+    /// When the next timer, animation frame or refresh is due, in page
+    /// time.
     fn next_wakeup(&self) -> Option<Duration> {
         let timer = self.timers.borrow().next_due();
-        match (timer, self.next_frame()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        let refresh = self.refresh.borrow().as_ref().map(|&(due, _)| due);
+        [timer, self.next_frame(), refresh]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// Takes the scheduled refresh off the schedule if it is due at `now`.
+    fn pop_due_refresh(&self, now: Duration) -> Option<String> {
+        let mut refresh = self.refresh.borrow_mut();
+        if refresh.as_ref().is_some_and(|&(due, _)| due <= now) {
+            refresh.take().map(|(_, url)| url)
+        } else {
+            None
         }
     }
 
@@ -237,8 +252,9 @@ impl JsRuntime {
         self.event_loop().clock.mode()
     }
 
-    /// The page time at which the next timer or animation frame is due, if
-    /// any are scheduled. May be in the past when work is already runnable.
+    /// The page time at which the next timer, animation frame or
+    /// [refresh](Self::schedule_refresh) is due, if any are scheduled. May
+    /// be in the past when work is already runnable.
     pub fn next_wakeup(&self) -> Option<Duration> {
         self.event_loop().next_wakeup()
     }
@@ -259,6 +275,7 @@ impl JsRuntime {
             && state.tasks.borrow().is_empty()
             && state.timers.borrow().is_empty()
             && state.frames.borrow().pending.is_empty()
+            && state.refresh.borrow().is_none()
             && !self.has_pending_microtasks()
             && !self.shared().dom.layout_changed()
     }
@@ -304,6 +321,10 @@ impl JsRuntime {
             .borrow_mut()
             .extend(arrived.into_iter().map(|task| Queued::Host(task)));
         let now = state.clock.now();
+        if let Some(url) = state.pop_due_refresh(now) {
+            self.shared().window.request_refresh(url);
+            return Ok(true);
+        }
         {
             let mut timers = state.timers.borrow_mut();
             let mut tasks = state.tasks.borrow_mut();

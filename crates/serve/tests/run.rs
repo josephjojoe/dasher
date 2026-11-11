@@ -7,8 +7,16 @@ use std::time::{Duration, Instant};
 use dasher_serve::{Job, Outcome, RunOptions, run};
 use serde_json::{Value, json};
 
+/// The service's options, but allowing the fixture servers on localhost.
+fn local() -> RunOptions {
+    RunOptions {
+        block_private_addresses: false,
+        ..RunOptions::default()
+    }
+}
+
 async fn run_json(job: Value) -> Outcome {
-    run_with(job, &RunOptions::default()).await
+    run_with(job, &local()).await
 }
 
 async fn run_with(job: Value, options: &RunOptions) -> Outcome {
@@ -231,13 +239,30 @@ async fn metadata_endpoints_are_refused() {
 }
 
 #[tokio::test]
+async fn private_addresses_are_refused_by_default() {
+    let site = common::site();
+    let by_ip = site.url("/shop.html");
+    let by_name = by_ip.replace("127.0.0.1", "localhost");
+    for url in [&by_ip, &by_name] {
+        let outcome = run_with(json!({ "url": url }), &RunOptions::default()).await;
+        assert_eq!(outcome.status, 502, "{url}: {}", outcome.body);
+        let error = outcome.body["error"].as_str().unwrap();
+        assert!(
+            error.contains("loopback address, and private addresses are refused"),
+            "{url}: {error}"
+        );
+    }
+    assert_eq!(site.request_count(), 0);
+}
+
+#[tokio::test]
 async fn the_time_limit_is_capped_by_the_service_and_the_deadline() {
     let site = common::site();
     let job = json!({ "url": site.url("/slow.html"), "timeout_ms": 60_000 });
 
     let capped = RunOptions {
         max_timeout: Duration::from_millis(200),
-        ..RunOptions::default()
+        ..local()
     };
     let started = Instant::now();
     let outcome = run_with(job.clone(), &capped).await;
@@ -246,7 +271,7 @@ async fn the_time_limit_is_capped_by_the_service_and_the_deadline() {
 
     let deadline = RunOptions {
         deadline: Some(Instant::now() + Duration::from_millis(1700)),
-        ..RunOptions::default()
+        ..local()
     };
     let started = Instant::now();
     let outcome = run_with(job.clone(), &deadline).await;
@@ -255,7 +280,7 @@ async fn the_time_limit_is_capped_by_the_service_and_the_deadline() {
 
     let past = RunOptions {
         deadline: Some(Instant::now()),
-        ..RunOptions::default()
+        ..local()
     };
     let outcome = run_with(job, &past).await;
     assert_eq!(outcome.status, 504);

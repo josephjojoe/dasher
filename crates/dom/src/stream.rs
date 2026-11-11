@@ -14,6 +14,10 @@
 //! [released](Document::release) until [`DocumentParser::finish`] returns;
 //! detaching them is fine, the parser then builds into a detached subtree,
 //! as browsers do.
+//!
+//! Browsers queue a mutation record for every change the parser makes to
+//! the tree. So that the host can do the same, the parser can
+//! [log](DocumentParser::log_changes) its changes as [`TreeChange`]s.
 
 use std::cell::RefCell;
 
@@ -24,8 +28,9 @@ use html5ever::tree_builder::TreeBuilderOpts;
 use html5ever::{ParseOpts, parse_document};
 
 use crate::document::Document;
+use crate::name::Name;
 use crate::node::NodeId;
-use crate::parse::{DocSlot, ParseOptions, Sink};
+use crate::parse::{ChangeLog, DocSlot, ParseOptions, Sink};
 
 /// Where an incremental parse stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +43,42 @@ pub enum ParseStep {
     /// element is in the tree with all of its text. Scripts in template
     /// contents pause too, though they are not connected and must not run.
     Script(NodeId),
+}
+
+/// A change a [`DocumentParser`] made to the tree, as logged by
+/// [`DocumentParser::log_changes`]. Each is one the DOM standard queues a
+/// mutation record for. Sibling ids are as they were right after (for an
+/// insertion) or right before (for a removal) the change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeChange {
+    /// `node` was inserted into `parent`, between `prev` and `next`.
+    Inserted {
+        parent: NodeId,
+        node: NodeId,
+        prev: Option<NodeId>,
+        next: Option<NodeId>,
+    },
+    /// `node` was removed from between `prev` and `next` in `parent`, as
+    /// the tree builder does when it moves misnested and foster-parented
+    /// content. If it was moved, an `Inserted` change follows.
+    Removed {
+        parent: NodeId,
+        node: NodeId,
+        prev: Option<NodeId>,
+        next: Option<NodeId>,
+    },
+    /// Text was appended to the text node `node`, whose data was `old_len`
+    /// bytes long before. Logged once per node until the changes are
+    /// [taken](DocumentParser::take_changes), and not for text nodes
+    /// inserted since then, whose text is all part of the insertion.
+    TextAppended { node: NodeId, old_len: usize },
+    /// The element `node` gained the attribute `local` in `namespace`, as
+    /// `<html>` and `<body>` do from attributes on repeated start tags.
+    AttributeAdded {
+        node: NodeId,
+        namespace: Name,
+        local: Name,
+    },
 }
 
 /// An HTML document parser that is fed input piece by piece and pauses
@@ -126,6 +167,31 @@ impl DocumentParser {
         if !text.is_empty() {
             self.parser.input_buffer.push_front(StrTendril::from(text));
         }
+    }
+
+    /// Starts or stops logging the changes parsing makes to the tree, to be
+    /// read with [`take_changes`](Self::take_changes). Stopping drops the
+    /// changes not taken yet. Logging is off to begin with, and costs
+    /// nothing then.
+    pub fn log_changes(&mut self, on: bool) {
+        let mut log = self.parser.tokenizer.sink.sink.log.borrow_mut();
+        if on != log.is_some() {
+            *log = on.then(ChangeLog::default);
+        }
+    }
+
+    /// The changes logged since logging started or they were last taken,
+    /// in the order they were made.
+    pub fn take_changes(&mut self) -> Vec<TreeChange> {
+        self.parser
+            .tokenizer
+            .sink
+            .sink
+            .log
+            .borrow_mut()
+            .as_mut()
+            .map(ChangeLog::take)
+            .unwrap_or_default()
     }
 
     /// Whether [`finish`](Self::finish) was called.

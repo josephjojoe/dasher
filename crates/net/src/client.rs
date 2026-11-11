@@ -13,7 +13,6 @@ use hyper::header::{
 };
 use hyper::{HeaderMap, Method, StatusCode, Uri};
 use hyper_util::client::legacy::Client as HyperClient;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
@@ -25,7 +24,8 @@ use crate::connector::{Connector, Proxy};
 use crate::cookies::CookieJar;
 use crate::decode::ACCEPT_ENCODING as ACCEPT_ENCODING_VALUE;
 use crate::error::{Error, ErrorKind, Result};
-use crate::policy::{RequestInfo, RequestPolicy, ResourceType};
+use crate::guard::{self, GuardedHttp};
+use crate::policy::{BlockReason, RequestInfo, RequestPolicy, ResourceType};
 use crate::response::{Body, Response, with_deadline};
 
 /// The `User-Agent` sent when none is configured: a current desktop Chrome on
@@ -63,6 +63,7 @@ pub struct ClientBuilder {
     built_in_roots: bool,
     root_certificates: Vec<CertificateDer<'static>>,
     proxy: Option<Proxy>,
+    block_private_addresses: bool,
 }
 
 impl Default for ClientBuilder {
@@ -86,6 +87,7 @@ impl Default for ClientBuilder {
             built_in_roots: true,
             root_certificates: Vec::new(),
             proxy: None,
+            block_private_addresses: false,
         }
     }
 }
@@ -97,6 +99,7 @@ impl fmt::Debug for ClientBuilder {
             .field("timeout", &self.timeout)
             .field("max_response_size", &self.max_response_size)
             .field("proxy", &self.proxy)
+            .field("block_private_addresses", &self.block_private_addresses)
             .finish_non_exhaustive()
     }
 }
@@ -194,14 +197,37 @@ impl ClientBuilder {
         self
     }
 
+    /// Refuses to connect to loopback, link-local, private (RFC 1918 and
+    /// IPv6 unique local), shared CGNAT, unspecified, multicast and
+    /// reserved addresses. Off by default.
+    ///
+    /// Turn it on when the URLs come from someone you don't trust, so they
+    /// can't reach the cloud metadata server (`169.254.169.254`), services
+    /// on localhost or the private network. The check is made on the
+    /// addresses actually connected to, after DNS, for every connection
+    /// including those for redirects: a public name that resolves or
+    /// rebinds to a private address is refused too. Of the addresses a
+    /// name resolves to, the private ones are skipped. Requests refused
+    /// fail with [`ErrorKind::Blocked`] and
+    /// [`BlockReason::PrivateAddress`].
+    ///
+    /// Through a [`proxy`](Self::proxy), the proxy resolves host names and
+    /// connects to them, so only literal IP targets (and the proxy's own
+    /// address) can be checked; see [`Proxy`].
+    pub fn block_private_addresses(mut self, enabled: bool) -> Self {
+        self.block_private_addresses = enabled;
+        self
+    }
+
     /// Builds the client.
     pub fn build(self) -> Result<Client> {
         let tls = self.tls_config()?;
-        let mut http = HttpConnector::new();
-        // The HTTPS connector hands it https URLs too.
-        http.enforce_http(false);
-        http.set_nodelay(true);
-        http.set_connect_timeout(self.connect_timeout);
+        let http = GuardedHttp::new(self.block_private_addresses, |http| {
+            // The HTTPS connector hands it https URLs too.
+            http.enforce_http(false);
+            http.set_nodelay(true);
+            http.set_connect_timeout(self.connect_timeout);
+        });
         let connector = Connector::new(http, tls, self.http2, self.proxy.as_ref());
 
         let hyper = HyperClient::builder(TokioExecutor::new())
@@ -570,6 +596,9 @@ impl Session {
             )?;
             let response = with_deadline(deadline, async {
                 client.hyper.request(outgoing).await.map_err(|e| {
+                    if let Some(ip) = guard::blocked_address(&e) {
+                        return Error::new(ErrorKind::Blocked(BlockReason::PrivateAddress(ip)));
+                    }
                     let kind = if e.is_connect() {
                         ErrorKind::Connect
                     } else {
