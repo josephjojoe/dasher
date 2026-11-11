@@ -35,7 +35,6 @@ pub(crate) const GLUE: &[(&str, &str)] = &[
     ("dasher:lazy", include_str!("lazy.js")),
     // Every stub is in this one file, which lists them all.
     ("dasher:stubs", include_str!("stubs.js")),
-    ("dasher:streams", include_str!("streams.js")),
     ("dasher:fetch", include_str!("fetch.js")),
     ("dasher:xhr", include_str!("xhr.js")),
     ("dasher:dom", include_str!("dom.js")),
@@ -48,7 +47,10 @@ pub(crate) const GLUE: &[(&str, &str)] = &[
 /// it through `native.loadGlue(name)`, as `(name, source)`. Each evaluates
 /// to a function taking `native` and `internals` and returning what it
 /// implements; `lazy.js` installs that.
-pub(crate) const LAZY: &[(&str, &str)] = &[("dasher:intl", include_str!("intl.js"))];
+pub(crate) const LAZY: &[(&str, &str)] = &[
+    ("dasher:intl", include_str!("intl.js")),
+    ("dasher:streams", include_str!("streams.js")),
+];
 
 /// Compiles the glue now rather than when the first runtime is created.
 ///

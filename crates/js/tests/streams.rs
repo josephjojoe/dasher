@@ -359,3 +359,33 @@ async fn the_next_js_flight_data_pattern_works() {
     .await;
     assert_eq!(out, r#"{"text":"1:\"a\"\n2:\"b\"\n"}"#);
 }
+
+#[test]
+fn streams_load_on_first_use() {
+    let js = runtime();
+    let before = js.memory_allocated();
+    // Feature detection does not load them...
+    assert_eq!(
+        js.eval_json("['ReadableStream' in window, 'TextDecoderStream' in globalThis]")
+            .unwrap()
+            .unwrap(),
+        "[true,true]"
+    );
+    // ...and a page may replace one before using it.
+    assert_eq!(
+        js.eval_json("window.TransformStream = 'polyfill'; TransformStream")
+            .unwrap()
+            .unwrap(),
+        r#""polyfill""#
+    );
+    assert!(js.memory_allocated() < before + 16 * 1024);
+    assert_eq!(
+        js.eval_json(
+            "[typeof ReadableStream, new WritableStream() instanceof WritableStream, TransformStream]"
+        )
+        .unwrap()
+        .unwrap(),
+        r#"["function",true,"polyfill"]"#
+    );
+    assert!(js.memory_allocated() > before + 16 * 1024);
+}

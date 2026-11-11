@@ -7,7 +7,8 @@
 // Requests go to Rust through `native.netSend`, which sends them through
 // the page's network session and calls back into `onResponse`, `onBody`
 // and `onError` (see net.rs). Bodies arrive whole; `response.body` is a
-// ReadableStream (streams.js) that gives them as one chunk.
+// ReadableStream (streams.js, loaded on first use) that gives them as one
+// chunk.
 //
 // XMLHttpRequest lives in xhr.js and builds on the helpers this file adds
 // to `internals`.
@@ -678,7 +679,7 @@
   // A ReadableStream (streams.js) of one chunk: the bytes `take()`
   // promises.
   function makeStream(take, cancel) {
-    return internals.bytesStream(take, cancel);
+    return internals.streams().bytesStream(take, cancel);
   }
 
   // Request. https://fetch.spec.whatwg.org/#request-class
@@ -894,10 +895,10 @@
         if (internals.isReadableStream(body)) {
           // Read whole, like every other body here; `response.body` is a
           // new stream over the result.
-          if (internals.readableStreamLocked(body) || internals.readableStreamDisturbed(body)) {
+          if (internals.streams().locked(body) || internals.streams().disturbed(body)) {
             throw new TypeError('Failed to ' + what + ': Response body object should not be disturbed or locked');
           }
-          const pending = internals.readAllBytes(body);
+          const pending = internals.streams().readAllBytes(body);
           ReflectApply(PromiseCatch, pending, [noop]);
           s.body = { bytes: null, pending, used: false, stream: null };
           this.#s = s;

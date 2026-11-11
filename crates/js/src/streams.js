@@ -6,7 +6,9 @@
 //
 // Pages build these themselves (Next.js's App Router feeds its inline
 // flight data to React through a ReadableStream) and get them from
-// `response.body` and `blob.stream()`. The algorithms follow the spec for
+// `response.body` and `blob.stream()`. Most pages never do, so this file
+// is only evaluated when one of its globals or a body stream is first
+// used (see lazy.js). The algorithms follow the spec for
 // default (non-byte) streams. Not supported: byte streams' BYOB readers
 // (`type: 'bytes'` streams work as default streams of Uint8Array chunks,
 // and `getReader({ mode: 'byob' })` throws), and transferring streams.
@@ -1712,29 +1714,27 @@
   }
   tag(TextDecoderStream, 'TextDecoderStream');
 
-  internals.expose({
-    ReadableStream,
-    ReadableStreamDefaultReader,
-    ReadableStreamDefaultController,
-    ReadableByteStreamController,
-    WritableStream,
-    WritableStreamDefaultWriter,
-    WritableStreamDefaultController,
-    TransformStream,
-    TransformStreamDefaultController,
-    ByteLengthQueuingStrategy,
-    CountQueuingStrategy,
-    TextEncoderStream,
-    TextDecoderStream,
-  });
-
-  // For fetch.js: a stream whose chunks come from `pull` (which enqueues on
-  // the controller state it is given, and returns a promise), a check, and
-  // a way to read a whole stream.
-  Object.assign(internals, {
-    isReadableStream: isReadable,
-    readableStreamLocked: (stream) => locked(readableState(stream)),
-    readableStreamDisturbed: (stream) => readableState(stream).disturbed,
+  // Loaded lazily (see lazy.js): returns the globals, and what fetch.js
+  // needs, without installing anything.
+  return {
+    globals: {
+      ReadableStream,
+      ReadableStreamDefaultReader,
+      ReadableStreamDefaultController,
+      ReadableByteStreamController,
+      WritableStream,
+      WritableStreamDefaultWriter,
+      WritableStreamDefaultController,
+      TransformStream,
+      TransformStreamDefaultController,
+      ByteLengthQueuingStrategy,
+      CountQueuingStrategy,
+      TextEncoderStream,
+      TextDecoderStream,
+    },
+    isReadable,
+    locked: (stream) => locked(readableState(stream)),
+    disturbed: (stream) => readableState(stream).disturbed,
     // A stream that produces the bytes `take()` promises as one chunk, and
     // calls `onCancel` if cancelled first.
     bytesStream(take, onCancel) {
@@ -1791,5 +1791,5 @@
       step();
       return d.promise;
     },
-  });
+  };
 })

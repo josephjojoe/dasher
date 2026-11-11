@@ -90,6 +90,7 @@
 //!   `TextEncoderStream` and `TextDecoderStream`. Byte streams work as
 //!   default streams of `Uint8Array` chunks; BYOB readers are not
 //!   supported. `response.body` and `blob.stream()` are readable streams.
+//!   Like `Intl`, streams are evaluated on first use.
 //! - `Intl` (`NumberFormat`, `DateTimeFormat`, `PluralRules`, `Collator`,
 //!   `RelativeTimeFormat`, `ListFormat`), which QuickJS lacks, and the
 //!   `toLocaleString`/`localeCompare` methods built on it. Every locale
