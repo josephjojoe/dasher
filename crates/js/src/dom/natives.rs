@@ -15,6 +15,7 @@ use rquickjs::{Class, Ctx, Function, IntoJs, Object, Result, Value, qjs};
 use super::DomState;
 use super::collection::{Collection, CollectionObject, Filter};
 use super::inner_text::inner_text;
+use super::mutation::deliver;
 use super::wrapper::{self, DomData, Move, Node, after_insert, after_remove, plan_insert, wrap};
 
 /// Throws a `DOMException` with this name and message.
@@ -35,7 +36,7 @@ fn dom_error(ctx: &Ctx<'_>, error: DomError) -> rquickjs::Error {
 
 /// A value that is `null` in JS when absent (rquickjs makes `None`
 /// `undefined`).
-struct Nullable<T>(Option<T>);
+pub(super) struct Nullable<T>(pub(super) Option<T>);
 
 impl<'js, T: IntoJs<'js>> IntoJs<'js> for Nullable<T> {
     fn into_js(self, ctx: &Ctx<'js>) -> Result<Value<'js>> {
@@ -133,6 +134,9 @@ fn adjacent_position(ctx: &Ctx<'_>, position: &str) -> Result<AdjacentPosition> 
 
 // -------------------------------------------------------------------------
 // Mutations.
+//
+// Each records the changes it makes for mutation observers while the
+// document is borrowed, then delivers them once the borrow is released.
 
 /// The script elements under `moved` that just became connected and have
 /// not run, for the page loader to prepare.
@@ -150,55 +154,137 @@ fn connected_scripts(doc: &Document, moved: &[NodeId]) -> Vec<NodeId> {
     scripts
 }
 
+/// The nodes `node` stands for when inserted: a fragment's children, or
+/// `node` itself.
+fn nodes_to_insert(doc: &Document, node: NodeId) -> Vec<NodeId> {
+    if doc.kind(node) == NodeKind::DocumentFragment {
+        doc.children(node).collect()
+    } else {
+        vec![node]
+    }
+}
+
+/// Where a node is now: its parent and siblings, if it has a parent.
+type Place = (NodeId, Option<NodeId>, Option<NodeId>);
+
+fn place(doc: &Document, node: NodeId) -> Option<Place> {
+    let parent = doc.parent(node)?;
+    Some((parent, doc.prev_sibling(node), doc.next_sibling(node)))
+}
+
+/// The children of `parent` strictly between `prev` and `next`, where
+/// `None` is the start or the end.
+fn children_between(
+    doc: &Document,
+    parent: NodeId,
+    prev: Option<NodeId>,
+    next: Option<NodeId>,
+) -> Vec<NodeId> {
+    let first = match prev {
+        Some(p) => doc.next_sibling(p),
+        None => doc.first_child(parent),
+    };
+    std::iter::successors(first, |&n| doc.next_sibling(n))
+        .take_while(|&n| Some(n) != next)
+        .collect()
+}
+
+/// Records what inserting `node` (standing for `moved`) did besides adding
+/// `moved` to its new parent: taking `node` out of its old parent (`old`),
+/// or emptying the fragment it is.
+fn record_moved_out(
+    dom: &DomState,
+    doc: &Document,
+    node: NodeId,
+    moved: &[NodeId],
+    old: Option<Place>,
+) {
+    if let Some((parent, prev, next)) = old {
+        dom.child_list(doc, parent, &[], &[node], prev, next);
+    } else if doc.kind(node) == NodeKind::DocumentFragment {
+        dom.child_list(doc, node, &[], moved, None, None);
+    }
+}
+
+/// `parent.insertBefore(node, before)` on a borrowed document. Returns the
+/// nodes inserted. With `record` unset, the insertion into `parent` itself
+/// is left for the caller to record, as "replace all" does.
+fn insert_into(
+    ctx: &Ctx<'_>,
+    dom: &DomState,
+    doc: &mut Document,
+    parent: NodeId,
+    node: NodeId,
+    before: Option<NodeId>,
+    record: bool,
+) -> std::result::Result<Vec<NodeId>, DomError> {
+    let plan = plan_insert(doc, parent, node);
+    let moved = nodes_to_insert(doc, node);
+    let old = place(doc, node);
+    doc.insert_before(parent, node, before)?;
+    after_insert(ctx, dom, doc, parent, node, &moved, plan);
+    dom.bump();
+    record_moved_out(dom, doc, node, &moved, old);
+    if record {
+        if let (Some(&first), Some(&last)) = (moved.first(), moved.last()) {
+            let (prev, next) = (doc.prev_sibling(first), doc.next_sibling(last));
+            dom.child_list(doc, parent, &moved, &[], prev, next);
+        }
+    }
+    Ok(moved)
+}
+
 /// `parent.insertBefore(node, before)`. Returns the scripts it connected.
 fn insert(
     ctx: &Ctx<'_>,
-    dom: &DomState,
+    dom: &Rc<DomState>,
     parent: NodeId,
     node: NodeId,
     before: Option<NodeId>,
 ) -> Result<Vec<NodeId>> {
     let result = {
         let mut doc = dom.doc_mut();
-        let plan = plan_insert(&doc, parent, node);
-        let moved: Vec<NodeId> = if doc.kind(node) == NodeKind::DocumentFragment {
-            doc.children(node).collect()
-        } else {
-            vec![node]
-        };
-        let result = doc.insert_before(parent, node, before);
-        result.map(|_| {
-            after_insert(ctx, dom, &doc, parent, node, &moved, plan);
-            dom.bump();
-            connected_scripts(&doc, &moved)
-        })
+        insert_into(ctx, dom, &mut doc, parent, node, before, true)
+            .map(|moved| connected_scripts(&doc, &moved))
     };
+    deliver(ctx, dom)?;
     result.map_err(|e| dom_error(ctx, e))
 }
 
 /// Detaches `node` from its parent, if it has one.
-fn detach(ctx: &Ctx<'_>, dom: &DomState, node: NodeId) {
-    let mut doc = dom.doc_mut();
-    if doc.parent(node).is_none() {
-        return;
+fn detach(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId) -> Result<()> {
+    {
+        let mut doc = dom.doc_mut();
+        let Some((parent, prev, next)) = place(&doc, node) else {
+            return Ok(());
+        };
+        doc.remove(node);
+        after_remove(ctx, dom, &doc, node);
+        dom.bump();
+        dom.child_list(&doc, parent, &[], &[node], prev, next);
     }
-    doc.remove(node);
-    after_remove(ctx, dom, &doc, node);
-    dom.bump();
+    deliver(ctx, dom)
 }
 
-/// Detaches all children of `parent`.
-fn remove_children(ctx: &Ctx<'_>, dom: &DomState, doc: &mut Document, parent: NodeId) {
+/// Detaches all children of `parent`, returning them. Leaves recording it
+/// to the caller.
+fn remove_children(
+    ctx: &Ctx<'_>,
+    dom: &DomState,
+    doc: &mut Document,
+    parent: NodeId,
+) -> Vec<NodeId> {
     let old: Vec<NodeId> = doc.children(parent).collect();
     doc.remove_children(parent);
-    for child in old {
+    for &child in &old {
         after_remove(ctx, dom, doc, child);
     }
+    old
 }
 
 fn replace_child(
     ctx: &Ctx<'_>,
-    dom: &DomState,
+    dom: &Rc<DomState>,
     parent: NodeId,
     node: NodeId,
     child: NodeId,
@@ -210,33 +296,48 @@ fn replace_child(
         } else {
             plan_insert(&doc, parent, node)
         };
-        let moved: Vec<NodeId> = if doc.kind(node) == NodeKind::DocumentFragment {
-            doc.children(node).collect()
-        } else {
-            vec![node]
-        };
+        let moved = nodes_to_insert(&doc, node);
+        let old = place(&doc, node);
+        // Where the new nodes go, as the DOM standard's "replace" works it
+        // out before anything moves.
+        let mut next = doc.next_sibling(child);
+        if next == Some(node) {
+            next = doc.next_sibling(node);
+        }
+        let mut prev = doc.prev_sibling(child);
+        if prev == Some(node) {
+            prev = doc.prev_sibling(node);
+        }
         let result = doc.replace_child(parent, node, child);
         result.map(|_| {
-            if node == child {
-                return Vec::new();
+            if node != child {
+                after_insert(ctx, dom, &doc, parent, node, &moved, plan);
+                after_remove(ctx, dom, &doc, child);
+                dom.bump();
             }
-            after_insert(ctx, dom, &doc, parent, node, &moved, plan);
-            after_remove(ctx, dom, &doc, child);
-            dom.bump();
-            connected_scripts(&doc, &moved)
+            record_moved_out(dom, &doc, node, &moved, old);
+            // Replacing a child with itself only moves it out and back in.
+            let removed: &[NodeId] = if node == child { &[] } else { &[child] };
+            dom.child_list(&doc, parent, &moved, removed, prev, next);
+            if node == child {
+                Vec::new()
+            } else {
+                connected_scripts(&doc, &moved)
+            }
         })
     };
+    deliver(ctx, dom)?;
     result.map_err(|e| dom_error(ctx, e))
 }
 
 /// `replaceChildren`: replaces all of `parent`'s children with `node`.
 fn replace_all(
     ctx: &Ctx<'_>,
-    dom: &DomState,
+    dom: &Rc<DomState>,
     parent: NodeId,
     node: Option<NodeId>,
 ) -> Result<Vec<NodeId>> {
-    {
+    let result = {
         let mut doc = dom.doc_mut();
         if let Some(node) = node {
             if doc.contains(node, parent)
@@ -247,82 +348,262 @@ fn replace_all(
                 return Err(dom_error(ctx, DomError::HierarchyRequest));
             }
         }
-        remove_children(ctx, dom, &mut doc, parent);
+        let removed = remove_children(ctx, dom, &mut doc, parent);
         dom.bump();
-    }
-    match node {
-        Some(node) => insert(ctx, dom, parent, node, None),
-        None => Ok(Vec::new()),
-    }
-}
-
-fn set_text_content(ctx: &Ctx<'_>, dom: &DomState, node: NodeId, text: &str) {
-    let mut doc = dom.doc_mut();
-    match doc.kind(node) {
-        NodeKind::Element | NodeKind::DocumentFragment => {
-            remove_children(ctx, dom, &mut doc, node);
-            if !text.is_empty() {
-                let t = doc.create_text(text);
-                doc.append_child(node, t)
-                    .expect("a text node fits anywhere");
-            }
-            dom.bump();
-        }
-        NodeKind::Text | NodeKind::Comment => doc.set_text(node, text),
-        NodeKind::Document | NodeKind::Doctype => {}
-    }
-}
-
-fn set_inner_html(ctx: &Ctx<'_>, dom: &DomState, node: NodeId, html: &str) {
-    let mut doc = dom.doc_mut();
-    let target = doc.template_contents(node).unwrap_or(node);
-    remove_children(ctx, dom, &mut doc, target);
-    doc.set_inner_html(node, html);
-    dom.bump();
-}
-
-fn set_outer_html(ctx: &Ctx<'_>, dom: &DomState, node: NodeId, html: &str) -> Result<()> {
-    let result = {
-        let mut doc = dom.doc_mut();
-        let had_parent = doc.parent(node).is_some();
-        let result = doc.set_outer_html(node, html);
-        if result.is_ok() && had_parent {
-            after_remove(ctx, dom, &doc, node);
-            dom.bump();
-        }
-        result
+        let added = match node {
+            Some(node) => insert_into(ctx, dom, &mut doc, parent, node, None, false),
+            None => Ok(Vec::new()),
+        };
+        let none = Vec::new();
+        let inserted = added.as_ref().unwrap_or(&none);
+        dom.child_list(&doc, parent, inserted, &removed, None, None);
+        added.map(|moved| connected_scripts(&doc, &moved))
     };
+    deliver(ctx, dom)?;
     result.map_err(|e| dom_error(ctx, e))
 }
 
-/// `Node.normalize()`: merges adjacent text nodes and drops empty ones.
-fn normalize(ctx: &Ctx<'_>, dom: &DomState, root: NodeId) {
-    let mut doc = dom.doc_mut();
-    let texts: Vec<NodeId> = doc.descendants(root).filter(|&n| doc.is_text(n)).collect();
-    let mut removed = Vec::new();
-    for t in texts {
-        if doc.parent(t).is_none() {
-            continue; // Already merged into a previous node.
-        }
-        let mut data = doc.text(t).unwrap_or_default().to_owned();
-        while let Some(next) = doc.next_sibling(t).filter(|&n| doc.is_text(n)) {
-            data.push_str(doc.text(next).unwrap_or_default());
-            doc.remove(next);
-            removed.push(next);
-        }
-        if data.is_empty() {
-            doc.remove(t);
-            removed.push(t);
-        } else {
-            doc.set_text(t, &data);
+fn set_text_content(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, text: &str) -> Result<()> {
+    {
+        let mut doc = dom.doc_mut();
+        match doc.kind(node) {
+            NodeKind::Element | NodeKind::DocumentFragment => {
+                let removed = remove_children(ctx, dom, &mut doc, node);
+                let mut added = Vec::new();
+                if !text.is_empty() {
+                    let t = doc.create_text(text);
+                    doc.append_child(node, t)
+                        .expect("a text node fits anywhere");
+                    added.push(t);
+                }
+                dom.bump();
+                dom.child_list(&doc, node, &added, &removed, None, None);
+            }
+            NodeKind::Text | NodeKind::Comment => {
+                dom.character_data(&doc, node);
+                doc.set_text(node, text);
+            }
+            NodeKind::Document | NodeKind::Doctype => {}
         }
     }
-    if !removed.is_empty() {
-        for n in removed {
-            after_remove(ctx, dom, &doc, n);
+    deliver(ctx, dom)
+}
+
+fn set_data(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, data: &str) -> Result<()> {
+    {
+        let mut doc = dom.doc_mut();
+        dom.character_data(&doc, node);
+        doc.set_text(node, data);
+    }
+    deliver(ctx, dom)
+}
+
+fn set_inner_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -> Result<()> {
+    {
+        let mut doc = dom.doc_mut();
+        let target = doc.template_contents(node).unwrap_or(node);
+        let removed = remove_children(ctx, dom, &mut doc, target);
+        doc.set_inner_html(node, html);
+        dom.bump();
+        let added: Vec<NodeId> = doc.children(target).collect();
+        dom.child_list(&doc, target, &added, &removed, None, None);
+    }
+    deliver(ctx, dom)
+}
+
+fn set_outer_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -> Result<()> {
+    let result = {
+        let mut doc = dom.doc_mut();
+        let old = place(&doc, node);
+        let result = doc.set_outer_html(node, html);
+        if let (Ok(()), Some((parent, prev, next))) = (&result, old) {
+            after_remove(ctx, dom, &doc, node);
+            dom.bump();
+            let added = children_between(&doc, parent, prev, next);
+            dom.child_list(&doc, parent, &added, &[node], prev, next);
         }
+        result
+    };
+    deliver(ctx, dom)?;
+    result.map_err(|e| dom_error(ctx, e))
+}
+
+fn insert_adjacent_html(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    node: NodeId,
+    position: AdjacentPosition,
+    html: &str,
+) -> Result<()> {
+    let result = {
+        let mut doc = dom.doc_mut();
+        // Where the new nodes will go, to find them afterwards.
+        let (parent, next) = match position {
+            AdjacentPosition::BeforeBegin => (doc.parent(node), Some(node)),
+            AdjacentPosition::AfterEnd => (doc.parent(node), doc.next_sibling(node)),
+            AdjacentPosition::AfterBegin => (Some(node), doc.first_child(node)),
+            AdjacentPosition::BeforeEnd => (Some(node), None),
+        };
+        let prev = match next {
+            Some(n) => doc.prev_sibling(n),
+            None => parent.and_then(|p| doc.last_child(p)),
+        };
+        let result = doc.insert_adjacent_html(node, position, html);
+        dom.bump();
+        if let (Ok(()), Some(parent)) = (&result, parent) {
+            let added = children_between(&doc, parent, prev, next);
+            dom.child_list(&doc, parent, &added, &[], prev, next);
+        }
+        result
+    };
+    deliver(ctx, dom)?;
+    result.map_err(|e| dom_error(ctx, e))
+}
+
+/// `Node.normalize()`: drops empty text nodes and merges runs of adjacent
+/// ones into the first, following the DOM standard's steps.
+fn normalize(ctx: &Ctx<'_>, dom: &Rc<DomState>, root: NodeId) -> Result<()> {
+    {
+        let mut doc = dom.doc_mut();
+        let texts: Vec<NodeId> = doc.descendants(root).filter(|&n| doc.is_text(n)).collect();
+        let mut removed = Vec::new();
+        let mut take_out = |doc: &mut Document, n: NodeId| {
+            if let Some((parent, prev, next)) = place(doc, n) {
+                doc.remove(n);
+                dom.child_list(doc, parent, &[], &[n], prev, next);
+                removed.push(n);
+            }
+        };
+        for t in texts {
+            if doc.parent(t).is_none() {
+                continue; // Already merged into a previous node.
+            }
+            if doc.text(t).is_some_and(str::is_empty) {
+                take_out(&mut doc, t);
+                continue;
+            }
+            let run: Vec<NodeId> =
+                std::iter::successors(doc.next_sibling(t), |&n| doc.next_sibling(n))
+                    .take_while(|&n| doc.is_text(n))
+                    .collect();
+            if run.is_empty() {
+                continue;
+            }
+            let mut data = doc.text(t).unwrap_or_default().to_owned();
+            for &n in &run {
+                data.push_str(doc.text(n).unwrap_or_default());
+            }
+            dom.character_data(&doc, t);
+            doc.set_text(t, &data);
+            for n in run {
+                take_out(&mut doc, n);
+            }
+        }
+        if !removed.is_empty() {
+            for n in removed {
+                after_remove(ctx, dom, &doc, n);
+            }
+            dom.bump();
+        }
+    }
+    deliver(ctx, dom)
+}
+
+/// The namespace, local name and value of the attribute `setAttribute` and
+/// `removeAttribute` would find for `qualified`.
+fn attr_by_qualified_name<'d>(
+    doc: &'d Document,
+    id: NodeId,
+    qualified: &str,
+) -> Option<(Name, &'d str, &'d str)> {
+    doc.attrs(id).iter().find_map(|a| {
+        let local = doc.name_str(a.local());
+        let prefix = doc.attr_prefix(a);
+        let matches = if prefix == Name::EMPTY {
+            local == qualified
+        } else {
+            qualified.split_once(':') == Some((doc.name_str(prefix), local))
+        };
+        matches.then(|| (doc.attr_namespace(a), local, a.value()))
+    })
+}
+
+fn set_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str, value: &str) -> Result<()> {
+    {
+        let mut doc = dom.doc_mut();
+        let name = html_lower(&doc, n, name);
+        match attr_by_qualified_name(&doc, n, &name) {
+            Some((ns, local, old)) => dom.attribute(&doc, n, ns, local, Some(old)),
+            None => dom.attribute(&doc, n, Name::EMPTY, &name, None),
+        }
+        doc.set_attribute(n, &name, value);
         dom.bump();
     }
+    deliver(ctx, dom)
+}
+
+fn remove_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str) -> Result<bool> {
+    let removed = {
+        let mut doc = dom.doc_mut();
+        let name = html_lower(&doc, n, name);
+        if let Some((ns, local, old)) = attr_by_qualified_name(&doc, n, &name) {
+            dom.attribute(&doc, n, ns, local, Some(old));
+        }
+        let removed = doc.remove_attribute(n, &name);
+        if removed {
+            dom.bump();
+        }
+        removed
+    };
+    deliver(ctx, dom)?;
+    Ok(removed)
+}
+
+fn set_attr_ns(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    n: NodeId,
+    ns: &str,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    {
+        let mut doc = dom.doc_mut();
+        let local = name.split_once(':').map_or(name, |(_, l)| l);
+        // `setAttributeNS` interns both names anyway.
+        let (ns_name, local_name) = (doc.intern(ns), doc.intern(local));
+        let old = doc.attribute_ns(n, ns_name, local_name);
+        dom.attribute(&doc, n, ns_name, local, old);
+        doc.set_attribute_ns(n, ns, name, value);
+        dom.bump();
+    }
+    deliver(ctx, dom)
+}
+
+fn remove_attr_ns(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    n: NodeId,
+    ns: Option<&str>,
+    local: &str,
+) -> Result<bool> {
+    let removed = {
+        let mut doc = dom.doc_mut();
+        let names = doc.names();
+        let (Some(ns), Some(local)) = (names.get(ns.unwrap_or("")), names.get(local)) else {
+            return Ok(false);
+        };
+        if let Some(old) = doc.attribute_ns(n, ns, local) {
+            dom.attribute(&doc, n, ns, doc.name_str(local), Some(old));
+        }
+        let removed = doc.remove_attribute_ns(n, ns, local);
+        if removed {
+            dom.bump();
+        }
+        removed
+    };
+    deliver(ctx, dom)?;
+    Ok(removed)
 }
 
 // -------------------------------------------------------------------------
@@ -463,6 +744,26 @@ fn install_core<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     })?;
     let d = Rc::clone(dom);
     def(obj, "version", move || d.version())?;
+    def(
+        obj,
+        "setMutationHook",
+        |ctx: Ctx<'js>, hook: Function<'js>| -> Result<()> {
+            let data = ctx
+                .userdata::<DomData<'js>>()
+                .ok_or(rquickjs::Error::Unknown)?;
+            data.mutation_hook.replace(Some(hook));
+            Ok(())
+        },
+    )?;
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "setObserved",
+        move |ctx: Ctx<'js>, n: Node<'js>, observed: bool| -> Result<()> {
+            d.set_observed(id(&ctx, &n)?, observed);
+            Ok(())
+        },
+    )?;
     def(obj, "unproxy", |ctx: Ctx<'js>, v: Value<'js>| {
         unproxy(&ctx, v)
     })?;
@@ -578,18 +879,14 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
             if d.doc().parent(c) != Some(p) {
                 return Err(dom_error(&ctx, DomError::NotFound));
             }
-            detach(&ctx, &d, c);
-            Ok(())
+            detach(&ctx, &d, c)
         },
     )?;
     let d = Rc::clone(dom);
     def(
         obj,
         "remove",
-        move |ctx: Ctx<'js>, n: Node<'js>| -> Result<()> {
-            detach(&ctx, &d, id(&ctx, &n)?);
-            Ok(())
-        },
+        move |ctx: Ctx<'js>, n: Node<'js>| -> Result<()> { detach(&ctx, &d, id(&ctx, &n)?) },
     )?;
     let d = Rc::clone(dom);
     def(
@@ -630,10 +927,7 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     def(
         obj,
         "normalize",
-        move |ctx: Ctx<'js>, n: Node<'js>| -> Result<()> {
-            normalize(&ctx, &d, id(&ctx, &n)?);
-            Ok(())
-        },
+        move |ctx: Ctx<'js>, n: Node<'js>| -> Result<()> { normalize(&ctx, &d, id(&ctx, &n)?) },
     )?;
     let d = Rc::clone(dom);
     def(
@@ -734,8 +1028,7 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "setData",
         move |ctx: Ctx<'js>, n: Node<'js>, data: String| -> Result<()> {
-            d.doc_mut().set_text(id(&ctx, &n)?, &data);
-            Ok(())
+            set_data(&ctx, &d, id(&ctx, &n)?, &data)
         },
     )?;
     let d = Rc::clone(dom);
@@ -751,8 +1044,7 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "setTextContent",
         move |ctx: Ctx<'js>, n: Node<'js>, text: String| -> Result<()> {
-            set_text_content(&ctx, &d, id(&ctx, &n)?, &text);
-            Ok(())
+            set_text_content(&ctx, &d, id(&ctx, &n)?, &text)
         },
     )?;
     let d = Rc::clone(dom);
@@ -784,8 +1076,7 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "setInnerHTML",
         move |ctx: Ctx<'js>, n: Node<'js>, html: String| -> Result<()> {
-            set_inner_html(&ctx, &d, element(&ctx, &d, &n)?, &html);
-            Ok(())
+            set_inner_html(&ctx, &d, element(&ctx, &d, &n)?, &html)
         },
     )?;
     let d = Rc::clone(dom);
@@ -802,10 +1093,7 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "insertAdjacentHTML",
         move |ctx: Ctx<'js>, n: Node<'js>, position: String, html: String| -> Result<()> {
             let position = adjacent_position(&ctx, &position)?;
-            let n = element(&ctx, &d, &n)?;
-            let result = d.doc_mut().insert_adjacent_html(n, position, &html);
-            d.bump();
-            result.map_err(|e| dom_error(&ctx, e))
+            insert_adjacent_html(&ctx, &d, element(&ctx, &d, &n)?, position, &html)
         },
     )?;
     let d = Rc::clone(dom);
@@ -955,12 +1243,7 @@ fn install_attributes<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
                     &format!("'{name}' is not a valid attribute name."),
                 ));
             }
-            let n = element(&ctx, &d, &n)?;
-            let mut doc = d.doc_mut();
-            let name = html_lower(&doc, n, &name);
-            doc.set_attribute(n, &name, &value);
-            d.bump();
-            Ok(())
+            set_attr(&ctx, &d, element(&ctx, &d, &n)?, &name, &value)
         },
     )?;
     let d = Rc::clone(dom);
@@ -968,14 +1251,7 @@ fn install_attributes<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
         obj,
         "removeAttr",
         move |ctx: Ctx<'js>, n: Node<'js>, name: String| -> Result<bool> {
-            let n = id(&ctx, &n)?;
-            let mut doc = d.doc_mut();
-            let name = html_lower(&doc, n, &name);
-            let removed = doc.remove_attribute(n, &name);
-            if removed {
-                d.bump();
-            }
-            Ok(removed)
+            remove_attr(&ctx, &d, id(&ctx, &n)?, &name)
         },
     )?;
     let d = Rc::clone(dom);
@@ -1023,10 +1299,7 @@ fn install_attributes<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
                     "The namespace URI provided ('') is not valid for the qualified name provided.",
                 ));
             }
-            let n = element(&ctx, &d, &n)?;
-            d.doc_mut().set_attribute_ns(n, &ns, &name, &value);
-            d.bump();
-            Ok(())
+            set_attr_ns(&ctx, &d, element(&ctx, &d, &n)?, &ns, &name, &value)
         },
     )?;
     let d = Rc::clone(dom);
@@ -1034,19 +1307,7 @@ fn install_attributes<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
         obj,
         "removeAttrNS",
         move |ctx: Ctx<'js>, n: Node<'js>, ns: Option<String>, local: String| -> Result<bool> {
-            let n = id(&ctx, &n)?;
-            let mut doc = d.doc_mut();
-            let names = doc.names();
-            let (Some(ns), Some(local)) =
-                (names.get(ns.as_deref().unwrap_or("")), names.get(&local))
-            else {
-                return Ok(false);
-            };
-            let removed = doc.remove_attribute_ns(n, ns, local);
-            if removed {
-                d.bump();
-            }
-            Ok(removed)
+            remove_attr_ns(&ctx, &d, id(&ctx, &n)?, ns.as_deref(), &local)
         },
     )?;
     let d = Rc::clone(dom);

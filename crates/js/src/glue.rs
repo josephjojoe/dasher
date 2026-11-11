@@ -38,6 +38,7 @@ pub(crate) const GLUE: &[(&str, &str)] = &[
     ("dasher:fetch", include_str!("fetch.js")),
     ("dasher:xhr", include_str!("xhr.js")),
     ("dasher:dom", include_str!("dom.js")),
+    ("dasher:mutation", include_str!("mutation.js")),
     ("dasher:loader", include_str!("loader.js")),
 ];
 

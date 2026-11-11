@@ -141,6 +141,15 @@
 //! defaults, with no cascade. Geometry is synthetic: every rendered element
 //! is a visible box at the top of the viewport.
 //!
+//! `MutationObserver` sees every change scripts make to the tree, with the
+//! standard's records (`childList`, `attributes` and `characterData`, with
+//! `subtree`, `attributeFilter` and old values) delivered in a microtask.
+//! Changes the host makes through
+//! [`with_document_mut`](JsRuntime::with_document_mut) are not observed.
+//! The same changes, when made to nodes in the document, are counted for
+//! the host as [`DomActivity`] (see [`JsRuntime::dom_activity`]), so the
+//! page layer can tell when a page has stopped changing.
+//!
 //! Inline classic script elements that a script inserts into the document
 //! run as they are inserted. Other inserted scripts are left alone unless a
 //! page loader takes them over (see below).
@@ -256,6 +265,7 @@ mod window;
 
 pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
+pub use dom::DomActivity;
 pub use error::{ErrorKind, ScriptError};
 pub use event_loop::{DEFAULT_FRAME_INTERVAL, LoopHandle, Stopped, Task};
 pub use glue::precompile;

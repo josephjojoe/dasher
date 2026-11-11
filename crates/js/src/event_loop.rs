@@ -66,7 +66,8 @@ struct Frames {
 }
 
 pub(crate) struct LoopState {
-    pub(crate) clock: Clock,
+    /// Shared with the DOM, which timestamps mutations.
+    pub(crate) clock: Rc<Clock>,
     frame_interval: Duration,
     timers: RefCell<Timers>,
     tasks: RefCell<VecDeque<Queued>>,
@@ -78,7 +79,7 @@ pub(crate) struct LoopState {
 impl LoopState {
     pub(crate) fn new(mode: ClockMode, frame_interval: Duration) -> Self {
         Self {
-            clock: Clock::new(mode),
+            clock: Rc::new(Clock::new(mode)),
             frame_interval: frame_interval.max(Duration::from_micros(1)),
             timers: RefCell::default(),
             tasks: RefCell::default(),

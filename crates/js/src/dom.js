@@ -3924,6 +3924,7 @@
   Object.assign(internals, {
     document: documentNode,
     isNode: (value) => value instanceof Node,
+    staticNodeList,
     // Page lifecycle: document.readyState and document.currentScript.
     setReadyState(value) {
       if (readyState === value) return;

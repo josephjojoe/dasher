@@ -134,6 +134,8 @@ pub(crate) struct Shared {
 
 impl Shared {
     fn new(options: &RuntimeOptions, heap: Rc<HeapState>, url: Url) -> Self {
+        let event_loop = LoopState::new(options.clock, options.frame_interval);
+        let dom = DomState::new(Document::parse(""), Rc::clone(&event_loop.clock));
         Self {
             deadline: Cell::new(None),
             remote: Arc::default(),
@@ -141,10 +143,10 @@ impl Shared {
             heap,
             errors: RefCell::new(BoundedLog::new(options.error_capacity)),
             console: RefCell::new(BoundedLog::new(options.console_capacity)),
-            event_loop: LoopState::new(options.clock, options.frame_interval),
+            event_loop,
             window: WindowState::new(url),
             net: NetState::new(options.network.clone()),
-            dom: Rc::new(DomState::new(Document::parse(""))),
+            dom: Rc::new(dom),
             loader: LoaderState::default(),
         }
     }
