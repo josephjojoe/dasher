@@ -96,6 +96,17 @@ impl JsRuntime {
     pub fn dropped_console_messages(&self) -> u64 {
         self.shared().console.borrow().dropped()
     }
+
+    /// Adds a message from the host to the console log, as browsers log
+    /// failed script loads. Scripts do not see it.
+    pub fn log(&self, level: ConsoleLevel, text: impl Into<String>) {
+        let shared = self.shared();
+        shared.console.borrow_mut().push(ConsoleMessage {
+            level,
+            text: text.into(),
+            time: shared.event_loop.clock.now(),
+        });
+    }
 }
 
 #[cfg(test)]

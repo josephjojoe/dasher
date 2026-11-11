@@ -212,3 +212,17 @@ fn console_log_is_bounded_and_messages_are_truncated() {
     assert_eq!(texts, ["messa…", "messa…"]);
     assert_eq!(js.dropped_console_messages(), 3);
 }
+
+#[test]
+fn the_host_can_log_too() {
+    let js = manual();
+    js.advance(Duration::from_millis(20)).unwrap();
+    js.log(ConsoleLevel::Error, "GET https://example.com/a.js failed");
+    js.run_script("console.log('page')", "a.js").unwrap();
+    let messages = js.take_console();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].level, ConsoleLevel::Error);
+    assert_eq!(messages[0].text, "GET https://example.com/a.js failed");
+    assert_eq!(messages[0].time, Duration::from_millis(20));
+    assert_eq!(messages[1].text, "page");
+}
