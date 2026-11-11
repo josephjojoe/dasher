@@ -428,3 +428,40 @@ async fn load_errors() {
         Err(LoadError::Network(_))
     ));
 }
+
+#[tokio::test]
+async fn parsed_custom_elements_are_upgraded_before_the_next_script() {
+    let server = FixtureServer::builder()
+        .route("/ce.html", |_| {
+            FixtureResponse::html(
+                r#"<!DOCTYPE html><title>CE</title>
+<script>
+  window.log = [];
+  customElements.define('x-early', class extends HTMLElement {
+    constructor() { super(); log.push('construct ' + this.id); }
+    connectedCallback() { log.push('connected ' + this.id); }
+  });
+</script>
+<x-early id=a></x-early>
+<div><x-early id=b><x-late id=c></x-late></x-early></div>
+<script>log.push('script sees ' + document.querySelectorAll('x-early').length + ' ' + (document.getElementById('b').constructor !== HTMLElement));</script>
+<x-early id=d></x-early>
+<script defer src="/x-late.js"></script>
+"#,
+            )
+        })
+        .route("/x-late.js", |_| {
+            FixtureResponse::ok(
+                "text/javascript",
+                "customElements.define('x-late', class extends HTMLElement { \
+                   connectedCallback() { log.push('late ' + this.id); } })",
+            )
+        })
+        .start()
+        .unwrap();
+    let page = load(&server, "/ce.html").await;
+    assert_eq!(
+        json(&page, "log"),
+        r#"["construct a","connected a","construct b","connected b","script sees 2 true","construct d","connected d","late c"]"#
+    );
+}

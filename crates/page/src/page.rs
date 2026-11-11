@@ -405,6 +405,9 @@ impl Page {
             if let Some(limit) = self.js.limit_exceeded() {
                 return Err(Stop::Limit(limit));
             }
+            // Browsers construct custom elements as they parse them, so
+            // they are upgraded before the next script runs.
+            self.js.upgrade_custom_elements();
             match step {
                 ParseStep::Script(script) => {
                     self.parser_script(script, &mut parser, &mut wait).await?
@@ -421,6 +424,7 @@ impl Page {
         }
         self.js.with_document_mut(|doc| parser.finish(doc));
         drop(parser);
+        self.js.upgrade_custom_elements();
         self.js.hold_detached_nodes(false);
         self.preload_links(true);
 
