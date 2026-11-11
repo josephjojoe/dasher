@@ -9,13 +9,13 @@ use crate::job::Job;
 use crate::run::Outcome;
 
 /// Logs `message` at `severity` (`"INFO"`, `"WARNING"`, `"ERROR"`) with
-/// the fields of `fields`, an object.
+/// the fields of `fields`, an object. Null fields are left out.
 pub fn log(severity: &str, message: &str, fields: Value) {
     let mut line = Map::new();
     line.insert("severity".into(), severity.into());
     line.insert("message".into(), message.into());
     if let Value::Object(fields) = fields {
-        line.extend(fields);
+        line.extend(fields.into_iter().filter(|(_, v)| !v.is_null()));
     }
     let mut text = Value::Object(line).to_string();
     text.push('\n');
