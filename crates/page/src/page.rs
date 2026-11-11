@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep};
+use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep, ShadowRoots};
 use dasher_js::{
     DocumentInfo, DocumentWrite, EventTarget, JsRuntime, PendingOperation, ReadyState,
     ResourceLimit, RunLimits, RunOutcome, RuntimeOptions, ScriptError, WindowOptions,
@@ -320,11 +320,15 @@ impl Page {
         self.timed_out
     }
 
-    /// The document serialized as HTML, doctype included.
+    /// The document serialized as HTML, doctype included. Shadow trees
+    /// (open and closed) are included as declarative shadow DOM: each a
+    /// `<template shadowrootmode>` first in its host, as
+    /// `getHTML({ serializableShadowRoots: true })` writes them. A browser
+    /// loading this HTML builds the same shadow trees.
     pub fn html(&self) -> String {
         self.js.with_document(|doc| {
             doc.children(doc.root())
-                .map(|n| doc.outer_html(n))
+                .map(|n| doc.outer_html_with(n, ShadowRoots::All))
                 .collect()
         })
     }

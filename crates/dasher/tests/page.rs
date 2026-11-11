@@ -180,6 +180,43 @@ async fn query_helpers_read_the_live_dom() {
 }
 
 #[tokio::test]
+async fn shadow_trees_are_in_the_content_and_reachable_by_selectors() {
+    let server = server();
+    let page = browser().open(&server.url("/shadow.html")).await.unwrap();
+
+    // Selectors look into shadow trees, open or closed.
+    assert_eq!(
+        page.texts(".price, .note").unwrap(),
+        ["25", "Server-rendered"]
+    );
+    assert_eq!(page.count("product-card h2").unwrap(), 1);
+    // Text reads as the shadow tree renders, with slotted content in place.
+    assert_eq!(
+        page.text("product-card").unwrap().as_deref(),
+        Some("Kettle 25 A kettle.")
+    );
+    // The HTML carries the shadow trees as declarative shadow DOM.
+    let card = r#"<product-card id="kettle"><template shadowrootmode="closed"><h2><slot name="name"></slot></h2><span class="price">25</span><p><slot></slot></p></template><span slot="name">Kettle</span> A kettle.</product-card>"#;
+    assert_eq!(page.outer_html("#kettle").unwrap().as_deref(), Some(card));
+    let content = page.content();
+    assert!(content.contains(card), "{content}");
+    assert!(
+        content.contains(r#"<x-static><template shadowrootmode="open"><p class="note">Server-rendered</p></template></x-static>"#),
+        "{content}"
+    );
+    // Script's own view is unchanged.
+    let mut page = page;
+    assert_eq!(
+        page.evaluate(
+            "[document.querySelector('.price'), document.getElementById('kettle').innerHTML]"
+        )
+        .await
+        .unwrap(),
+        serde_json::json!([null, "<span slot=\"name\">Kettle</span> A kettle."])
+    );
+}
+
+#[tokio::test]
 async fn evaluate_returns_json_and_awaits_promises() {
     let server = server();
     let mut page = browser().open(&server.url("/spa.html")).await.unwrap();

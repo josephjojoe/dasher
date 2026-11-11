@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use dasher_css::SelectorList;
-use dasher_dom::{Document, NodeId};
+use dasher_dom::{Document, NodeId, ShadowRoots};
 use dasher_js::{
     ConsoleLevel, ConsoleMessage, Evaluation, RunLimits, RunOutcome, RuntimeOptions, ScriptError,
     StorageStore, WindowOptions,
@@ -400,6 +400,11 @@ impl Page {
     /// The document serialized as HTML, doctype included, as it stands
     /// now with every change scripts made. A page with no document gives
     /// an empty one.
+    ///
+    /// Shadow trees, open or closed, are included as declarative shadow
+    /// DOM: a `<template shadowrootmode="open">` first in each host, holding
+    /// the shadow tree. A browser loading this HTML builds the same shadow
+    /// trees; an HTML parser without shadow DOM sees ordinary templates.
     pub fn content(&self) -> String {
         self.inner
             .as_ref()
@@ -474,26 +479,28 @@ impl Page {
             .collect())
     }
 
-    /// The `innerHTML` of the first element matching `selector`.
+    /// The `innerHTML` of the first element matching `selector`, with
+    /// shadow trees included as in [`content`](Self::content).
     pub fn inner_html(&self, selector: &str) -> Result<Option<String>> {
-        self.query_first(selector, Document::inner_html)
+        self.query_first(selector, inner_html)
     }
 
-    /// The `outerHTML` of the first element matching `selector`.
+    /// The `outerHTML` of the first element matching `selector`, with
+    /// shadow trees included as in [`content`](Self::content).
     pub fn outer_html(&self, selector: &str) -> Result<Option<String>> {
-        self.query_first(selector, Document::outer_html)
+        self.query_first(selector, outer_html)
     }
 
-    /// The `innerHTML` of every element matching `selector`, in document
-    /// order.
+    /// The [`inner_html`](Self::inner_html) of every element matching
+    /// `selector`, in document order.
     pub fn inner_htmls(&self, selector: &str) -> Result<Vec<String>> {
-        self.query_each(selector, Document::inner_html)
+        self.query_each(selector, inner_html)
     }
 
-    /// The `outerHTML` of every element matching `selector`, in document
-    /// order.
+    /// The [`outer_html`](Self::outer_html) of every element matching
+    /// `selector`, in document order.
     pub fn outer_htmls(&self, selector: &str) -> Result<Vec<String>> {
-        self.query_each(selector, Document::outer_html)
+        self.query_each(selector, outer_html)
     }
 
     fn query_first<R>(
@@ -510,13 +517,14 @@ impl Page {
         })
     }
 
-    /// Runs `f` over the elements matching `selector`, in document order.
+    /// Runs `f` over the elements matching `selector`, in document order,
+    /// looking into shadow trees too (see [`SelectorList::query_all_deep`]).
     /// A page without a document has none.
     fn query<R>(&self, selector: &str, f: impl FnOnce(&Document, &[NodeId]) -> R) -> Result<R> {
         let list = SelectorList::parse(selector)
             .map_err(|_| Error::InvalidSelector(selector.to_owned()))?;
         let query = |doc: &Document| {
-            let nodes: Vec<NodeId> = list.query_all(doc, doc.root()).collect();
+            let nodes: Vec<NodeId> = list.query_all_deep(doc, doc.root()).collect();
             f(doc, &nodes)
         };
         Ok(match &self.inner {
@@ -679,4 +687,12 @@ async fn evaluate_on(
             }
         }
     }
+}
+
+fn inner_html(doc: &Document, node: NodeId) -> String {
+    doc.inner_html_with(node, ShadowRoots::All)
+}
+
+fn outer_html(doc: &Document, node: NodeId) -> String {
+    doc.outer_html_with(node, ShadowRoots::All)
 }

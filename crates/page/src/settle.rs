@@ -209,7 +209,7 @@ impl Page {
             if let (true, Some(selector)) = (met, selector) {
                 met = self
                     .js
-                    .with_document(|doc| selector.query_first(doc, doc.root()).is_some());
+                    .with_document(|doc| selector.query_first_deep(doc, doc.root()).is_some());
             }
             if let (true, Some(predicate)) = (met, &options.predicate) {
                 met = self.js.eval_truthy(predicate).unwrap_or(false);

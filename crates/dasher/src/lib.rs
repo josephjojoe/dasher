@@ -59,6 +59,14 @@
 //! # }
 //! ```
 //!
+//! The selector helpers, [`Page::wait_for_selector`] and [`Page::content`]
+//! all see into shadow trees (open or closed), so content rendered by web
+//! components is found like any other: `my-card .price` matches a `.price`
+//! in `my-card`'s shadow tree, text reads as the components render, and
+//! the HTML holds each shadow tree as declarative shadow DOM
+//! (`<template shadowrootmode>`). Scripts in [`Page::evaluate`] keep the
+//! browser's view, where `querySelector` stops at shadow roots.
+//!
 //! # Waiting for content
 //!
 //! By default [`goto`](Page::goto) waits for the `load` event, then until

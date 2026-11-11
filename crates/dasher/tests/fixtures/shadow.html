@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<title>Shadow</title>
+<h1>Shadow</h1>
+<product-card id="kettle"><span slot="name">Kettle</span> A kettle.</product-card>
+<x-static><template shadowrootmode="open"><p class="note">Server-rendered</p></template></x-static>
+<script>
+  // Renders each card into a closed shadow root, as a component would.
+  for (const card of document.querySelectorAll('product-card')) {
+    const root = card.attachShadow({ mode: 'closed' });
+    root.innerHTML = '<h2><slot name="name"></slot></h2><span class="price">25</span><p><slot></slot></p>';
+  }
+</script>
