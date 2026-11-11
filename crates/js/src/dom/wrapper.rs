@@ -412,6 +412,7 @@ pub(crate) fn after_insert<'js>(
     moved: &[NodeId],
     plan: Move,
 ) {
+    dom.inserted(doc, node);
     let whole = match plan {
         Move::SameTree => return,
         Move::WholeTree | Move::Fragment => dom.cached(ctx, node),
@@ -447,9 +448,16 @@ pub(crate) fn after_insert<'js>(
     }
 }
 
-/// Regroups wrappers after the subtree at `root` was detached. If nothing in
-/// it has a wrapper, it is queued to be freed.
-pub(crate) fn after_remove(ctx: &Ctx<'_>, dom: &DomState, doc: &Document, root: NodeId) {
+/// Regroups wrappers after the subtree at `root` was detached from `from`.
+/// If nothing in it has a wrapper, it is queued to be freed.
+pub(crate) fn after_remove(
+    ctx: &Ctx<'_>,
+    dom: &DomState,
+    doc: &Document,
+    root: NodeId,
+    from: NodeId,
+) {
+    dom.removed_from(doc, root, from);
     let wrappers = wrapped_under(ctx, dom, doc, &[root]);
     let Some((first, rest)) = wrappers.split_first() else {
         dom.add_candidate(root);
@@ -505,7 +513,8 @@ pub(crate) fn detach_all(ctx: &Ctx<'_>, dom: &DomState) {
 }
 
 /// Checks that the rings match the trees: each wrapper's ring holds exactly
-/// the live wrappers of its tree, and the links are mirrored.
+/// the live wrappers of its tree, and the links are mirrored. Also checks
+/// the node documents of detached trees.
 #[cfg(test)]
 pub(crate) fn check_groups(ctx: &Ctx<'_>, dom: &DomState) -> std::result::Result<(), String> {
     let ids: Vec<NodeId> = dom.wrappers.borrow().keys().copied().collect();
@@ -536,6 +545,16 @@ pub(crate) fn check_groups(ctx: &Ctx<'_>, dom: &DomState) -> std::result::Result
             return Err(format!(
                 "ring of {id:?} is {ring:?}, but its tree has wrappers {expected:?}"
             ));
+        }
+    }
+    // Node documents name live detached roots and live document nodes
+    // (looking at a released node panics).
+    for (&tree, &owner) in dom.owners.borrow().iter() {
+        if doc.kind(owner) != NodeKind::Document {
+            return Err(format!("{tree:?} is owned by {owner:?}, not a document"));
+        }
+        if doc.kind(tree) == NodeKind::Document || doc.parent(tree).is_some() {
+            return Err(format!("{tree:?} has an owner but is not a detached root"));
         }
     }
     Ok(())

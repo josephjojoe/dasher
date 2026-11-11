@@ -275,7 +275,7 @@ fn detach(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId) -> Result<()> {
             return Ok(());
         };
         doc.remove(node);
-        after_remove(ctx, dom, &doc, node);
+        after_remove(ctx, dom, &doc, node, parent);
         dom.bump();
         dom.child_list(&doc, parent, &[], &[node], prev, next);
     }
@@ -293,7 +293,7 @@ fn remove_children(
     let old: Vec<NodeId> = doc.children(parent).collect();
     doc.remove_children(parent);
     for &child in &old {
-        after_remove(ctx, dom, doc, child);
+        after_remove(ctx, dom, doc, child, parent);
     }
     old
 }
@@ -328,7 +328,7 @@ fn replace_child(
         result.map(|_| {
             if node != child {
                 after_insert(ctx, dom, &doc, parent, node, &moved, plan);
-                after_remove(ctx, dom, &doc, child);
+                after_remove(ctx, dom, &doc, child, parent);
                 dom.bump();
             }
             record_moved_out(dom, &doc, node, &moved, old);
@@ -433,7 +433,7 @@ fn set_outer_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -
         let old = place(&doc, node);
         let result = doc.set_outer_html(node, html);
         if let (Ok(()), Some((parent, prev, next))) = (&result, old) {
-            after_remove(ctx, dom, &doc, node);
+            after_remove(ctx, dom, &doc, node, parent);
             dom.bump();
             let added = children_between(&doc, parent, prev, next);
             dom.child_list(&doc, parent, &added, &[node], prev, next);
@@ -487,7 +487,7 @@ fn normalize(ctx: &Ctx<'_>, dom: &Rc<DomState>, root: NodeId) -> Result<()> {
             if let Some((parent, prev, next)) = place(doc, n) {
                 doc.remove(n);
                 dom.child_list(doc, parent, &[], &[n], prev, next);
-                removed.push(n);
+                removed.push((n, parent));
             }
         };
         for t in texts {
@@ -516,8 +516,8 @@ fn normalize(ctx: &Ctx<'_>, dom: &Rc<DomState>, root: NodeId) -> Result<()> {
             }
         }
         if !removed.is_empty() {
-            for n in removed {
-                after_remove(ctx, dom, &doc, n);
+            for (n, parent) in removed {
+                after_remove(ctx, dom, &doc, n, parent);
             }
             dom.bump();
         }
@@ -866,6 +866,30 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     let d = Rc::clone(dom);
     def(
         obj,
+        "ownerDocument",
+        move |ctx: Ctx<'js>, n: Node<'js>| -> Result<Node<'js>> {
+            let owner = d.owner_document(&d.doc(), id(&ctx, &n)?);
+            wrap(&ctx, &d, owner)
+        },
+    )?;
+    // Makes `owner` the node document of the detached tree rooted at `n`,
+    // for nodes a document creates or adopts.
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "setOwner",
+        move |ctx: Ctx<'js>, n: Node<'js>, owner: Node<'js>| -> Result<()> {
+            let (n, owner) = (id(&ctx, &n)?, id(&ctx, &owner)?);
+            let doc = d.doc();
+            if doc.kind(owner) == NodeKind::Document {
+                d.set_owner(&doc, n, owner);
+            }
+            Ok(())
+        },
+    )?;
+    let d = Rc::clone(dom);
+    def(
+        obj,
         "contains",
         move |ctx: Ctx<'js>, a: Node<'js>, b: Node<'js>| -> Result<bool> {
             Ok(d.doc().contains(id(&ctx, &a)?, id(&ctx, &b)?))
@@ -960,7 +984,13 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "clone",
         move |ctx: Ctx<'js>, n: Node<'js>, deep: bool| -> Result<Node<'js>> {
             let n = id(&ctx, &n)?;
-            let copy = d.doc_mut().clone_node(n, deep);
+            let copy = {
+                let mut doc = d.doc_mut();
+                let copy = doc.clone_node(n, deep);
+                // A copy belongs to the original's document.
+                d.set_owner(&doc, copy, d.owner_document(&doc, n));
+                copy
+            };
             wrap(&ctx, &d, copy)
         },
     )?;
@@ -1045,6 +1075,7 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "createDocument",
         move |ctx: Ctx<'js>| -> Result<Node<'js>> {
             let n = d.doc_mut().create_document();
+            d.note_extra_document();
             wrap(&ctx, &d, n)
         },
     )?;

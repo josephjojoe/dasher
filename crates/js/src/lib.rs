@@ -157,8 +157,10 @@
 //! `document.implementation.createHTMLDocument()` makes a second, inert
 //! document in the page's arena for building markup off the page (jQuery
 //! parses HTML strings in one). Its scripts never run and it has no URL,
-//! window or cookies. Nodes move between it and the page freely; a
-//! detached node's `ownerDocument` is always the page's document.
+//! window or cookies. Nodes move between it and the page freely, and
+//! `ownerDocument` follows them: a node belongs to the document whose tree
+//! it is in, and a detached node to the document that made, adopted or
+//! last held it.
 //!
 //! Geometry is synthetic, chosen so content gated on visibility or
 //! scrolling still loads; [`WindowOptions::layout`] picks how (see

@@ -31,8 +31,6 @@
   }
 
   const KEY = Symbol('dom');
-  // Set once createHTMLDocument has made a second document.
-  let otherDocuments = false;
   function illegal(key) {
     if (key !== KEY) throw new TypeError('Illegal constructor');
   }
@@ -321,12 +319,7 @@
       return shadow !== undefined && shadow.host.isConnected;
     }
     get ownerDocument() {
-      if (N.nodeType(this) === 9) return null;
-      if (!otherDocuments) return documentNode;
-      // Nodes in a document made by createHTMLDocument belong to it.
-      // Detached nodes are taken to belong to the page's document.
-      const root = N.rootNode(this);
-      return N.nodeType(root) === 9 ? root : documentNode;
+      return N.nodeType(this) === 9 ? null : N.ownerDocument(this);
     }
     getRootNode(options) {
       let root = N.rootNode(this);
@@ -814,7 +807,7 @@
     get prefix() { return splitName(attrState(this).name)[0]; },
     get namespaceURI() { return attrState(this).ns; },
     get ownerElement() { return attrState(this).owner; },
-    get ownerDocument() { return documentNode; },
+    get ownerDocument() { const o = attrState(this).owner; return o === null ? documentNode : o.ownerDocument; },
     get specified() { return true; },
     get value() {
       const a = attrState(this);
@@ -3922,26 +3915,26 @@
     createElement(localName, options) {
       requireArgs(arguments, 1, "'createElement' on 'Document'");
       void options;
-      return created(N.createElement(str(localName)));
+      return owned(this, created(N.createElement(str(localName))));
     }
     createElementNS(namespace, qualifiedName, options) {
       requireArgs(arguments, 2, "'createElementNS' on 'Document'");
       void options;
-      return created(N.createElementNS(nullableStr(namespace), str(qualifiedName)));
+      return owned(this, created(N.createElementNS(nullableStr(namespace), str(qualifiedName))));
     }
     createDocumentFragment() {
-      return N.createFragment();
+      return owned(this, N.createFragment());
     }
     createTextNode(data) {
       requireArgs(arguments, 1, "'createTextNode' on 'Document'");
-      return N.createText(str(data));
+      return owned(this, N.createText(str(data)));
     }
     createCDATASection() {
       throw domException('NotSupportedError', 'This operation is not supported for HTML documents.');
     }
     createComment(data) {
       requireArgs(arguments, 1, "'createComment' on 'Document'");
-      return N.createComment(str(data));
+      return owned(this, N.createComment(str(data)));
     }
     createProcessingInstruction() {
       throw domException('NotSupportedError', 'Processing instructions are not supported.');
@@ -3977,7 +3970,10 @@
     }
     importNode(node, deep = false) {
       if (node instanceof Document) throw domException('NotSupportedError', 'A document cannot be imported.');
-      return cloneWithState(node, !!deep);
+      if (node instanceof Attr) return Attr.create(null, node.name, node.namespaceURI, node.value);
+      const copy = cloneWithState(node, !!deep);
+      N.setOwner(copy, this);
+      return copy;
     }
     adoptNode(node) {
       if (node instanceof Document) throw domException('NotSupportedError', 'A document cannot be adopted.');
@@ -3986,7 +3982,9 @@
         if (owner !== null) owner.removeAttributeNode(node);
         return node;
       }
+      if (node instanceof ShadowRoot) throw domException('HierarchyRequestError', 'A shadow root cannot be adopted.');
       N.remove(node);
+      N.setOwner(node, this);
       return node;
     }
     elementFromPoint() {
@@ -4027,6 +4025,13 @@
   }
   mixin(Document, ParentNode);
   tag(Document, 'Document');
+
+  // Gives a new node `doc` made its node document. Nodes belong to the
+  // page's document unless told otherwise.
+  function owned(doc, node) {
+    if (doc !== documentNode) N.setOwner(node, doc);
+    return node;
+  }
 
   // Scripts created by script are async unless told otherwise.
   function created(el) {
@@ -4071,7 +4076,6 @@
     // page need no adopting.
     createHTMLDocument(title = undefined) {
       const doc = N.createDocument();
-      otherDocuments = true;
       N.insert(doc, N.createDoctype('html', '', ''), null);
       const html = N.createElement('html');
       N.insert(doc, html, null);

@@ -48,7 +48,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use dasher_css::SelectorList;
-use dasher_dom::{Document, NodeId};
+use dasher_dom::{Document, NodeId, NodeKind};
 use rquickjs::{Ctx, Function, Object, qjs};
 
 use crate::clock::Clock;
@@ -106,6 +106,13 @@ pub(crate) struct DomState {
     layout_seen: Cell<u32>,
     /// The node limit every document of the page gets.
     node_limit: Option<usize>,
+    /// Set once script has made a document besides the page's.
+    extra_documents: Cell<bool>,
+    /// The node documents of detached trees that belong to a document other
+    /// than the page's: tree root -> that document node. A tree under a
+    /// document node belongs to it, and any other tree to the page. Empty
+    /// unless script uses extra documents.
+    owners: RefCell<HashMap<NodeId, NodeId>>,
 }
 
 impl DomState {
@@ -125,6 +132,8 @@ impl DomState {
             hold: Cell::new(false),
             layout_watch: Cell::new(false),
             layout_seen: Cell::new(0),
+            extra_documents: Cell::new(false),
+            owners: RefCell::default(),
         }
     }
 
@@ -179,6 +188,57 @@ impl DomState {
         Ok(list)
     }
 
+    /// Notes that script made a document besides the page's.
+    pub(crate) fn note_extra_document(&self) {
+        self.extra_documents.set(true);
+    }
+
+    /// `id`'s node document: the document node at the root of its tree, or
+    /// for a detached tree the document it was made in or last adopted by.
+    pub(crate) fn owner_document(&self, doc: &Document, id: NodeId) -> NodeId {
+        if !self.extra_documents.get() {
+            return doc.root();
+        }
+        let root = group_root(doc, id);
+        if doc.kind(root) == NodeKind::Document {
+            return root;
+        }
+        self.owners
+            .borrow()
+            .get(&root)
+            .copied()
+            .unwrap_or(doc.root())
+    }
+
+    /// Makes `owner` the node document of the detached tree rooted at `root`.
+    pub(crate) fn set_owner(&self, doc: &Document, root: NodeId, owner: NodeId) {
+        if doc.parent(root).is_some() || doc.template_host(root).is_some() {
+            return;
+        }
+        let mut owners = self.owners.borrow_mut();
+        if owner == doc.root() || doc.kind(root) == NodeKind::Document {
+            owners.remove(&root);
+        } else {
+            owners.insert(root, owner);
+        }
+    }
+
+    /// Keeps node documents in step after the tree at `root` was taken out
+    /// of `from`: it still belongs to the document it was in.
+    pub(crate) fn removed_from(&self, doc: &Document, root: NodeId, from: NodeId) {
+        if self.extra_documents.get() {
+            self.set_owner(doc, root, self.owner_document(doc, from));
+        }
+    }
+
+    /// Keeps node documents in step after `node` was inserted: it now
+    /// belongs to the document of its new tree.
+    pub(crate) fn inserted(&self, doc: &Document, node: NodeId) {
+        if self.extra_documents.get() && doc.parent(node).is_some() {
+            self.owners.borrow_mut().remove(&node);
+        }
+    }
+
     /// Queues `id`'s tree to be released if it turns out to be garbage.
     pub(crate) fn add_candidate(&self, id: NodeId) {
         self.candidates.borrow_mut().push(id);
@@ -212,6 +272,12 @@ impl DomState {
                 .filter(|&r| !any_in_tree(doc, r, |n| wrappers.contains_key(&n)))
                 .collect()
         };
+        if !garbage.is_empty() && !self.owners.borrow().is_empty() {
+            // Forget released trees, and the documents that owned them.
+            self.owners.borrow_mut().retain(|&tree, &mut owner| {
+                !garbage.contains(&group_root(doc, tree)) && !garbage.contains(&owner)
+            });
+        }
         for root in garbage {
             doc.release(root);
         }
@@ -338,6 +404,7 @@ impl JsRuntime {
         // The document node keeps its wrapper, and so its observers.
         let root = dom.doc.borrow().root();
         dom.observed.borrow_mut().retain(|&n| n == root);
+        dom.owners.borrow_mut().clear();
         dom.pending.borrow_mut().clear();
         dom.bump();
         drop(old);
@@ -376,10 +443,12 @@ mod tests {
             pool.push(document.createDocumentFragment(), document.createDocumentFragment());
             const template = document.createElement('template');
             pool.push(template, template.content);
+            const other = document.implementation.createHTMLDocument('');
+            pool.push(other.body, other.createElement('p'), other.createDocumentFragment());
             const pick = () => pool[rand(pool.length)];
             globalThis.step = () => {
               const a = pick(), b = pick();
-              const op = rand(11);
+              const op = rand(13);
               try {
                 switch (op) {
                   case 0: a.appendChild(b); break;
@@ -393,6 +462,8 @@ mod tests {
                   case 8: a.replaceChildren(b, 'y'); break;
                   case 9: if (pool.length > 10) pool.splice(rand(pool.length - 1) + 1, 1); break;
                   case 10: a.append(b.cloneNode(true)); break;
+                  case 11: pool.push(document.adoptNode(b)); break;
+                  case 12: { const c = other.importNode(b, true); a.append(c); pool.push(c); break; }
                 }
               } catch (e) {
                 if (!(e instanceof DOMException) && !(e instanceof TypeError)) throw e;

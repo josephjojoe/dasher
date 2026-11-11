@@ -988,6 +988,54 @@ fn create_html_document_builds_an_inert_document() {
 }
 
 #[test]
+fn nodes_keep_the_document_they_were_made_in() {
+    let js = page("<div id=target></div>");
+    run(
+        &js,
+        r#"
+        window.doc = document.implementation.createHTMLDocument('');
+        window.made = doc.createElement('p');
+        made.innerHTML = '<b>x</b><i>y</i>';
+        "#,
+    );
+    // Detached nodes made by a document belong to it, all the way down,
+    // and so do nodes taken out of one of its trees.
+    assert_eq!(
+        eval(
+            &js,
+            "[made.ownerDocument === doc, made.firstChild.ownerDocument === doc,              doc.createTextNode('t').ownerDocument === doc,              doc.createDocumentFragment().ownerDocument === doc,              doc.createComment('c').ownerDocument === doc,              made.cloneNode(true).lastChild.ownerDocument === doc,              (() => { const b = made.firstChild; b.remove(); return b.ownerDocument === doc; })(),              (() => { doc.body.append(made); made.remove(); return made.ownerDocument === doc; })(),              document.createElement('a').ownerDocument === document, doc.ownerDocument]"
+        ),
+        "[true,true,true,true,true,true,true,true,true,null]"
+    );
+    // Inserting into the page's tree, importing or adopting moves nodes to
+    // the page's document, and back.
+    assert_eq!(
+        eval(
+            &js,
+            "(() => {                const target = document.getElementById('target');                const a = doc.createElement('a'); target.append(a); a.remove();                const imported = document.importNode(made, true);                const adopted = document.adoptNode(doc.createElement('em'));                const back = doc.adoptNode(document.createElement('u'));                const html = doc.importNode(document.documentElement, false);                return [a.ownerDocument === document, imported.ownerDocument === document,                  imported.firstChild.ownerDocument === document, made.ownerDocument === doc,                  adopted.ownerDocument === document, back.ownerDocument === doc,                  html.ownerDocument === doc];              })()"
+        ),
+        "[true,true,true,true,true,true,true]"
+    );
+    // A node made by a document that is gone falls back to the page's.
+    run(
+        &js,
+        "window.orphan = document.implementation.createHTMLDocument('').createElement('div');          delete window.doc;",
+    );
+    js.run_gc();
+    run(
+        &js,
+        "document.body.appendChild(document.createElement('i'));",
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[orphan.ownerDocument === document, made.ownerDocument === document,              orphan.ownerDocument.createElement('x').ownerDocument === document]"
+        ),
+        "[true,true,true]"
+    );
+}
+
+#[test]
 fn documents_from_create_html_document_are_freed_once_unreachable() {
     let js = page("");
     let base = nodes(&js);
