@@ -77,7 +77,8 @@
 //!   `devicePixelRatio` and `matchMedia`. These give static answers from
 //!   [`WindowOptions`] and [`Viewport`], and default to desktop Chrome on
 //!   Linux at 1920×1080. The scroll position moves when scripts scroll
-//!   and has no upper bound.
+//!   (`scrollTo`, `scrollBy`, `scrollTop`, `scrollIntoView`), firing
+//!   `scroll` events.
 //! - `localStorage` and `sessionStorage`, kept in memory per origin in a
 //!   [`StorageStore`] that pages of one session can share.
 //! - `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`,
@@ -138,8 +139,16 @@
 //! control state, `TreeWalker`, and event propagation from nodes through
 //! `document` to `window`. Inline `style` is parsed from and written back to
 //! the `style` attribute; `getComputedStyle` reports it over per-element
-//! defaults, with no cascade. Geometry is synthetic: every rendered element
-//! is a visible box at the top of the viewport.
+//! defaults, with no cascade.
+//!
+//! Geometry is synthetic, chosen so content gated on visibility or
+//! scrolling still loads; [`WindowOptions::layout`] picks how (see
+//! [`LayoutMode`]). By default every rendered element is a visible,
+//! non-zero box at the top of the viewport, the document is as tall as its
+//! content and scrolls without limit. [`LayoutMode::Scrolled`] stacks the
+//! elements in document order instead, so they are only in view once
+//! scrolled to. `ResizeObserver` reports each element's synthetic size
+//! once.
 //!
 //! `MutationObserver` sees every change scripts make to the tree, with the
 //! standard's records (`childList`, `attributes` and `characterData`, with
@@ -276,7 +285,9 @@ pub use runtime::{
     DEFAULT_MAX_STACK_SIZE, DEFAULT_MEMORY_LIMIT, InterruptHandle, JsRuntime, RuntimeOptions,
 };
 pub use storage::{DEFAULT_STORAGE_QUOTA, QuotaExceeded, StorageStore};
-pub use window::{DEFAULT_USER_AGENT, NavigationKind, NavigationRequest, Viewport, WindowOptions};
+pub use window::{
+    DEFAULT_USER_AGENT, LayoutMode, NavigationKind, NavigationRequest, Viewport, WindowOptions,
+};
 
 /// The rquickjs version dasher is built against, for host bindings.
 pub use rquickjs;

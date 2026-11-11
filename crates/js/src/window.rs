@@ -49,6 +49,34 @@ impl Default for Viewport {
     }
 }
 
+/// How the synthetic layout places elements, which decides what counts as
+/// in view.
+///
+/// Nothing is really laid out. Either way, every rendered element has a
+/// non-zero box, as wide as the viewport, and hidden ones (`display: none`
+/// inline, `hidden`, never-rendered elements) have an empty one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LayoutMode {
+    /// Everything is in view. Every rendered element is a 20px-tall box at
+    /// the top of the viewport, wherever the page is scrolled, and
+    /// `IntersectionObserver` reports it intersecting as soon as it is
+    /// observed. The page can be scrolled without limit.
+    ///
+    /// One concession to infinite scroll: a target that content inserted
+    /// before it pushes further down the document counts as having left
+    /// the viewport, until the page next scrolls. That lets a "load more"
+    /// sentinel fire again on every scroll, as it would in a browser.
+    #[default]
+    InView,
+    /// Elements are only in view once scrolled to. The elements under
+    /// `<body>` are stacked in document order, 20px per element, each
+    /// spanning its descendants, and the document is as tall as the stack
+    /// (at least the viewport). Boxes move as the page scrolls, scrolling
+    /// stops at the bottom, and `IntersectionObserver` reports what overlaps
+    /// the viewport.
+    Scrolled,
+}
+
 /// How a page's window environment is set up.
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
@@ -70,6 +98,8 @@ pub struct WindowOptions {
     pub device_memory: u32,
     /// Window and screen dimensions.
     pub viewport: Viewport,
+    /// How elements are placed, and so what is in view.
+    pub layout: LayoutMode,
     /// Backs `localStorage`. Pass the same store to several pages to share
     /// items between them, as a browser profile would.
     pub local_storage: StorageStore,
@@ -88,6 +118,7 @@ impl Default for WindowOptions {
             hardware_concurrency: 8,
             device_memory: 8,
             viewport: Viewport::default(),
+            layout: LayoutMode::default(),
             local_storage: StorageStore::new(),
             session_storage: StorageStore::new(),
         }
@@ -171,6 +202,13 @@ pub(crate) fn install<'js>(
     env.set("screenWidth", viewport.screen_width)?;
     env.set("screenHeight", viewport.screen_height)?;
     env.set("touch", viewport.touch)?;
+    env.set(
+        "layout",
+        match options.layout {
+            LayoutMode::InView => "inView",
+            LayoutMode::Scrolled => "scrolled",
+        },
+    )?;
     native.set("env", env)?;
     media::install(ctx, native, &options.viewport)?;
     storage::install(
