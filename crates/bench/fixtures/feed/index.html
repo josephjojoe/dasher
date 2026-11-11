@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Feed</title>
+  <link rel="stylesheet" href="/feed/feed.css">
+</head>
+<body>
+  <header><h1>Latest posts</h1></header>
+  <main id="feed"></main>
+  <div id="sentinel" aria-hidden="true"></div>
+  <p id="end" hidden>You're all caught up.</p>
+  <script>
+    // An infinite feed: an IntersectionObserver on a sentinel below the
+    // posts loads the next page whenever the reader nears the bottom.
+    const feed = document.getElementById('feed');
+    const sentinel = document.getElementById('sentinel');
+    let next = 0;
+    let loading = false;
+
+    function render(post) {
+      const article = document.createElement('article');
+      article.className = 'post';
+      article.dataset.id = post.id;
+      article.innerHTML = `
+        <header>
+          <img class="avatar" src="${post.avatar}" alt="" width="40" height="40">
+          <a class="author" href="/u/${post.author}">@${post.author}</a>
+          <time datetime="${post.time}">${new Date(post.time).toDateString()}</time>
+        </header>
+        <p class="body"></p>
+        <footer><span class="likes">${post.likes} likes</span> <a href="/post/${post.id}">Reply</a></footer>`;
+      article.querySelector('.body').textContent = post.body;
+      return article;
+    }
+
+    async function loadMore() {
+      if (loading || next === null) return;
+      loading = true;
+      const response = await fetch(`/api/feed?page=${next}`);
+      const { posts, nextPage } = await response.json();
+      const batch = document.createDocumentFragment();
+      for (const post of posts) batch.appendChild(render(post));
+      feed.appendChild(batch);
+      next = nextPage;
+      loading = false;
+      if (next === null) {
+        observer.disconnect();
+        document.getElementById('end').hidden = false;
+      }
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) loadMore();
+    }, { rootMargin: '0px 0px 600px 0px' });
+    observer.observe(sentinel);
+  </script>
+</body>
+</html>

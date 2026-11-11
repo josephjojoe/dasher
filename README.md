@@ -73,6 +73,7 @@ binary (musl) in a distroless or scratch-sized container.
 | `dasher` | `crates/dasher` | Public library API |
 | `dasher-cli` | `crates/cli` | The `dasher` command-line binary |
 | `dasher-test-server` | `crates/test-server` | In-process HTTP fixture server for tests |
+| `dasher-bench` | `crates/bench` | Memory, time and size benchmarks on a fixture suite |
 
 ## Development
 
