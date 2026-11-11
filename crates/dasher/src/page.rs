@@ -124,7 +124,8 @@ pub struct MemoryUsage {
 ///
 /// Pages come from [`Browser::new_page`]. Each owns its JS runtime and
 /// DOM, freed when the page is dropped or [closed](Self::close) or
-/// another document replaces them. Page methods must run inside a Tokio
+/// another document replaces them, or when the page goes over one of its
+/// [limits](Error::LimitExceeded). Page methods must run inside a Tokio
 /// runtime, on the thread that created the page: a current-thread
 /// runtime, or a `LocalSet`.
 ///
@@ -170,8 +171,10 @@ impl Page {
     /// [`GotoOptions`].
     ///
     /// Fails only if no document could be had at all (a bad URL, a network
-    /// error, or no response in time). The previous document is dropped
-    /// before the new one loads, so after an error the page is blank.
+    /// error, or no response in time), or with [`Error::LimitExceeded`] if
+    /// the page went over its JS heap or DOM node limit. The previous
+    /// document is dropped before the new one loads, so after an error the
+    /// page is blank.
     pub async fn goto(&mut self, url: &str) -> Result<Navigation> {
         self.goto_with(url, &GotoOptions::default()).await
     }
@@ -179,8 +182,9 @@ impl Page {
     /// Loads `url`, follows the navigations its scripts ask for, then
     /// settles and scrolls the page as `options` say.
     ///
-    /// Fails only if no document could be had at all. Running out of time
-    /// is not an error: the page is left as far as it got, and
+    /// Fails only if no document could be had at all, or the page went
+    /// over a [limit](Error::LimitExceeded). Running out of time is not an
+    /// error: the page is left as far as it got, and
     /// [`Navigation::timed_out`] says so.
     pub async fn goto_with(&mut self, url: &str, options: &GotoOptions) -> Result<Navigation> {
         let started = Instant::now();
@@ -265,6 +269,16 @@ impl Page {
         options: &SettleOptions,
         deadline: Instant,
     ) -> Result<SettleOutcome> {
+        let outcome = self.settle_following(options, deadline).await;
+        self.check_limits()?;
+        outcome
+    }
+
+    async fn settle_following(
+        &mut self,
+        options: &SettleOptions,
+        deadline: Instant,
+    ) -> Result<SettleOutcome> {
         let page = self.inner.as_mut().ok_or(Error::NoDocument)?;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -294,7 +308,9 @@ impl Page {
     /// [`AutoScrollOptions`].
     pub async fn auto_scroll(&mut self, options: &AutoScrollOptions) -> Result<AutoScrollReport> {
         let page = self.inner.as_mut().ok_or(Error::NoDocument)?;
-        Ok(page.auto_scroll(options).await?)
+        let report = page.auto_scroll(options).await;
+        self.check_limits()?;
+        Ok(report?)
     }
 
     async fn scroll_by_deadline(
@@ -332,9 +348,11 @@ impl Page {
 
     fn scroll(&mut self, script: &str) -> Result<()> {
         let page = self.inner.as_ref().ok_or(Error::NoDocument)?;
-        page.js().eval_json(script)?;
+        let result = page.js().eval_json(script);
         // Errors in the page's handlers are the page's own, and logged.
         let _ = page.js().run_ready();
+        self.check_limits()?;
+        result?;
         Ok(())
     }
 
@@ -353,14 +371,17 @@ impl Page {
     /// Fails with [`Error::Script`] if the code throws, the promise
     /// rejects, or the value cannot be serialized (cycles, `BigInt`);
     /// with [`Error::Timeout`] if a promise does not settle in time, or
-    /// cannot settle because the page has nothing left to do; and with
-    /// [`Error::NavigatedAway`] if the page navigates before it settles.
+    /// cannot settle because the page has nothing left to do; with
+    /// [`Error::NavigatedAway`] if the page navigates before it settles;
+    /// and with [`Error::LimitExceeded`] if the page goes over its JS heap
+    /// or DOM node limit meanwhile.
     pub async fn evaluate(&mut self, source: &str) -> Result<Value> {
         let deadline = Instant::now() + self.timeout;
         let page = self.inner.as_mut().ok_or(Error::NoDocument)?;
         page.js().set_deadline(Some(deadline));
         let result = evaluate_on(page, source, deadline).await;
         page.js().set_deadline(None);
+        self.check_limits()?;
         Ok(match result? {
             Some(json) => serde_json::from_str(&json)?,
             None => Value::Null,
@@ -574,6 +595,19 @@ impl Page {
     /// Closes the page, freeing its document and JS runtime and canceling
     /// its requests. Dropping the page does the same.
     pub fn close(self) {}
+
+    /// Fails with [`Error::LimitExceeded`] if the page went over one of its
+    /// limits, freeing the document so a runaway page lets go of its memory
+    /// at once.
+    fn check_limits(&mut self) -> Result<()> {
+        match self.inner.as_ref().and_then(|p| p.js().limit_exceeded()) {
+            Some(limit) => {
+                self.inner = None;
+                Err(Error::LimitExceeded(limit))
+            }
+            None => Ok(()),
+        }
+    }
 
     fn runtime_options(&self) -> RuntimeOptions {
         let base = self.browser.runtime_options();

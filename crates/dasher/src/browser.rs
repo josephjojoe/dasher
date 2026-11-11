@@ -153,6 +153,7 @@ pub struct BrowserBuilder {
     layout: LayoutMode,
     clock: ClockMode,
     memory_limit: Option<usize>,
+    max_dom_nodes: Option<usize>,
     max_navigations: usize,
     timeout: Duration,
 }
@@ -171,6 +172,7 @@ impl Default for BrowserBuilder {
             layout: LayoutMode::default(),
             clock: ClockMode::Virtual,
             memory_limit: Some(dasher_js::DEFAULT_MEMORY_LIMIT),
+            max_dom_nodes: Some(dasher_js::DEFAULT_MAX_DOM_NODES),
             max_navigations: dasher_page::DEFAULT_MAX_NAVIGATIONS,
             timeout: DEFAULT_TIMEOUT,
         }
@@ -267,9 +269,25 @@ impl BrowserBuilder {
     }
 
     /// Caps each page's JS heap, in bytes (`None` for no cap). Defaults to
-    /// [`DEFAULT_MEMORY_LIMIT`](dasher_js::DEFAULT_MEMORY_LIMIT).
+    /// [`DEFAULT_MEMORY_LIMIT`](crate::DEFAULT_MEMORY_LIMIT), 256 MiB.
+    ///
+    /// A script that asks for more than fits gets an out-of-memory error.
+    /// A page that fills its heap (an allocation is refused with more than
+    /// half of it in use) is stopped, and the page operation running fails
+    /// with [`Error::LimitExceeded`].
     pub fn memory_limit(mut self, bytes: Option<usize>) -> Self {
         self.memory_limit = bytes;
+        self
+    }
+
+    /// Caps the number of nodes each page's DOM may hold, scripts' detached
+    /// nodes included (`None` for no cap). Defaults to
+    /// [`DEFAULT_MAX_DOM_NODES`](crate::DEFAULT_MAX_DOM_NODES), 500,000.
+    ///
+    /// A page that goes over it is stopped, and the page operation running
+    /// fails with [`Error::LimitExceeded`].
+    pub fn max_dom_nodes(mut self, nodes: Option<usize>) -> Self {
+        self.max_dom_nodes = nodes;
         self
     }
 
@@ -354,6 +372,7 @@ impl BrowserBuilder {
 
         let runtime = RuntimeOptions {
             memory_limit: self.memory_limit,
+            max_dom_nodes: self.max_dom_nodes,
             clock: self.clock,
             window,
             ..RuntimeOptions::default()

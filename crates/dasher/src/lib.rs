@@ -88,6 +88,17 @@
 //! # }
 //! ```
 //!
+//! # Memory
+//!
+//! Each page has two limits: its JS heap
+//! ([`BrowserBuilder::memory_limit`], 256 MiB by default) and the number of
+//! nodes its DOM may hold ([`BrowserBuilder::max_dom_nodes`], 500,000).
+//! A page that goes over one is stopped at once, its document is freed,
+//! and the operation that was running fails with
+//! [`Error::LimitExceeded`], so one runaway page cannot take the process
+//! down. [`Page::memory_usage`] shows how close a page is. A page's memory
+//! is all returned when it is dropped or navigates elsewhere.
+//!
 //! # Time
 //!
 //! Pages run on page time. By default it is [virtual](ClockMode::Virtual):
@@ -107,8 +118,8 @@ pub use error::{Error, Result};
 pub use page::{GotoOptions, MemoryUsage, Navigation, Page};
 
 pub use dasher_js::{
-    ClockMode, ConsoleLevel, ConsoleMessage, ErrorKind as ScriptErrorKind, LayoutMode, ScriptError,
-    Viewport, precompile,
+    ClockMode, ConsoleLevel, ConsoleMessage, DEFAULT_MAX_DOM_NODES, DEFAULT_MEMORY_LIMIT,
+    ErrorKind as ScriptErrorKind, LayoutMode, ResourceLimit, ScriptError, Viewport, precompile,
 };
 pub use dasher_net::{Cookie, SameSite};
 pub use dasher_page::{

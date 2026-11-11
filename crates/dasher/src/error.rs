@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use dasher_js::ScriptError;
+use dasher_js::{ResourceLimit, ScriptError};
 use dasher_page::LoadError;
 
 /// A specialized `Result` for dasher operations.
@@ -38,6 +38,12 @@ pub enum Error {
     /// The page navigated to another document while a result from the old
     /// one was being waited for.
     NavigatedAway,
+    /// The page went over one of its limits: it filled its JS heap
+    /// ([`BrowserBuilder::memory_limit`](crate::BrowserBuilder::memory_limit))
+    /// or built too many DOM nodes
+    /// ([`BrowserBuilder::max_dom_nodes`](crate::BrowserBuilder::max_dom_nodes)).
+    /// Its document was freed, so the page is blank.
+    LimitExceeded(ResourceLimit),
 }
 
 impl fmt::Display for Error {
@@ -54,6 +60,7 @@ impl fmt::Display for Error {
             Self::NavigatedAway => {
                 f.write_str("the page navigated away before the result was ready")
             }
+            Self::LimitExceeded(limit) => limit.fmt(f),
         }
     }
 }
@@ -71,7 +78,10 @@ impl std::error::Error for Error {
 
 impl From<LoadError> for Error {
     fn from(e: LoadError) -> Self {
-        Self::Load(e)
+        match e {
+            LoadError::LimitExceeded(limit) => Self::LimitExceeded(limit),
+            e => Self::Load(e),
+        }
     }
 }
 
