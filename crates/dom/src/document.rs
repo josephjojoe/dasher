@@ -267,11 +267,16 @@ impl Document {
             None => (Name::EMPTY, self.intern(qualified_name)),
         };
         let id = self.create_element_named(ns, local);
+        self.set_element_prefix(id, prefix);
+        id
+    }
+
+    /// Gives a new element a prefix (none for [`Name::EMPTY`]).
+    pub(crate) fn set_element_prefix(&mut self, id: NodeId, prefix: Name) {
         if prefix != Name::EMPTY {
             self.prefixes.insert(id, prefix);
             self.node_mut(id).flags |= flags::HAS_PREFIX;
         }
-        id
     }
 
     /// A new element from already-interned names.

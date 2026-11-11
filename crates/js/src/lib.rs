@@ -154,11 +154,18 @@
 //! document's HTML, slots are never assigned, events are not retargeted,
 //! and `<template shadowrootmode>` stays an ordinary template.
 //!
-//! `document.implementation.createHTMLDocument()` makes a second, inert
-//! document in the page's arena for building markup off the page (jQuery
-//! parses HTML strings in one). Its scripts never run and it has no URL,
-//! window or cookies. Nodes move between it and the page freely; a
-//! detached node's `ownerDocument` is always the page's document.
+//! Scripts can make more documents: `DOMParser` (HTML, and XML through a
+//! small parser of dasher's own), `document.implementation`'s
+//! `createHTMLDocument()` and `createDocument()`, `new Document()`, and
+//! `XMLHttpRequest`'s `responseXML` and `responseType = 'document'`. They
+//! live in the page's arena as inert trees of their own: their scripts
+//! never run, events in them do not reach `window`, and they have no
+//! window, cookies or loading. Script can query and change them, and nodes
+//! move between them and the page without copying. `ownerDocument` follows
+//! the nodes: a node belongs to the document whose tree it is in, and a
+//! detached node to the document that made, adopted or last held it. A
+//! document is freed once nothing reaches it; its nodes count towards the
+//! page's node limit.
 //!
 //! Geometry is synthetic, chosen so content gated on visibility or
 //! scrolling still loads; [`WindowOptions::layout`] picks how (see
@@ -192,7 +199,7 @@
 //! handler runs or is read, with the element, its form and the document on
 //! the scope chain, and run in their place among the event listeners. The
 //! `on*` properties override them, and changing an attribute updates its
-//! handler. Elements of the second document never run theirs.
+//! handler. Elements of extra documents never run theirs.
 //!
 //! Every node keeps one JS wrapper for as long as script can reach it, so
 //! identity and expando properties are stable, but wrappers do not keep

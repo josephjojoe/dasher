@@ -228,10 +228,16 @@ fn other_documents_do_not_run_handlers() {
         const doc = document.implementation.createHTMLDocument('');
         doc.body.innerHTML = '<div onclick="log.push(1)"></div>';
         doc.body.firstChild.click();
+        // Their bodies have no window to set handlers on.
+        window.onload = () => log.push('page');
+        doc.body.setAttribute('onload', 'log.push(2)');
+        const parsed = new DOMParser().parseFromString('<body onload="log.push(3)">', 'text/html');
+        parsed.body.setAttribute('onload', 'log.push(4)');
+        dispatchEvent(new Event('load'));
         [log, doc.body.firstChild.onclick]
         "#,
     );
-    assert_eq!(out, "[[],null]");
+    assert_eq!(out, r#"[["page"],null]"#);
 }
 
 #[test]

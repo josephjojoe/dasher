@@ -139,6 +139,14 @@ fn adjacent_position(ctx: &Ctx<'_>, position: &str) -> Result<AdjacentPosition> 
 // Each records the changes it makes for mutation observers while the
 // document is borrowed, then delivers them once the borrow is released.
 
+/// `document.compatMode` for a quirks mode.
+fn compat_mode(quirks: QuirksMode) -> &'static str {
+    match quirks {
+        QuirksMode::Quirks => "BackCompat",
+        _ => "CSS1Compat",
+    }
+}
+
 /// The script elements under `moved` that just became connected and have
 /// not run, for the page loader to prepare, and the links that load
 /// something, which get a load event.
@@ -275,7 +283,7 @@ fn detach(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId) -> Result<()> {
             return Ok(());
         };
         doc.remove(node);
-        after_remove(ctx, dom, &doc, node);
+        after_remove(ctx, dom, &doc, node, parent);
         dom.bump();
         dom.child_list(&doc, parent, &[], &[node], prev, next);
     }
@@ -293,7 +301,7 @@ fn remove_children(
     let old: Vec<NodeId> = doc.children(parent).collect();
     doc.remove_children(parent);
     for &child in &old {
-        after_remove(ctx, dom, doc, child);
+        after_remove(ctx, dom, doc, child, parent);
     }
     old
 }
@@ -328,7 +336,7 @@ fn replace_child(
         result.map(|_| {
             if node != child {
                 after_insert(ctx, dom, &doc, parent, node, &moved, plan);
-                after_remove(ctx, dom, &doc, child);
+                after_remove(ctx, dom, &doc, child, parent);
                 dom.bump();
             }
             record_moved_out(dom, &doc, node, &moved, old);
@@ -433,7 +441,7 @@ fn set_outer_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -
         let old = place(&doc, node);
         let result = doc.set_outer_html(node, html);
         if let (Ok(()), Some((parent, prev, next))) = (&result, old) {
-            after_remove(ctx, dom, &doc, node);
+            after_remove(ctx, dom, &doc, node, parent);
             dom.bump();
             let added = children_between(&doc, parent, prev, next);
             dom.child_list(&doc, parent, &added, &[node], prev, next);
@@ -487,7 +495,7 @@ fn normalize(ctx: &Ctx<'_>, dom: &Rc<DomState>, root: NodeId) -> Result<()> {
             if let Some((parent, prev, next)) = place(doc, n) {
                 doc.remove(n);
                 dom.child_list(doc, parent, &[], &[n], prev, next);
-                removed.push(n);
+                removed.push((n, parent));
             }
         };
         for t in texts {
@@ -516,8 +524,8 @@ fn normalize(ctx: &Ctx<'_>, dom: &Rc<DomState>, root: NodeId) -> Result<()> {
             }
         }
         if !removed.is_empty() {
-            for n in removed {
-                after_remove(ctx, dom, &doc, n);
+            for (n, parent) in removed {
+                after_remove(ctx, dom, &doc, n, parent);
             }
             dom.bump();
         }
@@ -866,6 +874,30 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     let d = Rc::clone(dom);
     def(
         obj,
+        "ownerDocument",
+        move |ctx: Ctx<'js>, n: Node<'js>| -> Result<Node<'js>> {
+            let owner = d.owner_document(&d.doc(), id(&ctx, &n)?);
+            wrap(&ctx, &d, owner)
+        },
+    )?;
+    // Makes `owner` the node document of the detached tree rooted at `n`,
+    // for nodes a document creates or adopts.
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "setOwner",
+        move |ctx: Ctx<'js>, n: Node<'js>, owner: Node<'js>| -> Result<()> {
+            let (n, owner) = (id(&ctx, &n)?, id(&ctx, &owner)?);
+            let doc = d.doc();
+            if doc.kind(owner) == NodeKind::Document {
+                d.set_owner(&doc, n, owner);
+            }
+            Ok(())
+        },
+    )?;
+    let d = Rc::clone(dom);
+    def(
+        obj,
         "contains",
         move |ctx: Ctx<'js>, a: Node<'js>, b: Node<'js>| -> Result<bool> {
             Ok(d.doc().contains(id(&ctx, &a)?, id(&ctx, &b)?))
@@ -960,7 +992,13 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "clone",
         move |ctx: Ctx<'js>, n: Node<'js>, deep: bool| -> Result<Node<'js>> {
             let n = id(&ctx, &n)?;
-            let copy = d.doc_mut().clone_node(n, deep);
+            let copy = {
+                let mut doc = d.doc_mut();
+                let copy = doc.clone_node(n, deep);
+                // A copy belongs to the original's document.
+                d.set_owner(&doc, copy, d.owner_document(&doc, n));
+                copy
+            };
             wrap(&ctx, &d, copy)
         },
     )?;
@@ -1045,7 +1083,47 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "createDocument",
         move |ctx: Ctx<'js>| -> Result<Node<'js>> {
             let n = d.doc_mut().create_document();
+            d.note_extra_document();
             wrap(&ctx, &d, n)
+        },
+    )?;
+    // Replaces the children of `n`, a document made by script, with a
+    // document parsed from `text`, as HTML or XML. Returns the compat mode
+    // for HTML; for XML, null or why the text is not well-formed.
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "parseInto",
+        move |ctx: Ctx<'js>, n: Node<'js>, text: String, xml: bool| -> Result<Value<'js>> {
+            let target = id(&ctx, &n)?;
+            let outcome = {
+                let mut doc = d.doc_mut();
+                if doc.kind(target) != NodeKind::Document || target == doc.root() {
+                    return Err(throw_dom(
+                        &ctx,
+                        "InvalidStateError",
+                        "Only documents made by script can be parsed into.",
+                    ));
+                }
+                let removed = remove_children(&ctx, &d, &mut doc, target);
+                let outcome = if xml {
+                    doc.parse_xml_into(target, &text)
+                        .err()
+                        .map(|e| e.to_string())
+                } else {
+                    let quirks = doc.parse_document_into(target, &text);
+                    Some(compat_mode(quirks).to_owned())
+                };
+                d.bump();
+                let added: Vec<NodeId> = doc.children(target).collect();
+                d.child_list(&doc, target, &added, &removed, None, None);
+                outcome
+            };
+            deliver(&ctx, &d)?;
+            match outcome {
+                Some(s) => rquickjs::String::from_str(ctx, &s).map(|s| s.into_value()),
+                None => Ok(Value::new_null(ctx)),
+            }
         },
     )?;
     let d = Rc::clone(dom);
@@ -1206,9 +1284,8 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     let d = Rc::clone(dom);
     def(obj, "title", move || d.doc().title())?;
     let d = Rc::clone(dom);
-    def(obj, "compatMode", move || match d.doc().quirks_mode() {
-        QuirksMode::Quirks => "BackCompat",
-        _ => "CSS1Compat",
+    def(obj, "compatMode", move || {
+        compat_mode(d.doc().quirks_mode())
     })?;
     let d = Rc::clone(dom);
     def(obj, "baseHref", move || -> Nullable<String> {

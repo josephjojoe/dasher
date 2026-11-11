@@ -19,7 +19,8 @@ short list of known gaps a page may hit.
 | Slots and event retargeting in shadow DOM | `attachShadow` works, but slotted nodes are never assigned and events crossing a shadow boundary keep their inner target |
 | Declarative shadow DOM (`<template shadowrootmode>`) | Stays an ordinary `<template>` |
 | Shadow trees in the output | `page.html()` does not include shadow root contents |
-| `DOMParser`, `XMLSerializer`, XML documents, `responseXML` | `DOMParser` is undefined; `document.implementation.createHTMLDocument()` is the only way to make a second document |
+| `XMLSerializer` | Undefined; use `outerHTML` |
+| DTD entities and processing instructions in XML documents | Entities a DTD declares are an error (as in browsers without the DTD); processing instructions are dropped |
 | `document.evaluate` / XPath | Undefined |
 | `Range` constructor | Undefined (`document.createRange()` exists) |
 | `FileReader` | Undefined; use `blob.text()` / `arrayBuffer()` |

@@ -435,14 +435,20 @@
     }
 
     // A document parsed from the response, when the DOM bindings provide
-    // `internals.parseDocument(text, mimeType, url)`.
+    // `internals.parseDocument(text, mimeType, url)`. XML responses are
+    // parsed for responseXML and responseType 'document', HTML ones only
+    // for the latter, as the standard says.
     #document() {
       const x = this.#x;
       if (x.readyState !== DONE || x.bytes === null) return null;
       if (x.cached === undefined) {
         const parse = internals.parseDocument;
-        x.cached = typeof parse === 'function'
-          ? parse(decodeUtf8(x.bytes), this.#mimeType(), this.responseURL)
+        // Without a Content-Type, a response counts as text/xml.
+        const essence = this.#mimeType().split(';')[0].trim() || 'text/xml';
+        const html = essence === 'text/html';
+        const xml = essence === 'text/xml' || essence === 'application/xml' || essence.endsWith('+xml');
+        x.cached = typeof parse === 'function' && (xml || (html && x.responseType === 'document'))
+          ? parse(decodeUtf8(x.bytes), essence, this.responseURL)
           : null;
       }
       return x.cached;
