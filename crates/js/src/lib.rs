@@ -146,6 +146,12 @@
 //! the `style` attribute; `getComputedStyle` reports it over per-element
 //! defaults, with no cascade.
 //!
+//! `attachShadow` gives open and closed shadow roots that scripts can fill
+//! and query, reached again through `shadowRoot`; composed events cross
+//! from the shadow tree to its host. Shadow trees are not part of the
+//! document's HTML, slots are never assigned, events are not retargeted,
+//! and `<template shadowrootmode>` stays an ordinary template.
+//!
 //! Geometry is synthetic, chosen so content gated on visibility or
 //! scrolling still loads; [`WindowOptions::layout`] picks how (see
 //! [`LayoutMode`]). By default every rendered element is a visible,

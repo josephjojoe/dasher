@@ -811,3 +811,119 @@ fn bulk_operations_scale() {
         js.with_document(Document::len)
     );
 }
+
+#[test]
+fn shadow_roots_hold_content_for_their_hosts() {
+    let js = page("<div id=host></div><p id=plain></p>");
+    run(
+        &js,
+        r#"
+        const host = document.getElementById('host');
+        window.root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = '<style>p{}</style><p id=inner>shadow <b>text</b></p><slot></slot>';
+        window.inner = root.getElementById('inner');
+        window.closedRoot = document.createElement('x-widget').attachShadow({ mode: 'closed' });
+        "#,
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[Object.prototype.toString.call(root), root instanceof ShadowRoot, \
+             root instanceof DocumentFragment, root.mode, root.host.id, \
+             document.getElementById('host').shadowRoot === root, root.nodeType]"
+        ),
+        r#"["[object ShadowRoot]",true,true,"open","host",true,11]"#
+    );
+    // The shadow tree is reachable from script but not part of the
+    // document's tree or its HTML.
+    assert_eq!(
+        eval(
+            &js,
+            "[root.querySelector('b').textContent, inner.getRootNode() === root, \
+             inner.getRootNode({ composed: true }) === document, inner.isConnected, \
+             document.getElementById('inner'), document.body.innerHTML, root.innerHTML]"
+        ),
+        r#"["text",true,true,true,null,"<div id=\"host\"></div><p id=\"plain\"></p>","<style>p{}</style><p id=\"inner\">shadow <b>text</b></p><slot></slot>"]"#
+    );
+    // Closed roots are not exposed through their host.
+    assert_eq!(
+        eval(
+            &js,
+            "[closedRoot.mode, closedRoot.host.shadowRoot, closedRoot.host.isConnected, \
+             closedRoot.appendChild(document.createElement('i')).isConnected]"
+        ),
+        r#"["closed",null,false,false]"#
+    );
+}
+
+#[test]
+fn attach_shadow_checks_its_host_and_mode() {
+    let js = page("<div id=host></div>");
+    assert_eq!(
+        eval(
+            &js,
+            r#"(() => {
+                const errors = [];
+                const attempt = (f) => { try { f(); errors.push('ok'); } catch (e) { errors.push(e.name); } };
+                const host = document.getElementById('host');
+                attempt(() => host.attachShadow({ mode: 'sideways' }));
+                attempt(() => host.attachShadow({ mode: 'open' }));
+                attempt(() => host.attachShadow({ mode: 'open' }));
+                attempt(() => document.createElement('img').attachShadow({ mode: 'open' }));
+                attempt(() => document.createElement('font-face').attachShadow({ mode: 'open' }));
+                attempt(() => document.createElement('my-element').attachShadow({ mode: 'open' }));
+                attempt(() => new ShadowRoot());
+                return errors;
+            })()"#
+        ),
+        r#"["TypeError","ok","NotSupportedError","NotSupportedError","NotSupportedError","ok","TypeError"]"#
+    );
+}
+
+#[test]
+fn composed_events_leave_shadow_trees() {
+    let js = page("<div id=host></div>");
+    assert_eq!(
+        eval(
+            &js,
+            r#"(() => {
+                const seen = [];
+                const host = document.getElementById('host');
+                const root = host.attachShadow({ mode: 'open' });
+                const button = root.appendChild(document.createElement('button'));
+                root.addEventListener('ping', (e) => seen.push('root:' + e.composed));
+                host.addEventListener('ping', (e) => seen.push('host:' + e.composed));
+                document.addEventListener('ping', (e) => seen.push('document:' + e.composed));
+                button.dispatchEvent(new Event('ping', { bubbles: true }));
+                button.dispatchEvent(new Event('ping', { bubbles: true, composed: true }));
+                return seen;
+            })()"#
+        ),
+        r#"["root:false","root:true","host:true","document:true"]"#
+    );
+}
+
+#[test]
+fn shadow_trees_are_freed_with_their_host() {
+    let js = page("");
+    let base = nodes(&js);
+    run(
+        &js,
+        r#"
+        window.host = document.createElement('div');
+        host.attachShadow({ mode: 'open' }).innerHTML = '<p>x</p>'.repeat(100);
+        host.shadowRoot.firstChild.expando = 1;
+        "#,
+    );
+    js.run_gc();
+    assert!(nodes(&js) >= base + 200);
+    // The host keeps its shadow root, and its expandos, alive.
+    assert_eq!(eval(&js, "host.shadowRoot.firstChild.expando"), "1");
+    run(&js, "delete window.host;");
+    js.run_gc();
+    assert!(
+        nodes(&js) <= base + 1,
+        "{} nodes, {base} at start",
+        nodes(&js)
+    );
+}

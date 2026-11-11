@@ -313,14 +313,22 @@
       return internals.baseURL();
     }
     get isConnected() {
-      return N.isConnected(this);
+      if (N.isConnected(this)) return true;
+      // A shadow tree is connected when its host is.
+      const shadow = shadowState.get(N.rootNode(this));
+      return shadow !== undefined && shadow.host.isConnected;
     }
     get ownerDocument() {
       return N.nodeType(this) === 9 ? null : documentNode;
     }
     getRootNode(options) {
-      void options;
-      return N.rootNode(this);
+      let root = N.rootNode(this);
+      if (options !== null && typeof options === 'object' && options.composed) {
+        for (let shadow = shadowState.get(root); shadow !== undefined; shadow = shadowState.get(root)) {
+          root = N.rootNode(shadow.host);
+        }
+      }
+      return root;
     }
     get parentNode() {
       return N.nav(this, 0);
@@ -648,8 +656,116 @@
   mixin(DocumentFragment, ParentNode);
   tag(DocumentFragment, 'DocumentFragment');
 
-  class ShadowRoot extends DocumentFragment {}
+  // Shadow roots. A shadow root is a document fragment in the arena that
+  // holds the shadow tree; its wrapper gets ShadowRoot.prototype, and the
+  // maps below tie it to its host (keeping each alive while the other is).
+  // Nothing is rendered, so shadow DOM only matters to script: components
+  // build their content in a shadow root and find it again through
+  // `host.shadowRoot`. Not supported: slot assignment, retargeting events
+  // that leave a shadow tree, declarative shadow roots in markup, and
+  // serializing shadow trees into the document's HTML.
+  const shadowOf = new WeakMap();
+  const shadowState = new WeakMap();
+  const SHADOW_HOSTS = new Set(['article', 'aside', 'blockquote', 'body', 'div', 'footer', 'h1', 'h2',
+    'h3', 'h4', 'h5', 'h6', 'header', 'main', 'nav', 'p', 'section', 'span']);
+  const RESERVED_CUSTOM_NAMES = new Set(['annotation-xml', 'color-profile', 'font-face',
+    'font-face-src', 'font-face-uri', 'font-face-format', 'font-face-name', 'missing-glyph']);
+
+  function isValidCustomElementName(name) {
+    return /^[a-z][^A-Z\s/>]*-[^A-Z\s/>]*$/.test(name) && !RESERVED_CUSTOM_NAMES.has(name);
+  }
+
+  function shadowRootState(root) {
+    const s = shadowState.get(root);
+    if (s === undefined) throw new TypeError('Illegal invocation');
+    return s;
+  }
+
+  class ShadowRoot extends DocumentFragment {
+    // eslint-disable-next-line constructor-super
+    constructor() {
+      throw new TypeError('Illegal constructor');
+    }
+    get mode() {
+      return shadowRootState(this).mode;
+    }
+    get host() {
+      return shadowRootState(this).host;
+    }
+    get delegatesFocus() {
+      return shadowRootState(this).delegatesFocus;
+    }
+    get slotAssignment() {
+      return shadowRootState(this).slotAssignment;
+    }
+    get clonable() {
+      return shadowRootState(this).clonable;
+    }
+    get serializable() {
+      return shadowRootState(this).serializable;
+    }
+    get activeElement() {
+      return null;
+    }
+    get innerHTML() {
+      return N.innerHTML(this);
+    }
+    set innerHTML(value) {
+      setShadowHTML(this, value === null ? '' : str(value));
+    }
+    setHTMLUnsafe(html) {
+      setShadowHTML(this, str(html));
+    }
+    getHTML() {
+      return N.innerHTML(this);
+    }
+    get adoptedStyleSheets() {
+      const s = shadowRootState(this);
+      return s.adoptedStyleSheets || (s.adoptedStyleSheets = []);
+    }
+    set adoptedStyleSheets(v) {
+      shadowRootState(this).adoptedStyleSheets = Array.from(v);
+    }
+  }
   tag(ShadowRoot, 'ShadowRoot');
+
+  // Parses `html` as a template's contents would be, then moves the result
+  // into the shadow root.
+  function setShadowHTML(root, html) {
+    shadowRootState(root);
+    const template = N.createElement('template');
+    N.setInnerHTML(template, html);
+    N.replaceAll(root, template.content);
+  }
+
+  function attachShadow(host, init) {
+    const what = "Failed to execute 'attachShadow' on 'Element': ";
+    const mode = init === null || init === undefined ? undefined : init.mode;
+    if (mode !== 'open' && mode !== 'closed') {
+      throw new TypeError(what + "Failed to read the 'mode' property from 'ShadowRootInit': The provided value '" +
+        mode + "' is not a valid enum value of type ShadowRootMode.");
+    }
+    const name = host.localName;
+    if (host.namespaceURI !== HTML_NS || !(SHADOW_HOSTS.has(name) || isValidCustomElementName(name))) {
+      throw domException('NotSupportedError', what + 'This element does not support attachShadow');
+    }
+    if (shadowOf.has(host)) {
+      throw domException('NotSupportedError', what + 'Shadow root cannot be created on a host which already hosts a shadow tree.');
+    }
+    const root = N.createFragment();
+    setPrototypeOf(root, ShadowRoot.prototype);
+    shadowState.set(root, {
+      host,
+      mode,
+      delegatesFocus: !!init.delegatesFocus,
+      slotAssignment: init.slotAssignment === 'manual' ? 'manual' : 'named',
+      clonable: !!init.clonable,
+      serializable: !!init.serializable,
+      adoptedStyleSheets: null,
+    });
+    shadowOf.set(host, root);
+    return root;
+  }
 
   // ---------------------------------------------------------------------
   // Attributes: Attr and NamedNodeMap.
@@ -1673,7 +1789,8 @@
       return N.closest(this, str(selectors));
     }
     get shadowRoot() {
-      return null;
+      const root = shadowOf.get(this);
+      return root !== undefined && shadowState.get(root).mode === 'open' ? root : null;
     }
     get assignedSlot() {
       return null;
@@ -1730,8 +1847,8 @@
       scrollIntoView(this, center ? 'center' : 'nearest', true);
     }
     attachShadow(init) {
-      void init;
-      throw domException('NotSupportedError', 'Shadow DOM is not supported.');
+      requireArgs(arguments, 1, "'attachShadow' on 'Element'");
+      return attachShadow(this, init);
     }
     requestFullscreen() {
       return Promise.reject(domException('NotSupportedError', 'Fullscreen is not supported.'));
@@ -3988,6 +4105,9 @@
     const parent = N.nav(target, 0);
     if (parent !== null) return parent;
     if (target === documentNode) return event.type === 'load' ? null : globalThis;
+    // Composed events leave a shadow tree for its host.
+    const shadow = shadowState.get(target);
+    if (shadow !== undefined && event.composed) return shadow.host;
     return null;
   };
   internals.scrollTarget = () => documentNode;
