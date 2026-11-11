@@ -40,6 +40,7 @@ mod inner_text;
 mod layout;
 mod mutation;
 mod natives;
+mod shadow;
 mod wrapper;
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
@@ -218,11 +219,17 @@ impl DomState {
     }
 }
 
+/// The node that keeps `id`'s parentless node alive besides its own wrapper:
+/// a template keeps its contents, and a host its shadow root.
+pub(crate) fn owner(doc: &Document, id: NodeId) -> Option<NodeId> {
+    doc.template_host(id).or_else(|| doc.shadow_host(id))
+}
+
 /// The root of `id`'s tree, looking through template contents to their
-/// template, since a template keeps its contents alive.
+/// template and shadow roots to their host, since those keep them alive.
 pub(crate) fn group_root(doc: &Document, mut id: NodeId) -> NodeId {
     loop {
-        match doc.parent(id).or_else(|| doc.template_host(id)) {
+        match doc.parent(id).or_else(|| owner(doc, id)) {
             Some(up) => id = up,
             None => return id,
         }
@@ -230,7 +237,8 @@ pub(crate) fn group_root(doc: &Document, mut id: NodeId) -> NodeId {
 }
 
 /// Whether `f` holds for `root` or any node under it, including nodes in
-/// template contents. Skips the subtrees rooted at nodes in `skip`.
+/// template contents and shadow trees. Skips the subtrees rooted at nodes
+/// in `skip`.
 pub(crate) fn any_in_tree_except(
     doc: &Document,
     root: NodeId,
@@ -247,6 +255,7 @@ pub(crate) fn any_in_tree_except(
         }
         stack.extend(doc.children(n));
         stack.extend(doc.template_contents(n));
+        stack.extend(doc.shadow_root(n));
     }
     false
 }
@@ -376,10 +385,12 @@ mod tests {
             pool.push(document.createDocumentFragment(), document.createDocumentFragment());
             const template = document.createElement('template');
             pool.push(template, template.content);
+            const host = document.createElement('my-host');
+            pool.push(host, host.attachShadow({ mode: 'open' }));
             const pick = () => pool[rand(pool.length)];
             globalThis.step = () => {
               const a = pick(), b = pick();
-              const op = rand(11);
+              const op = rand(12);
               try {
                 switch (op) {
                   case 0: a.appendChild(b); break;
@@ -393,6 +404,7 @@ mod tests {
                   case 8: a.replaceChildren(b, 'y'); break;
                   case 9: if (pool.length > 10) pool.splice(rand(pool.length - 1) + 1, 1); break;
                   case 10: a.append(b.cloneNode(true)); break;
+                  case 11: if (!a.shadowRoot && a.attachShadow) { pool.push(a.attachShadow({ mode: 'open', clonable: true })); } break;
                 }
               } catch (e) {
                 if (!(e instanceof DOMException) && !(e instanceof TypeError)) throw e;

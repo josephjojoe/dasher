@@ -904,6 +904,108 @@ fn composed_events_leave_shadow_trees() {
 }
 
 #[test]
+fn declarative_shadow_roots_reach_script() {
+    let js = page(
+        "<my-card id=c><template shadowrootmode=open shadowrootserializable><h2><slot name=title></slot></h2>\
+         <slot></slot></template><span slot=title>Title</span>body</my-card>",
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "(() => { const c = document.getElementById('c'); const r = c.shadowRoot; \
+             return [r instanceof ShadowRoot, r.host === c, r.mode, r.serializable, r.clonable, \
+               r.innerHTML, c.innerHTML, document.querySelector('template')]; })()"
+        ),
+        r#"[true,true,"open",true,false,"<h2><slot name=\"title\"></slot></h2><slot></slot>","<span slot=\"title\">Title</span>body",null]"#
+    );
+    // A component's own attachShadow takes the declarative root over.
+    assert_eq!(
+        eval(
+            &js,
+            "(() => { const c = document.getElementById('c'); const old = c.shadowRoot; \
+             const r = c.attachShadow({ mode: 'open' }); \
+             return [r === old, r.innerHTML, (() => { try { c.attachShadow({ mode: 'open' }); } catch (e) { return e.name; } })()]; })()"
+        ),
+        r#"[true,"","NotSupportedError"]"#
+    );
+}
+
+#[test]
+fn get_html_includes_the_shadow_roots_asked_for() {
+    let js = page("<div id=host><b>light</b></div>");
+    assert_eq!(
+        eval(
+            &js,
+            r#"(() => {
+                const host = document.getElementById('host');
+                const root = host.attachShadow({ mode: 'closed', serializable: true });
+                root.innerHTML = '<i>shadow</i>';
+                const other = document.createElement('x-y');
+                other.attachShadow({ mode: 'open' }).innerHTML = '<u>x</u>';
+                root.appendChild(other);
+                return [host.innerHTML, host.getHTML(), host.getHTML({ serializableShadowRoots: true }),
+                  host.getHTML({ shadowRoots: [other.shadowRoot] }), root.getHTML({ serializableShadowRoots: true })];
+            })()"#
+        ),
+        r#"["<b>light</b>","<b>light</b>","<template shadowrootmode=\"closed\" shadowrootserializable=\"\"><i>shadow</i><x-y></x-y></template><b>light</b>","<b>light</b>","<i>shadow</i><x-y></x-y>"]"#
+    );
+}
+
+#[test]
+fn slots_are_assigned_by_name() {
+    let js = page(
+        "<my-el id=host><span slot=title>T</span>text<b>default</b><i slot=missing>m</i></my-el>",
+    );
+    run(
+        &js,
+        r#"
+        window.host = document.getElementById('host');
+        window.root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = '<slot name=title>fallback</slot><slot></slot><slot name=empty><em>fb</em></slot>';
+        window.slots = root.querySelectorAll('slot');
+        "#,
+    );
+    assert_eq!(
+        eval(
+            &js,
+            "[slots[0].assignedNodes().map(n => n.textContent),               slots[1].assignedNodes().map(n => n.textContent),               slots[1].assignedElements().map(n => n.tagName),               slots[2].assignedNodes(), slots[2].assignedNodes({ flatten: true }).map(n => n.tagName),               host.querySelector('span').assignedSlot === slots[0], host.lastChild.assignedSlot,               host.childNodes[1].assignedSlot === slots[1]]"
+        ),
+        r#"[["T"],["text","default"],["B"],[],["EM"],true,null,true]"#
+    );
+}
+
+#[test]
+fn events_from_shadow_trees_are_retargeted() {
+    let js = page("<my-el id=host><span id=light>x</span></my-el>");
+    assert_eq!(
+        eval(
+            &js,
+            r#"(() => {
+                const seen = [];
+                const host = document.getElementById('host');
+                const root = host.attachShadow({ mode: 'open' });
+                root.innerHTML = '<div><button>b</button><slot></slot></div>';
+                const button = root.querySelector('button');
+                const log = (where) => (e) => seen.push(where + ':' + (e.target.id || e.target.localName) + ':' + e.eventPhase);
+                root.querySelector('div').addEventListener('ping', log('div'));
+                host.addEventListener('ping', log('host'));
+                document.body.addEventListener('ping', log('body'));
+                button.dispatchEvent(new Event('ping', { bubbles: true, composed: true }));
+                // Not bubbling, but the host is its retargeted target.
+                button.dispatchEvent(new Event('ping', { composed: true }));
+                // Slotted content goes through its slot.
+                document.getElementById('light').dispatchEvent(new Event('ping', { bubbles: true }));
+                const e = new Event('ping', { composed: true });
+                button.dispatchEvent(e);
+                seen.push(String(e.target));
+                return seen;
+            })()"#
+        ),
+        r#"["div:button:3","host:host:2","body:host:3","host:host:2","div:light:3","host:light:3","body:light:3","host:host:2","null"]"#
+    );
+}
+
+#[test]
 fn shadow_trees_are_freed_with_their_host() {
     let js = page("");
     let base = nodes(&js);

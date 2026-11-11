@@ -315,10 +315,8 @@
       return internals.baseURL();
     }
     get isConnected() {
-      if (N.isConnected(this)) return true;
       // A shadow tree is connected when its host is.
-      const shadow = shadowState.get(N.rootNode(this));
-      return shadow !== undefined && shadow.host.isConnected;
+      return N.isConnected(this);
     }
     get ownerDocument() {
       if (N.nodeType(this) === 9) return null;
@@ -331,9 +329,7 @@
     getRootNode(options) {
       let root = N.rootNode(this);
       if (options !== null && typeof options === 'object' && options.composed) {
-        for (let shadow = shadowState.get(root); shadow !== undefined; shadow = shadowState.get(root)) {
-          root = N.rootNode(shadow.host);
-        }
+        for (let host = N.shadowHost(root); host !== null; host = N.shadowHost(root)) root = N.rootNode(host);
       }
       return root;
     }
@@ -616,7 +612,7 @@
       return out;
     }
     get assignedSlot() {
-      return null;
+      return assignedSlot(this);
     }
   }
   tag(Text, 'Text');
@@ -663,29 +659,37 @@
   mixin(DocumentFragment, ParentNode);
   tag(DocumentFragment, 'DocumentFragment');
 
-  // Shadow roots. A shadow root is a document fragment in the arena that
-  // holds the shadow tree; its wrapper gets ShadowRoot.prototype, and the
-  // maps below tie it to its host (keeping each alive while the other is).
-  // Nothing is rendered, so shadow DOM only matters to script: components
-  // build their content in a shadow root and find it again through
-  // `host.shadowRoot`. Not supported: slot assignment, retargeting events
-  // that leave a shadow tree, declarative shadow roots in markup, and
-  // serializing shadow trees into the document's HTML.
-  const shadowOf = new WeakMap();
-  const shadowState = new WeakMap();
+  // Shadow roots. A shadow root is a document fragment in the arena tied to
+  // its host, as template contents are to their template; its wrapper gets
+  // ShadowRoot.prototype. Nothing is rendered, so shadow DOM matters to
+  // script (components build their content in a shadow root and find it
+  // again through `host.shadowRoot`) and to the host, which serializes
+  // shadow trees into the page's HTML as declarative shadow DOM.
+  //
+  // Slots are assigned on demand: a slot's assigned nodes are worked out
+  // from the host's children each time they are asked for.
   const SHADOW_HOSTS = new Set(['article', 'aside', 'blockquote', 'body', 'div', 'footer', 'h1', 'h2',
     'h3', 'h4', 'h5', 'h6', 'header', 'main', 'nav', 'p', 'section', 'span']);
-  const RESERVED_CUSTOM_NAMES = new Set(['annotation-xml', 'color-profile', 'font-face',
-    'font-face-src', 'font-face-uri', 'font-face-format', 'font-face-name', 'missing-glyph']);
+  const isValidCustomElementName = N.validCustomElementName;
+  // Replaced by the custom element registry.
+  internals.customElementDefinition = () => undefined;
 
-  function isValidCustomElementName(name) {
-    return /^[a-z][^A-Z\s/>]*-[^A-Z\s/>]*$/.test(name) && !RESERVED_CUSTOM_NAMES.has(name);
+  // The shadow root's settings as bits (see N.shadowInit).
+  function shadowBits(root) {
+    const bits = N.shadowInit(root);
+    if (bits < 0) throw new TypeError('Illegal invocation');
+    return bits;
   }
 
-  function shadowRootState(root) {
-    const s = shadowState.get(root);
-    if (s === undefined) throw new TypeError('Illegal invocation');
-    return s;
+  function getHTML(node, options) {
+    let serializable = false;
+    let roots = [];
+    if (options !== null && options !== undefined) {
+      if (typeof options !== 'object') throw new TypeError("Failed to execute 'getHTML': The provided value is not of type 'GetHTMLOptions'.");
+      serializable = !!options.serializableShadowRoots;
+      if (options.shadowRoots !== undefined) roots = Array.from(options.shadowRoots);
+    }
+    return N.getHTML(node, serializable, roots);
   }
 
   class ShadowRoot extends DocumentFragment {
@@ -694,22 +698,24 @@
       throw new TypeError('Illegal constructor');
     }
     get mode() {
-      return shadowRootState(this).mode;
+      return shadowBits(this) & 1 ? 'closed' : 'open';
     }
     get host() {
-      return shadowRootState(this).host;
+      shadowBits(this);
+      return N.shadowHost(this);
     }
     get delegatesFocus() {
-      return shadowRootState(this).delegatesFocus;
+      return (shadowBits(this) & 2) !== 0;
     }
     get slotAssignment() {
-      return shadowRootState(this).slotAssignment;
+      shadowBits(this);
+      return state(this).slotAssignment || 'named';
     }
     get clonable() {
-      return shadowRootState(this).clonable;
+      return (shadowBits(this) & 4) !== 0;
     }
     get serializable() {
-      return shadowRootState(this).serializable;
+      return (shadowBits(this) & 8) !== 0;
     }
     get activeElement() {
       return null;
@@ -723,15 +729,24 @@
     setHTMLUnsafe(html) {
       setShadowHTML(this, str(html));
     }
-    getHTML() {
-      return N.innerHTML(this);
+    getHTML(options) {
+      return getHTML(this, options);
     }
     get adoptedStyleSheets() {
-      const s = shadowRootState(this);
+      const s = state(this);
       return s.adoptedStyleSheets || (s.adoptedStyleSheets = []);
     }
     set adoptedStyleSheets(v) {
-      shadowRootState(this).adoptedStyleSheets = Array.from(v);
+      state(this).adoptedStyleSheets = Array.from(v);
+    }
+    elementFromPoint() {
+      return null;
+    }
+    elementsFromPoint() {
+      return [];
+    }
+    getSelection() {
+      return globalThis.getSelection ? globalThis.getSelection() : null;
     }
   }
   tag(ShadowRoot, 'ShadowRoot');
@@ -739,10 +754,10 @@
   // Parses `html` as a template's contents would be, then moves the result
   // into the shadow root.
   function setShadowHTML(root, html) {
-    shadowRootState(root);
+    shadowBits(root);
     const template = N.createElement('template');
     N.setInnerHTML(template, html);
-    N.replaceAll(root, template.content);
+    connected(N.replaceAll(root, template.content));
   }
 
   function attachShadow(host, init) {
@@ -756,22 +771,101 @@
     if (host.namespaceURI !== HTML_NS || !(SHADOW_HOSTS.has(name) || isValidCustomElementName(name))) {
       throw domException('NotSupportedError', what + 'This element does not support attachShadow');
     }
-    if (shadowOf.has(host)) {
-      throw domException('NotSupportedError', what + 'Shadow root cannot be created on a host which already hosts a shadow tree.');
+    const definition = internals.customElementDefinition(host);
+    if (definition !== undefined && definition.disableShadow) {
+      throw domException('NotSupportedError', what + 'attachShadow() is disabled by disabledFeatures static field.');
     }
-    const root = N.createFragment();
-    setPrototypeOf(root, ShadowRoot.prototype);
-    shadowState.set(root, {
-      host,
-      mode,
-      delegatesFocus: !!init.delegatesFocus,
-      slotAssignment: init.slotAssignment === 'manual' ? 'manual' : 'named',
-      clonable: !!init.clonable,
-      serializable: !!init.serializable,
-      adoptedStyleSheets: null,
-    });
-    shadowOf.set(host, root);
+    let root;
+    try {
+      root = N.attachShadow(host, mode === 'closed', !!init.delegatesFocus, !!init.clonable, !!init.serializable);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'NotSupportedError') {
+        throw domException('NotSupportedError', what + 'Shadow root cannot be created on a host which already hosts a shadow tree.');
+      }
+      throw e;
+    }
+    if (init.slotAssignment === 'manual') state(root).slotAssignment = 'manual';
     return root;
+  }
+
+  // Slots. https://dom.spec.whatwg.org/#find-a-slot
+  function isSlottable(node) {
+    const type = N.nodeType(node);
+    return type === 1 || type === 3;
+  }
+
+  // The slot `node` is assigned to, or null. `open` limits it to slots in
+  // open shadow trees, as `assignedSlot` is.
+  function findSlot(node, open) {
+    if (!isSlottable(node)) return null;
+    const parent = N.nav(node, 0);
+    if (parent === null || N.nodeType(parent) !== 1) return null;
+    const root = N.shadowRoot(parent);
+    if (root === null || (open && (shadowBits(root) & 1))) return null;
+    if (state(root).slotAssignment === 'manual') {
+      const slot = state(node).manualSlot;
+      return slot !== undefined && slot !== null && N.rootNode(slot) === root ? slot : null;
+    }
+    const name = N.nodeType(node) === 1 ? (N.getAttr(node, 'slot') || '') : '';
+    for (const slot of N.queryAll(root, 'slot')) {
+      const n = N.getAttr(slot, 'name');
+      if ((n === null ? '' : n) === name) return slot;
+    }
+    return null;
+  }
+
+  function assignedSlot(node) {
+    return findSlot(node, true);
+  }
+
+  // The nodes assigned to `slot`, following nested slots if `flatten`.
+  function assignedNodes(slot, flatten) {
+    const root = N.rootNode(slot);
+    const host = N.shadowHost(root);
+    const out = [];
+    if (host !== null) {
+      for (let c = N.nav(host, 1); c !== null; c = N.nav(c, 4)) {
+        if (findSlot(c, false) === slot) out.push(c);
+      }
+    }
+    if (!flatten) return out;
+    const flat = [];
+    const source = out.length > 0 || host === null ? out : [];
+    if (out.length === 0) {
+      // Fallback content.
+      for (let c = N.nav(slot, 1); c !== null; c = N.nav(c, 4)) if (isSlottable(c)) source.push(c);
+    }
+    for (const n of source) {
+      if (N.nodeType(n) === 1 && N.elementName(n)[0] === 'slot' && N.shadowHost(N.rootNode(n)) !== null) {
+        for (const m of assignedNodes(n, true)) flat.push(m);
+      } else {
+        flat.push(n);
+      }
+    }
+    return flat;
+  }
+
+  // Event retargeting: the target an event's listeners at `node` see, when
+  // it was dispatched at `target` inside a shadow tree.
+  // https://dom.spec.whatwg.org/#retarget
+  function retargetTo(target, node) {
+    for (;;) {
+      if (!(target instanceof Node)) return target;
+      const root = N.rootNode(target);
+      const host = N.shadowHost(root);
+      if (host === null) return target;
+      if (node instanceof Node && isShadowIncludingInclusiveAncestor(root, node)) return target;
+      target = host;
+    }
+  }
+
+  function isShadowIncludingInclusiveAncestor(ancestor, node) {
+    for (;;) {
+      if (N.contains(ancestor, node)) return true;
+      const host = N.shadowHost(N.rootNode(node));
+      if (host === null) return false;
+      node = host;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1796,11 +1890,14 @@
       return N.closest(this, str(selectors));
     }
     get shadowRoot() {
-      const root = shadowOf.get(this);
-      return root !== undefined && shadowState.get(root).mode === 'open' ? root : null;
+      const root = N.shadowRoot(this);
+      return root !== null && !(shadowBits(root) & 1) ? root : null;
     }
     get assignedSlot() {
-      return null;
+      return assignedSlot(this);
+    }
+    getHTML(options) {
+      return getHTML(this, options);
     }
     getBoundingClientRect() {
       const b = clientBox(this);
@@ -2640,9 +2737,17 @@
   reflect(I.HTMLTemplateElement, { shadowRootMode: ['string', 'shadowrootmode'] });
   reflect(I.HTMLSlotElement, { name: 'string' });
   define(I.HTMLSlotElement, {
-    assignedNodes() { return []; },
-    assignedElements() { return []; },
-    assign() {},
+    assignedNodes(options) {
+      return assignedNodes(this, options !== null && typeof options === 'object' && !!options.flatten);
+    },
+    assignedElements(options) {
+      return this.assignedNodes(options).filter((n) => N.nodeType(n) === 1);
+    },
+    assign(...nodes) {
+      for (const n of state(this).manualNodes || []) if (state(n).manualSlot === this) state(n).manualSlot = null;
+      state(this).manualNodes = nodes;
+      for (const n of nodes) state(n).manualSlot = this;
+    },
   });
 
   // Forms.
@@ -4141,6 +4246,7 @@
     Comment: Comment.prototype,
     DocumentType: DocumentType.prototype,
     DocumentFragment: DocumentFragment.prototype,
+    ShadowRoot: ShadowRoot.prototype,
     Document: HTMLDocument.prototype,
     html: htmlProtos,
     svg: svgProtos,
@@ -4155,10 +4261,30 @@
     const parent = N.nav(target, 0);
     if (parent !== null) return parent;
     if (target === documentNode) return event.type === 'load' ? null : globalThis;
-    // Composed events leave a shadow tree for its host.
-    const shadow = shadowState.get(target);
-    if (shadow !== undefined && event.composed) return shadow.host;
+    // Composed events leave a shadow tree for its host, as do events that
+    // came into it through a slot.
+    if (N.nodeType(target) !== 11) return null;
+    const origin = event.target;
+    if (event.composed || !(origin instanceof Node) || N.rootNode(origin) !== target) return N.shadowHost(target);
     return null;
+  };
+  // A slotted node's event path goes through its slot.
+  const eventParentOf = internals.eventParent;
+  internals.eventParent = (target, event) => {
+    if (N.hasShadowRoots() && target instanceof Node && N.nodeType(target) !== 11) {
+      const parent = N.nav(target, 0);
+      if (parent !== null && N.nodeType(parent) === 1 && N.shadowRoot(parent) !== null) {
+        const slot = findSlot(target, false);
+        if (slot !== null) return slot;
+      }
+    }
+    return eventParentOf(target, event);
+  };
+  // The targets listeners along `path` see, or null if they all see the
+  // original target, as they do unless it is in a shadow tree.
+  internals.retarget = (target, path) => {
+    if (!(target instanceof Node) || N.shadowHost(N.rootNode(target)) === null) return null;
+    return path.map((node) => retargetTo(target, node));
   };
   internals.scrollTarget = () => documentNode;
 

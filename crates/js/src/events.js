@@ -395,12 +395,22 @@
       path.push(p);
     }
     s.path = path;
+    // Listeners outside a shadow tree see its host as the target.
+    const targets = internals.retarget(target, path);
+    // Whether path[i] is a target (the event's, or a host it is retargeted
+    // to), so its listeners run at the target phase whether or not the
+    // event bubbles.
+    const atTarget = (i) => i === 0 || (targets !== null && targets[i] === path[i]);
     try {
-      for (let i = path.length - 1; i > 0 && !s.stop; i--) invoke(path[i], event, s, CAPTURING_PHASE, true);
-      if (!s.stop) invoke(target, event, s, AT_TARGET, true);
-      if (!s.stop) invoke(target, event, s, AT_TARGET, false);
-      if (s.bubbles) {
-        for (let i = 1; i < path.length && !s.stop; i++) invoke(path[i], event, s, BUBBLING_PHASE, false);
+      for (let i = path.length - 1; i >= 0 && !s.stop; i--) {
+        if (targets !== null) s.target = targets[i];
+        invoke(path[i], event, s, atTarget(i) ? AT_TARGET : CAPTURING_PHASE, true);
+      }
+      for (let i = 0; i < path.length && !s.stop; i++) {
+        const at = atTarget(i);
+        if (!at && !s.bubbles) continue;
+        if (targets !== null) s.target = targets[i];
+        invoke(path[i], event, s, at ? AT_TARGET : BUBBLING_PHASE, false);
       }
     } finally {
       s.phase = NONE;
@@ -409,6 +419,8 @@
       s.stop = false;
       s.stopImmediate = false;
       s.path = null;
+      // An event from inside a shadow tree does not give it away afterwards.
+      if (targets !== null) s.target = null;
     }
     return !s.canceled;
   }
@@ -709,6 +721,7 @@
     // The "get the parent" hook of event dispatch. The DOM bindings
     // replace it to give nodes their propagation path.
     eventParent: () => null,
+    retarget: () => null,
     isEvent,
     isSignal,
     signalAbort,

@@ -149,10 +149,13 @@
 //! defaults, with no cascade.
 //!
 //! `attachShadow` gives open and closed shadow roots that scripts can fill
-//! and query, reached again through `shadowRoot`; composed events cross
-//! from the shadow tree to its host. Shadow trees are not part of the
-//! document's HTML, slots are never assigned, events are not retargeted,
-//! and `<template shadowrootmode>` stays an ordinary template.
+//! and query, reached again through `shadowRoot`; the page's declarative
+//! shadow DOM (`<template shadowrootmode>`) becomes shadow roots too. Shadow
+//! trees live in the document arena, so the host sees them: it can
+//! serialize them into the page's HTML and query into them. Slots are
+//! assigned by name (or manually) whenever `assignedNodes()` or
+//! `assignedSlot` asks, events from a shadow tree are retargeted to its
+//! host, and composed events cross the boundary. `slotchange` never fires.
 //!
 //! `document.implementation.createHTMLDocument()` makes a second, inert
 //! document in the page's arena for building markup off the page (jQuery

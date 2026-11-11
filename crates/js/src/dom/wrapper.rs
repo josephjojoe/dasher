@@ -10,7 +10,7 @@ use rquickjs::class::{JsClass, Readable, Trace, Tracer};
 use rquickjs::function::Constructor;
 use rquickjs::{Class, Ctx, Function, JsLifetime, Object, Result, Value, qjs};
 
-use super::{DomState, any_in_tree_except, group_root};
+use super::{DomState, any_in_tree_except, group_root, owner};
 
 /// A node wrapper object.
 pub(crate) type Node<'js> = Class<'js, NodeWrapper<'js>>;
@@ -99,6 +99,7 @@ pub(crate) struct DomData<'js> {
     comment: Object<'js>,
     doctype: Object<'js>,
     fragment: Object<'js>,
+    shadow_root: Object<'js>,
     html_tags: HashMap<String, Object<'js>>,
     svg_tags: HashMap<String, Object<'js>>,
 }
@@ -135,6 +136,7 @@ pub(crate) fn init<'js>(
         comment: protos.get("Comment")?,
         doctype: protos.get("DocumentType")?,
         fragment: protos.get("DocumentFragment")?,
+        shadow_root: protos.get("ShadowRoot")?,
         html_tags: tag_table(protos.get("html")?)?,
         svg_tags: tag_table(protos.get("svg")?)?,
     };
@@ -169,6 +171,7 @@ fn prototype_for<'js>(ctx: &Ctx<'js>, doc: &Document, id: NodeId) -> Result<Obje
         NodeKind::Text => &data.text,
         NodeKind::Comment => &data.comment,
         NodeKind::Doctype => &data.doctype,
+        NodeKind::DocumentFragment if doc.shadow_host(id).is_some() => &data.shadow_root,
         NodeKind::DocumentFragment => &data.fragment,
         NodeKind::Document => {
             return data
@@ -255,7 +258,7 @@ fn find_anchor<'js>(
         // Usually an ancestor is wrapped: the document always is.
         let mut found = None;
         let mut n = id;
-        while let Some(up) = doc.parent(n).or_else(|| doc.template_host(n)) {
+        while let Some(up) = doc.parent(n).or_else(|| owner(doc, n)) {
             if let Some(raw) = wrappers.get(&up) {
                 found = Some(*raw);
                 break;

@@ -31,7 +31,7 @@ pub(crate) fn throw_dom(ctx: &Ctx<'_>, name: &str, message: &str) -> rquickjs::E
     }
 }
 
-fn dom_error(ctx: &Ctx<'_>, error: DomError) -> rquickjs::Error {
+pub(super) fn dom_error(ctx: &Ctx<'_>, error: DomError) -> rquickjs::Error {
     throw_dom(ctx, error.name(), &error.to_string())
 }
 
@@ -49,7 +49,7 @@ impl<'js, T: IntoJs<'js>> IntoJs<'js> for Nullable<T> {
 }
 
 /// The node behind a wrapper.
-fn id(ctx: &Ctx<'_>, node: &Node<'_>) -> Result<NodeId> {
+pub(super) fn id(ctx: &Ctx<'_>, node: &Node<'_>) -> Result<NodeId> {
     node.borrow().id().ok_or_else(|| {
         throw_dom(
             ctx,
@@ -61,7 +61,7 @@ fn id(ctx: &Ctx<'_>, node: &Node<'_>) -> Result<NodeId> {
 
 /// The element behind a wrapper; a `TypeError` for other nodes, which page
 /// code can pass by calling an `Element` method on them.
-fn element(ctx: &Ctx<'_>, dom: &DomState, node: &Node<'_>) -> Result<NodeId> {
+pub(super) fn element(ctx: &Ctx<'_>, dom: &DomState, node: &Node<'_>) -> Result<NodeId> {
     let n = id(ctx, node)?;
     if dom.doc().is_element(n) {
         Ok(n)
@@ -74,7 +74,11 @@ fn or_null<'js>(ctx: &Ctx<'js>, node: Option<Node<'js>>) -> Value<'js> {
     node.map_or_else(|| Value::new_null(ctx.clone()), Class::into_value)
 }
 
-fn wrap_opt<'js>(ctx: &Ctx<'js>, dom: &Rc<DomState>, id: Option<NodeId>) -> Result<Value<'js>> {
+pub(super) fn wrap_opt<'js>(
+    ctx: &Ctx<'js>,
+    dom: &Rc<DomState>,
+    id: Option<NodeId>,
+) -> Result<Value<'js>> {
     let node = id.map(|id| wrap(ctx, dom, id)).transpose()?;
     Ok(or_null(ctx, node))
 }
@@ -356,11 +360,7 @@ fn replace_all(
     let result = {
         let mut doc = dom.doc_mut();
         if let Some(node) = node {
-            if doc.contains(node, parent)
-                || doc
-                    .template_host(node)
-                    .is_some_and(|h| doc.contains(h, parent))
-            {
+            if doc.is_host_including_inclusive_ancestor(node, parent) {
                 return Err(dom_error(ctx, DomError::HierarchyRequest));
             }
         }
@@ -728,7 +728,7 @@ fn selector_error(ctx: &Ctx<'_>, selector: &str) -> rquickjs::Error {
 // -------------------------------------------------------------------------
 // Installation.
 
-fn def<'js, F, P>(obj: &Object<'js>, name: &str, f: F) -> Result<()>
+pub(super) fn def<'js, F, P>(obj: &Object<'js>, name: &str, f: F) -> Result<()>
 where
     F: IntoJsFunc<'js, P> + 'js,
 {
@@ -741,6 +741,7 @@ pub(super) fn install<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
     install_content(obj, dom)?;
     install_attributes(obj, dom)?;
     install_queries(obj, dom)?;
+    super::shadow::install(obj, dom)?;
     Ok(())
 }
 
