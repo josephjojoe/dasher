@@ -7,7 +7,7 @@
 // Requests go to Rust through `native.netSend`, which sends them through
 // the page's network session and calls back into `onResponse`, `onBody`
 // and `onError` (see net.rs). Bodies arrive whole; `response.body` is a
-// minimal stream over them for code that reads with `getReader()`.
+// ReadableStream (streams.js) that gives them as one chunk.
 //
 // XMLHttpRequest lives in xhr.js and builds on the helpers this file adds
 // to `internals`.
@@ -576,6 +576,9 @@
     }
     if (isBufferSource(body)) return { bytes: copyBytes(body), type: null };
     if (body instanceof FormData) return encodeMultipart(body);
+    if (internals.isReadableStream(body)) {
+      throw new TypeError('Streaming request bodies are not supported.');
+    }
     return { bytes: encode(String(body)), type: 'text/plain;charset=UTF-8' };
   }
 
@@ -672,80 +675,10 @@
     });
   }
 
-  // A minimal ReadableStream of one chunk, for code that reads bodies with
-  // `getReader()` or `for await`. `read()` gets the bytes from `take`.
-  class BodyStream {
-    #take;
-    #cancel;
-    #reader = null;
-    #done = false;
-    constructor(take, cancel) {
-      this.#take = take;
-      this.#cancel = cancel;
-    }
-    get locked() {
-      return this.#reader !== null;
-    }
-    getReader(options) {
-      if (options && options.mode === 'byob') {
-        throw new TypeError("Failed to execute 'getReader' on 'ReadableStream': BYOB readers are not supported.");
-      }
-      if (this.#reader !== null) {
-        throw new TypeError("Failed to execute 'getReader' on 'ReadableStream': ReadableStreamDefaultReader constructor can only accept readable streams that are not yet locked to a reader");
-      }
-      const stream = this;
-      let closed = deferred();
-      const reader = {
-        read() {
-          if (stream.#done) return PromiseRef.resolve({ value: undefined, done: true });
-          stream.#done = true;
-          return then(stream.#take(), (bytes) => {
-            closed.resolve(undefined);
-            return bytes.length === 0
-              ? { value: undefined, done: true }
-              : { value: copyBytes(bytes), done: false };
-          }, (error) => {
-            closed.reject(error);
-            throw error;
-          });
-        },
-        releaseLock() {
-          if (stream.#reader === reader) stream.#reader = null;
-        },
-        cancel(reason) {
-          return stream.cancel(reason);
-        },
-        get closed() {
-          return closed.promise;
-        },
-      };
-      this.#reader = reader;
-      return reader;
-    }
-    cancel() {
-      if (!this.#done) {
-        this.#done = true;
-        this.#cancel();
-      }
-      return PromiseRef.resolve(undefined);
-    }
-    async *[Symbol.asyncIterator]() {
-      const reader = this.getReader();
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) return;
-          yield value;
-        }
-      } finally {
-        reader.releaseLock();
-      }
-    }
-  }
-  tag(BodyStream, 'ReadableStream');
-
+  // A ReadableStream (streams.js) of one chunk: the bytes `take()`
+  // promises.
   function makeStream(take, cancel) {
-    return new BodyStream(take, cancel);
+    return internals.bytesStream(take, cancel);
   }
 
   // Request. https://fetch.spec.whatwg.org/#request-class
@@ -957,6 +890,18 @@
       if (body !== null && body !== undefined) {
         if (NULL_BODY_STATUSES.includes(s.status)) {
           throw new TypeError('Failed to ' + what + ': Response with null body status cannot have body');
+        }
+        if (internals.isReadableStream(body)) {
+          // Read whole, like every other body here; `response.body` is a
+          // new stream over the result.
+          if (internals.readableStreamLocked(body) || internals.readableStreamDisturbed(body)) {
+            throw new TypeError('Failed to ' + what + ': Response body object should not be disturbed or locked');
+          }
+          const pending = internals.readAllBytes(body);
+          ReflectApply(PromiseCatch, pending, [noop]);
+          s.body = { bytes: null, pending, used: false, stream: null };
+          this.#s = s;
+          return;
         }
         const extracted = extractBody(body);
         s.body = bodyState(extracted.bytes);

@@ -84,6 +84,11 @@
 //! - `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`,
 //!   `btoa`, `crypto.getRandomValues`/`randomUUID`, `structuredClone`,
 //!   `postMessage`, `MessageChannel` and `requestIdleCallback`.
+//! - Streams: `ReadableStream`, `WritableStream`, `TransformStream`, their
+//!   readers, writers and controllers, the queuing strategies,
+//!   `TextEncoderStream` and `TextDecoderStream`. Byte streams work as
+//!   default streams of `Uint8Array` chunks; BYOB readers are not
+//!   supported. `response.body` and `blob.stream()` are readable streams.
 //! - `Intl` (`NumberFormat`, `DateTimeFormat`, `PluralRules`, `Collator`,
 //!   `RelativeTimeFormat`, `ListFormat`), which QuickJS lacks, and the
 //!   `toLocaleString`/`localeCompare` methods built on it. Every locale
