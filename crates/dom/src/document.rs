@@ -9,6 +9,7 @@ use crate::name::{Name, Names};
 use compact_str::CompactString;
 
 use crate::node::{Attr, AttrNs, Doctype, Element, Node, NodeData, NodeId, NodeKind, flags};
+use crate::shadow::ShadowRootData;
 
 /// The document's quirks mode, set by the parser from the doctype.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -39,6 +40,10 @@ pub struct Document {
     template_contents: HashMap<NodeId, NodeId>,
     /// Contents fragment -> its `<template>` element.
     template_hosts: HashMap<NodeId, NodeId>,
+    /// Shadow host -> its shadow root.
+    pub(crate) shadow_roots: HashMap<NodeId, ShadowRootData>,
+    /// Shadow root -> its host.
+    pub(crate) shadow_hosts: HashMap<NodeId, NodeId>,
     /// Element prefixes; only `createElementNS` with a prefix makes these.
     prefixes: HashMap<NodeId, Name>,
     /// The (namespace, prefix) pairs attributes use, indexed by [`AttrNs`].
@@ -77,6 +82,8 @@ impl Document {
             scripting: true,
             template_contents: HashMap::new(),
             template_hosts: HashMap::new(),
+            shadow_roots: HashMap::new(),
+            shadow_hosts: HashMap::new(),
             prefixes: HashMap::new(),
             attr_namespaces: vec![(Name::EMPTY, Name::EMPTY)],
             node_limit: usize::MAX,
@@ -212,7 +219,7 @@ impl Document {
     }
 
     /// Frees a detached subtree: `id`, its descendants and any template
-    /// contents inside it. Their slots are reused by later allocations.
+    /// contents and shadow trees inside it. Their slots are reused by later allocations.
     ///
     /// The caller must know that nothing still refers to these ids (for the
     /// JS bindings: no live wrapper object). Using a released id panics,
@@ -222,7 +229,7 @@ impl Document {
     /// # Panics
     ///
     /// If `id` is the document node, still has a parent, or is the contents
-    /// of a template.
+    /// of a template or a shadow root.
     pub fn release(&mut self, id: NodeId) {
         assert!(id != self.root(), "cannot release the document node");
         assert!(self.parent(id).is_none(), "cannot release an attached node");
@@ -230,12 +237,22 @@ impl Document {
             !self.template_hosts.contains_key(&id),
             "cannot release template contents separately from the template"
         );
+        assert!(
+            !self.shadow_hosts.contains_key(&id),
+            "cannot release a shadow root separately from its host"
+        );
         let mut stack = vec![id];
         while let Some(n) = stack.pop() {
             stack.extend(self.children(n));
             if let Some(contents) = self.template_contents.remove(&n) {
                 self.template_hosts.remove(&contents);
                 stack.push(contents);
+            }
+            if !self.shadow_roots.is_empty() {
+                if let Some(shadow) = self.shadow_roots.remove(&n) {
+                    self.shadow_hosts.remove(&shadow.root);
+                    stack.push(shadow.root);
+                }
             }
             if self.node(n).flags & flags::HAS_PREFIX != 0 {
                 self.prefixes.remove(&n);
@@ -775,9 +792,10 @@ impl Document {
         self.ancestors(id).last().unwrap_or(id)
     }
 
-    /// Whether `id` is in the document (its root is the document node).
+    /// Whether `id` is in the document: its root is the document node, or
+    /// it is in a shadow tree whose host is in the document.
     pub fn is_connected(&self, id: NodeId) -> bool {
-        self.tree_root(id) == self.root()
+        self.shadow_including_root(id) == self.root()
     }
 
     /// Whether `other` is `id` or one of its descendants (`Node.contains`).
@@ -786,14 +804,19 @@ impl Document {
     }
 
     /// Whether `ancestor` is `id` or an ancestor of it, also looking through
-    /// template contents to their template ("host-including").
-    fn is_host_including_inclusive_ancestor(&self, ancestor: NodeId, id: NodeId) -> bool {
+    /// template contents to their template and shadow roots to their host
+    /// ("host-including").
+    pub fn is_host_including_inclusive_ancestor(&self, ancestor: NodeId, id: NodeId) -> bool {
         let mut n = id;
         loop {
             if n == ancestor {
                 return true;
             }
-            match self.parent(n).or_else(|| self.template_host(n)) {
+            match self
+                .parent(n)
+                .or_else(|| self.template_host(n))
+                .or_else(|| self.shadow_host(n))
+            {
                 Some(p) => n = p,
                 None => return false,
             }
@@ -1131,30 +1154,38 @@ impl Document {
     // Cloning and text content.
 
     /// `node.cloneNode(deep)`: a detached copy of `id`, with its descendants
-    /// if `deep`. Cloning a template deeply also copies its contents.
+    /// if `deep`. Cloning a template deeply also copies its contents, and
+    /// cloning the host of a clonable shadow root copies the shadow tree.
     pub fn clone_node(&mut self, id: NodeId, deep: bool) -> NodeId {
         let copy = self.clone_one(id);
-        if deep {
-            // (source parent, copy parent) pairs still to fill in.
-            let mut work = vec![(id, copy)];
-            while let Some((src, dst)) = work.pop() {
-                if let (Some(sc), Some(dc)) =
-                    (self.template_contents(src), self.template_contents(dst))
-                {
-                    work.push((sc, dc));
+        // (source parent, copy parent, whether to copy children) still to
+        // fill in.
+        let mut work = vec![(id, copy, deep)];
+        while let Some((src, dst, deep)) = work.pop() {
+            if let Some(shadow) = self.shadow_roots.get(&src).copied() {
+                if shadow.init.clonable {
+                    let root = self.attach_shadow_unchecked(dst, shadow.init, false);
+                    work.push((shadow.root, root, true));
                 }
-                let mut child = self.first_child(src);
-                while let Some(c) = child {
-                    if self.over_node_limit {
-                        // The copy is cut short; whoever enforces the
-                        // limit throws the page away anyway.
-                        return copy;
-                    }
-                    let c_copy = self.clone_one(c);
-                    self.insert_unchecked(dst, c_copy, None);
-                    work.push((c, c_copy));
-                    child = self.next_sibling(c);
+            }
+            if !deep {
+                continue;
+            }
+            if let (Some(sc), Some(dc)) = (self.template_contents(src), self.template_contents(dst))
+            {
+                work.push((sc, dc, true));
+            }
+            let mut child = self.first_child(src);
+            while let Some(c) = child {
+                if self.over_node_limit {
+                    // The copy is cut short; whoever enforces the
+                    // limit throws the page away anyway.
+                    return copy;
                 }
+                let c_copy = self.clone_one(c);
+                self.insert_unchecked(dst, c_copy, None);
+                work.push((c, c_copy, true));
+                child = self.next_sibling(c);
             }
         }
         copy

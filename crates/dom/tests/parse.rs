@@ -2,6 +2,7 @@
 
 use dasher_dom::{
     AdjacentPosition, Document, DomError, Name, NodeId, NodeKind, ParseOptions, QuirksMode,
+    ShadowRootMode,
 };
 
 fn body_html(html: &str) -> String {
@@ -83,10 +84,52 @@ fn templates_get_their_own_contents() {
 }
 
 #[test]
-fn shadow_root_templates_stay_templates() {
-    let doc = Document::parse("<div><template shadowrootmode=open><b>x</b></template></div>");
+fn declarative_shadow_roots_are_attached() {
+    let doc = Document::parse(
+        "<div id=host><template shadowrootmode=closed shadowrootserializable>\
+         <b>x</b><slot></slot></template>light</div><p>after",
+    );
+    let host = doc.get_element_by_id(doc.root(), "host").unwrap();
+    // The template is gone; its content is the shadow tree.
+    assert_eq!(doc.inner_html(host), "light");
+    let root = doc.shadow_root(host).expect("has a shadow root");
+    assert_eq!(doc.inner_html(root), "<b>x</b><slot></slot>");
+    let init = doc.shadow_root_init(root).unwrap();
+    assert_eq!(init.mode, ShadowRootMode::Closed);
+    assert!(init.serializable && !init.clonable && !init.delegates_focus);
+    assert!(doc.is_connected(doc.first_child(root).unwrap()));
+    assert_eq!(
+        body_html("<div><template shadowrootmode=open></template></div><p>after"),
+        "<div></div><p>after</p>"
+    );
+}
+
+#[test]
+fn templates_that_cannot_be_shadow_roots_stay_templates() {
+    // A bad mode, a host that cannot have one, a second root, and
+    // fragment parsing.
+    for html in [
+        "<div><template shadowrootmode=sideways><b>x</b></template></div>",
+        "<ul><template shadowrootmode=open><b>x</b></template></ul>",
+        "<div><template shadowrootmode=open></template><template shadowrootmode=open><b>x</b></template></div>",
+    ] {
+        let doc = Document::parse(html);
+        let tpl = doc
+            .descendants(doc.root())
+            .filter(|&n| doc.local_name(n) == Some(Name::TEMPLATE))
+            .last()
+            .expect("a template stays");
+        assert_eq!(doc.inner_html(tpl), "<b>x</b>", "{html}");
+    }
+    let mut doc = Document::parse("<div></div>");
+    let div = find(&doc, Name::DIV);
+    doc.set_inner_html(
+        div,
+        "<p><template shadowrootmode=open><b>x</b></template></p>",
+    );
     let tpl = find(&doc, Name::TEMPLATE);
     assert_eq!(doc.inner_html(tpl), "<b>x</b>");
+    assert!(!doc.has_shadow_roots());
 }
 
 #[test]

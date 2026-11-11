@@ -21,6 +21,15 @@
 //! assert_eq!(doc.outer_html(list), r#"<ul id="list"><li class="item">two</li><li class="item">three</li></ul>"#);
 //! ```
 //!
+//! # Shadow trees
+//!
+//! [`Document::attach_shadow`] gives an element a shadow root: a fragment
+//! that is not one of its children but is tied to it, as template contents
+//! are to their template. The parser makes them from declarative shadow DOM
+//! (`<template shadowrootmode="open">`) too. Plain serialization leaves
+//! shadow trees out, as `innerHTML` does; [`Document::outer_html_with`] and
+//! [`ShadowRoots`] write them back as declarative shadow DOM.
+//!
 //! # Incremental parsing
 //!
 //! [`Document::parse`] builds a whole document at once. A page loader uses
@@ -43,8 +52,8 @@
 //! - Text, comments and attribute values up to 24 bytes are stored inline.
 //!   An element's attributes are one exact-size boxed slice of 32-byte
 //!   records.
-//! - Rare state (template contents, element prefixes, attribute namespaces)
-//!   lives in side tables rather than in every node.
+//! - Rare state (template contents, shadow roots, element prefixes,
+//!   attribute namespaces) lives in side tables rather than in every node.
 //!
 //! `tests/memory.rs` measures the real heap cost with a counting allocator
 //! and fails if it regresses. On an indented 90k-node listing page a parsed
@@ -66,6 +75,7 @@ mod node;
 mod parse;
 mod query;
 mod serialize;
+mod shadow;
 mod stream;
 
 pub use document::{Children, Descendants, Document, QuirksMode};
@@ -73,4 +83,6 @@ pub use error::DomError;
 pub use name::{Name, Names};
 pub use node::{Attr, Doctype, NodeId, NodeKind};
 pub use parse::{AdjacentPosition, ParseOptions};
+pub use serialize::ShadowRoots;
+pub use shadow::{ShadowIncluding, ShadowRootInit, ShadowRootMode, is_valid_custom_element_name};
 pub use stream::{DocumentParser, ParseStep};

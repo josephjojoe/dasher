@@ -13,6 +13,9 @@ pub enum DomError {
     /// `NoModificationAllowedError`: e.g. setting `outerHTML` on the
     /// document element.
     NoModificationAllowed,
+    /// `NotSupportedError`: e.g. attaching a shadow root to an element that
+    /// cannot host one.
+    NotSupported,
 }
 
 impl DomError {
@@ -22,6 +25,7 @@ impl DomError {
             DomError::HierarchyRequest => "HierarchyRequestError",
             DomError::NotFound => "NotFoundError",
             DomError::NoModificationAllowed => "NoModificationAllowedError",
+            DomError::NotSupported => "NotSupportedError",
         }
     }
 }
@@ -32,6 +36,7 @@ impl fmt::Display for DomError {
             DomError::HierarchyRequest => "the operation would yield an incorrect node tree",
             DomError::NotFound => "the node is not a child of this node",
             DomError::NoModificationAllowed => "the node cannot be modified",
+            DomError::NotSupported => "the operation is not supported",
         };
         write!(f, "{}: {msg}", self.name())
     }

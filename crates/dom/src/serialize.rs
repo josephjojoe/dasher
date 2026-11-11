@@ -7,6 +7,42 @@ use crate::document::Document;
 use crate::name::Name;
 use crate::node::{NodeData, NodeId};
 
+/// Which shadow trees serializing includes. Each one included is written
+/// as declarative shadow DOM: a `<template shadowrootmode>` holding the
+/// shadow tree, as the host's first child.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum ShadowRoots<'a> {
+    /// None, as `innerHTML` and `outerHTML` do.
+    #[default]
+    None,
+    /// Every shadow root, open or closed: the whole content of the page.
+    All,
+    /// The roots listed, plus those marked serializable if `serializable`
+    /// is set, as `getHTML({ serializableShadowRoots, shadowRoots })` picks.
+    Chosen {
+        serializable: bool,
+        roots: &'a [NodeId],
+    },
+}
+
+impl ShadowRoots<'_> {
+    fn includes(self, doc: &Document, host: NodeId) -> Option<NodeId> {
+        if matches!(self, ShadowRoots::None) || doc.shadow_roots.is_empty() {
+            return None;
+        }
+        let shadow = doc.shadow_roots.get(&host)?;
+        let yes = match self {
+            ShadowRoots::None => false,
+            ShadowRoots::All => true,
+            ShadowRoots::Chosen {
+                serializable,
+                roots,
+            } => (serializable && shadow.init.serializable) || roots.contains(&shadow.root),
+        };
+        yes.then_some(shadow.root)
+    }
+}
+
 impl Document {
     /// The whole document as HTML: doctype, comments and the document
     /// element.
@@ -31,24 +67,87 @@ impl Document {
 
     /// Appends [`outer_html`](Self::outer_html) to `out`.
     pub fn write_outer_html(&self, id: NodeId, out: &mut String) {
-        match self.node(id).data {
-            NodeData::Document | NodeData::Fragment => self.write_inner_html(id, out),
-            _ => self.serialize(Some(id), true, out),
-        }
+        self.write_outer_html_with(id, ShadowRoots::None, out);
     }
 
     /// Appends [`inner_html`](Self::inner_html) to `out`.
     pub fn write_inner_html(&self, id: NodeId, out: &mut String) {
+        self.write_inner_html_with(id, ShadowRoots::None, out);
+    }
+
+    /// [`outer_html`](Self::outer_html), with the shadow trees `shadow`
+    /// picks written as declarative shadow DOM.
+    pub fn outer_html_with(&self, id: NodeId, shadow: ShadowRoots<'_>) -> String {
+        let mut out = String::new();
+        self.write_outer_html_with(id, shadow, &mut out);
+        out
+    }
+
+    /// [`inner_html`](Self::inner_html), with the shadow trees `shadow`
+    /// picks written as declarative shadow DOM.
+    pub fn inner_html_with(&self, id: NodeId, shadow: ShadowRoots<'_>) -> String {
+        let mut out = String::new();
+        self.write_inner_html_with(id, shadow, &mut out);
+        out
+    }
+
+    /// Appends [`outer_html_with`](Self::outer_html_with) to `out`.
+    pub fn write_outer_html_with(&self, id: NodeId, shadow: ShadowRoots<'_>, out: &mut String) {
+        match self.node(id).data {
+            NodeData::Document | NodeData::Fragment => self.write_inner_html_with(id, shadow, out),
+            _ => self.serialize(Some(id), true, shadow, out),
+        }
+    }
+
+    /// Appends [`inner_html_with`](Self::inner_html_with) to `out`. For a
+    /// shadow host, the shadow tree comes first if `shadow` picks it.
+    pub fn write_inner_html_with(&self, id: NodeId, shadow: ShadowRoots<'_>, out: &mut String) {
         if self.is_element(id) && self.serializes_as_void(id) {
             return;
         }
-        self.serialize(self.first_child(self.content_parent(id)), false, out);
+        if let Some(root) = shadow.includes(self, id) {
+            self.write_shadow_root(root, shadow, out);
+        }
+        self.serialize(
+            self.first_child(self.content_parent(id)),
+            false,
+            shadow,
+            out,
+        );
+    }
+
+    /// Writes the shadow root `root` as a `<template shadowrootmode>`.
+    fn write_shadow_root(&self, root: NodeId, shadow: ShadowRoots<'_>, out: &mut String) {
+        let init = self.shadow_root_init(root).expect("is a shadow root");
+        out.push_str("<template shadowrootmode=\"");
+        out.push_str(init.mode.as_str());
+        out.push('"');
+        for (set, name) in [
+            (init.delegates_focus, "shadowrootdelegatesfocus"),
+            (init.clonable, "shadowrootclonable"),
+            (init.serializable, "shadowrootserializable"),
+        ] {
+            if set {
+                out.push(' ');
+                out.push_str(name);
+                out.push_str("=\"\"");
+            }
+        }
+        out.push('>');
+        self.serialize(self.first_child(root), false, shadow, out);
+        out.push_str("</template>");
     }
 
     /// Serializes `first` and its following siblings (just `first` if
     /// `only_first`) with their descendants. Iterative, so deep trees cannot
-    /// overflow the stack.
-    fn serialize(&self, first: Option<NodeId>, only_first: bool, out: &mut String) {
+    /// overflow the stack; only shadow trees nest a call.
+    fn serialize(
+        &self,
+        first: Option<NodeId>,
+        only_first: bool,
+        shadow: ShadowRoots<'_>,
+        out: &mut String,
+    ) {
         // Elements whose end tags are still to be written.
         let mut open: Vec<NodeId> = Vec::new();
         let mut next = first;
@@ -56,6 +155,9 @@ impl Document {
             match next {
                 Some(n) => {
                     if self.write_start(n, out) {
+                        if let Some(root) = shadow.includes(self, n) {
+                            self.write_shadow_root(root, shadow, out);
+                        }
                         open.push(n);
                         next = self.first_child(self.content_parent(n));
                     } else if open.is_empty() && only_first {
@@ -368,5 +470,93 @@ mod tests {
         }
         let html = doc.outer_html(root);
         assert_eq!(html.len(), "<div></div>".len() + 10_000 * "<i></i>".len());
+    }
+
+    #[test]
+    fn shadow_trees_serialize_as_declarative_shadow_dom() {
+        use crate::{ShadowRootInit, ShadowRootMode};
+        let mut doc = Document::parse("<my-card><span slot=title>Hi</span></my-card>");
+        let card = doc.first_child(doc.body().unwrap()).unwrap();
+        let root = doc
+            .attach_shadow(
+                card,
+                ShadowRootInit {
+                    mode: ShadowRootMode::Closed,
+                    serializable: true,
+                    ..ShadowRootInit::open()
+                },
+            )
+            .unwrap();
+        let h = el(&mut doc, root, "h2");
+        el(&mut doc, h, "slot");
+        let inner = el(&mut doc, root, "x-inner");
+        let inner_root = doc.attach_shadow(inner, ShadowRootInit::open()).unwrap();
+        text(&mut doc, inner_root, "deep");
+
+        let light = r#"<my-card><span slot="title">Hi</span></my-card>"#;
+        assert_eq!(doc.outer_html(card), light);
+        assert_eq!(doc.outer_html_with(card, ShadowRoots::None), light);
+        assert_eq!(
+            doc.outer_html_with(card, ShadowRoots::All),
+            "<my-card><template shadowrootmode=\"closed\" shadowrootserializable=\"\">\
+             <h2><slot></slot></h2><x-inner><template shadowrootmode=\"open\">deep</template>\
+             </x-inner></template><span slot=\"title\">Hi</span></my-card>"
+        );
+        // Only the serializable root, unless the inner one is listed.
+        assert_eq!(
+            doc.inner_html_with(
+                card,
+                ShadowRoots::Chosen {
+                    serializable: true,
+                    roots: &[]
+                }
+            ),
+            "<template shadowrootmode=\"closed\" shadowrootserializable=\"\">\
+             <h2><slot></slot></h2><x-inner></x-inner></template><span slot=\"title\">Hi</span>"
+        );
+        assert!(
+            doc.inner_html_with(
+                card,
+                ShadowRoots::Chosen {
+                    serializable: true,
+                    roots: &[inner_root]
+                }
+            )
+            .contains("<x-inner><template shadowrootmode=\"open\">deep</template></x-inner>")
+        );
+    }
+
+    #[test]
+    fn listed_shadow_roots_alone() {
+        use crate::ShadowRootInit;
+        let mut doc = Document::new();
+        let host = doc.create_element("div");
+        let init = ShadowRootInit {
+            serializable: true,
+            ..ShadowRootInit::open()
+        };
+        let root = doc.attach_shadow(host, init).unwrap();
+        text(&mut doc, root, "s");
+        fn chosen(serializable: bool, roots: &[NodeId]) -> ShadowRoots<'_> {
+            ShadowRoots::Chosen {
+                serializable,
+                roots,
+            }
+        }
+        assert_eq!(doc.inner_html_with(host, chosen(false, &[])), "");
+        let dsd = "<template shadowrootmode=\"open\" shadowrootserializable=\"\">s</template>";
+        assert_eq!(doc.inner_html_with(host, chosen(false, &[root])), dsd);
+        assert_eq!(doc.inner_html_with(host, chosen(true, &[])), dsd);
+    }
+
+    #[test]
+    fn declarative_shadow_dom_round_trips() {
+        let html = "<html><head></head><body><my-el><template shadowrootmode=\"open\" \
+                    shadowrootclonable=\"\"><p>in</p></template>out</my-el></body></html>";
+        let doc = Document::parse(html);
+        assert_eq!(
+            doc.outer_html_with(doc.document_element().unwrap(), ShadowRoots::All),
+            html
+        );
     }
 }

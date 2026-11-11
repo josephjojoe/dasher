@@ -19,6 +19,7 @@ use crate::document::{Document, QuirksMode};
 use crate::error::DomError;
 use crate::name::Name;
 use crate::node::{Attr, NodeId, NodeKind, flags};
+use crate::shadow::{ShadowRootInit, ShadowRootMode};
 
 /// How much fragment input is parsed between checks of the node limit.
 const FRAGMENT_SLICE: usize = 16 * 1024;
@@ -288,6 +289,10 @@ pub(crate) struct Sink<'a> {
     first_element: Cell<Option<NodeId>>,
     /// Text nodes appended to after creation, to shrink when parsing ends.
     grown_text: RefCell<Vec<NodeId>>,
+    /// `<template shadowrootmode>` elements that became shadow roots, and
+    /// those roots. Such a template is never inserted; its content is
+    /// parsed into the shadow root, and it is released when parsing ends.
+    declarative_shadow: RefCell<Vec<(NodeId, NodeId)>>,
 }
 
 impl<'a> Sink<'a> {
@@ -303,6 +308,7 @@ impl<'a> Sink<'a> {
             local_atoms: RefCell::new(Vec::new()),
             first_element: Cell::new(None),
             grown_text: RefCell::new(Vec::new()),
+            declarative_shadow: RefCell::new(Vec::new()),
         }
     }
 
@@ -311,8 +317,20 @@ impl<'a> Sink<'a> {
         (doc.intern(&name.ns), prefix, doc.intern(&name.local))
     }
 
+    /// Tidies up once parsing is done: gives back memory and frees the
+    /// templates that became declarative shadow roots.
+    pub(crate) fn end(&self) {
+        self.shrink_grown_text();
+        let mut doc = self.doc.borrow_mut();
+        for (template, _) in self.declarative_shadow.take() {
+            if doc.parent(template).is_none() {
+                doc.release(template);
+            }
+        }
+    }
+
     /// Gives back the memory text nodes over-allocated while they grew.
-    pub(crate) fn shrink_grown_text(&self) {
+    fn shrink_grown_text(&self) {
         let mut doc = self.doc.borrow_mut();
         for id in self.grown_text.take() {
             // In an incremental parse, script may have changed the node since.
@@ -361,7 +379,7 @@ impl TreeSink for Sink<'_> {
         Self: 'b;
 
     fn finish(self) -> Option<NodeId> {
-        self.shrink_grown_text();
+        self.end();
         self.first_element.get()
     }
 
@@ -476,6 +494,10 @@ impl TreeSink for Sink<'_> {
     }
 
     fn get_template_contents(&self, target: &NodeId) -> NodeId {
+        let shadow = self.declarative_shadow.borrow();
+        if let Some(&(_, root)) = shadow.iter().rev().find(|(t, _)| t == target) {
+            return root;
+        }
         self.doc
             .borrow()
             .template_contents(*target)
@@ -536,7 +558,38 @@ impl TreeSink for Sink<'_> {
     }
 
     fn allow_declarative_shadow_roots(&self, _intended_parent: &NodeId) -> bool {
-        // No shadow DOM: a `<template shadowrootmode>` stays a template.
-        false
+        // Fragment parsing (`innerHTML`) leaves such templates alone.
+        !self.fragment
+    }
+
+    fn attach_declarative_shadow(
+        &self,
+        host: &NodeId,
+        template: &NodeId,
+        attrs: &[Attribute],
+    ) -> bool {
+        let mut doc = self.doc.borrow_mut();
+        if !doc.can_host_shadow_root(*host) || doc.shadow_root(*host).is_some() {
+            return false;
+        }
+        let flag = |name: &str| attrs.iter().any(|a| &*a.name.local == name);
+        let mode = attrs
+            .iter()
+            .find(|a| &*a.name.local == "shadowrootmode")
+            .map(|a| &*a.value);
+        let mode = match mode {
+            Some(m) if m.eq_ignore_ascii_case("open") => ShadowRootMode::Open,
+            Some(m) if m.eq_ignore_ascii_case("closed") => ShadowRootMode::Closed,
+            _ => return false,
+        };
+        let init = ShadowRootInit {
+            mode,
+            delegates_focus: flag("shadowrootdelegatesfocus"),
+            clonable: flag("shadowrootclonable"),
+            serializable: flag("shadowrootserializable"),
+        };
+        let root = doc.attach_shadow_unchecked(*host, init, true);
+        self.declarative_shadow.borrow_mut().push((*template, root));
+        true
     }
 }

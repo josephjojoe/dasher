@@ -1,6 +1,6 @@
 //! Incremental parsing with `DocumentParser`.
 
-use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep};
+use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep, ShadowRoots};
 
 const PAGE: &str = r#"<!DOCTYPE html>
 <html lang=en><head><meta charset=utf-8><title>Stream &amp; test</title>
@@ -197,4 +197,23 @@ fn plain_text_is_shown_verbatim_in_a_pre() {
         doc.text_content(pre).as_deref(),
         Some("{\"html\": \"<b>not bold</b>\",\n\"script\": \"<script>x</script>\"}")
     );
+}
+
+#[test]
+fn declarative_shadow_roots_stream_like_they_parse() {
+    const DSD: &str = "<body><x-a><template shadowrootmode=open><b>in</b><script>s()</script>\
+                       </template>out</x-a><p>after";
+    let expected = Document::parse(DSD);
+    let chars: Vec<String> = DSD.chars().map(String::from).collect();
+    let refs: Vec<&str> = chars.iter().map(String::as_str).collect();
+    let (doc, scripts) = stream(&refs);
+    assert_eq!(
+        doc.outer_html_with(doc.document_element().unwrap(), ShadowRoots::All),
+        expected.outer_html_with(expected.document_element().unwrap(), ShadowRoots::All),
+    );
+    // The script in the shadow tree is connected, so it pauses the parser.
+    assert_eq!(scripts.len(), 1);
+    assert!(doc.is_connected(scripts[0]));
+    // The template that became the shadow root was freed.
+    assert_eq!(doc.len(), expected.len());
 }

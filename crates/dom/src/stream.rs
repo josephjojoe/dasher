@@ -167,7 +167,7 @@ impl DocumentParser {
                 TokenizerResult::Done
             ) {}
             parser.tokenizer.end();
-            parser.tokenizer.sink.sink.shrink_grown_text();
+            parser.tokenizer.sink.sink.end();
         });
         doc.shrink_to_fit();
     }
