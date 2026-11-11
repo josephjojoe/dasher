@@ -41,6 +41,11 @@ synthetic values. They are chosen so that content gated behind visibility or
 scrolling still loads: by default everything counts as visible and in the
 viewport, and the document is treated as tall enough to scroll.
 
+Content that web components render into shadow roots is part of the result:
+the HTML carries each shadow tree as declarative shadow DOM
+(`<template shadowrootmode="open">` inside its host), and CSS selectors
+given to dasher look into shadow trees.
+
 [COMPATIBILITY.md](COMPATIBILITY.md) lists the web APIs pages may expect that
 dasher does not support yet.
 
