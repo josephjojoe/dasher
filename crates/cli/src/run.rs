@@ -65,7 +65,7 @@ async fn run(options: &Options) -> ExitCode {
     }
 
     let summary = summary(&page, &navigation);
-    match result {
+    let code = match result {
         Some(Err(e)) => fail(options, &summary, &e),
         Some(Ok(value)) if options.json => print_json(&with(summary, "result", value)),
         Some(Ok(value)) => match value {
@@ -74,7 +74,13 @@ async fn run(options: &Options) -> ExitCode {
         },
         None if options.json => print_json(&with(summary, "html", page.content().into())),
         None => print(&page.content()),
-    }
+    };
+    // The process is about to exit and the output is written. Freeing the
+    // page object by object first was 5% of a heavy page's CPU time, so
+    // leave its memory for the OS to take back.
+    #[allow(clippy::mem_forget)]
+    std::mem::forget(page);
+    code
 }
 
 fn browser(options: &Options) -> dasher::Result<Browser> {
