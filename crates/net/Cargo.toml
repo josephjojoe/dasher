@@ -10,6 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Recording responses to disk and replaying them, for benchmarks on real
+# pages; see crates/bench/README.md. Not for builds that ship.
+replay = []
+
 [dependencies]
 async-compression = { version = "0.4", features = ["brotli", "deflate", "gzip", "tokio", "zlib", "zstd"] }
 bytes.workspace = true

@@ -50,6 +50,8 @@ mod decode;
 mod error;
 mod guard;
 mod policy;
+#[cfg(feature = "replay")]
+mod replay;
 mod response;
 
 pub use activity::{InFlight, NetworkActivity};

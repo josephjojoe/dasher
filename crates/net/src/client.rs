@@ -26,6 +26,8 @@ use crate::decode::ACCEPT_ENCODING as ACCEPT_ENCODING_VALUE;
 use crate::error::{Error, ErrorKind, Result};
 use crate::guard::{self, GuardedHttp};
 use crate::policy::{BlockReason, RequestInfo, RequestPolicy, ResourceType};
+#[cfg(feature = "replay")]
+use crate::replay;
 use crate::response::{Body, Response, with_deadline};
 
 /// The `User-Agent` sent when none is configured: a current desktop Chrome on
@@ -251,6 +253,8 @@ impl ClientBuilder {
                 timeout: self.timeout,
                 max_redirects: self.max_redirects,
                 max_response_size: self.max_response_size,
+                #[cfg(feature = "replay")]
+                replay: replay::Mode::from_env(),
             }),
         })
     }
@@ -297,6 +301,9 @@ struct ClientInner {
     timeout: Option<Duration>,
     max_redirects: usize,
     max_response_size: u64,
+    /// Recording or replaying responses, when the environment asks for it.
+    #[cfg(feature = "replay")]
+    replay: Option<replay::Mode>,
 }
 
 impl fmt::Debug for Client {
@@ -571,6 +578,32 @@ impl Session {
             .max_response_size
             .unwrap_or(client.max_response_size);
 
+        #[cfg(feature = "replay")]
+        if let Some(replay::Mode::Replay(store)) = &client.replay {
+            return match store.find(&request.method, &request.url) {
+                Some(recorded) => {
+                    if request.credentials.allowed_for(&request.url) {
+                        for value in recorded.headers.get_all(SET_COOKIE) {
+                            if let Ok(value) = value.to_str() {
+                                self.cookies.set_from_header(&recorded.url, value);
+                            }
+                        }
+                    }
+                    Ok(Response::recorded(recorded, limit, in_flight))
+                }
+                None => Err(Error::new(ErrorKind::Connect)
+                    .with_url(&request.url)
+                    .with_source("not in the recording")),
+            };
+        }
+        #[cfg(feature = "replay")]
+        let recording = match &client.replay {
+            Some(replay::Mode::Record(dir)) => {
+                Some((dir, request.method.clone(), request.url.clone()))
+            }
+            _ => None,
+        };
+
         let Request {
             mut method,
             mut url,
@@ -671,7 +704,20 @@ impl Session {
                 .map_err(|e| e.with_url(&url))?;
             // Fail early on a declared length over the limit.
             body.check_declared_length().map_err(|e| e.with_url(&url))?;
-            return Ok(Response::new(parts, url, redirects > 0, body));
+            let response = Response::new(parts, url, redirects > 0, body);
+            #[cfg(feature = "replay")]
+            if let Some((dir, method, request_url)) = recording {
+                let recorded = replay::Recorded {
+                    status: response.status(),
+                    url: response.url().clone(),
+                    redirected: response.redirected(),
+                    headers: response.headers().clone(),
+                    body: response.bytes().await?,
+                };
+                replay::write(dir, &method, &request_url, &recorded);
+                return Ok(Response::recorded(recorded, limit, self.activity.start()));
+            }
+            return Ok(response);
         }
     }
 

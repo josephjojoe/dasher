@@ -47,6 +47,23 @@ impl Response {
         }
     }
 
+    /// A response read back from a recording.
+    #[cfg(feature = "replay")]
+    pub(crate) fn recorded(
+        recorded: crate::replay::Recorded,
+        limit: u64,
+        in_flight: InFlight,
+    ) -> Self {
+        Self {
+            status: recorded.status,
+            version: Version::HTTP_11,
+            headers: recorded.headers,
+            url: recorded.url,
+            redirected: recorded.redirected,
+            body: Body::buffered(recorded.body, limit, in_flight),
+        }
+    }
+
     /// The status code.
     pub fn status(&self) -> StatusCode {
         self.status
@@ -144,6 +161,9 @@ enum State {
     /// declare an encoding don't fail to decode.
     Encoded(WireReader, Vec<Encoding>),
     Decoding(Decoder, BytesMut),
+    /// A whole body already in memory (a replayed recording).
+    #[cfg(feature = "replay")]
+    Buffered(Bytes),
     Done,
 }
 
@@ -177,6 +197,23 @@ impl Body {
             body.finish();
         }
         Ok(body)
+    }
+
+    /// A body that is already in memory.
+    #[cfg(feature = "replay")]
+    pub(crate) fn buffered(bytes: Bytes, limit: u64, in_flight: InFlight) -> Self {
+        let mut body = Self {
+            state: State::Buffered(bytes),
+            limit,
+            received: 0,
+            content_length: None,
+            deadline: None,
+            in_flight: Some(in_flight),
+        };
+        if matches!(&body.state, State::Buffered(bytes) if bytes.is_empty()) {
+            body.finish();
+        }
+        body
     }
 
     /// Fails if a declared, unencoded length exceeds the limit.
@@ -232,6 +269,12 @@ impl Body {
                     let reader = decoder(wire, &encodings, &first);
                     self.state = State::Decoding(reader, BytesMut::new());
                     continue;
+                }
+                #[cfg(feature = "replay")]
+                State::Buffered(bytes) => {
+                    let chunk = std::mem::take(bytes);
+                    self.state = State::Done;
+                    chunk
                 }
                 State::Decoding(reader, buf) => {
                     buf.reserve(DECODED_CHUNK);
