@@ -1,5 +1,5 @@
-//! The small en-US Intl implementation and the built-in toLocale* methods
-//! it backs.
+//! The small Intl implementation and the built-in toLocale* methods it
+//! backs: en-US throughout, and en-CA, en-GB and de-DE for dates.
 
 use dasher_js::{ClockMode, JsRuntime, RuntimeOptions};
 
@@ -506,12 +506,22 @@ fn host_time_zone() {
                 new Intl.DateTimeFormat('en-US', {{ hour: 'numeric', minute: '2-digit', hour12: false }}).format(d)
                   === pad(d.getHours()) + ':' + pad(d.getMinutes()),
                 d.toLocaleDateString() === (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear(),
-                zone === 'UTC' ? offset === 0 : /^(Etc\/GMT[+-]\d+|[+-]\d\d:\d\d)$/.test(zone),
+                // A name from the zone table, or an offset where none fits.
+                zone === 'UTC' ? offset === 0 : /^([A-Z]\w+(\/[\w+-]+)+|[+-]\d\d:\d\d)$/.test(zone),
+                // The zone it names keeps the host's time all year round. Its
+                // name is left out: a host that could be in either of two
+                // zones with different names gets an offset instead.
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].every((month) => {{
+                  const t = Date.UTC(2026, month, 15, 12);
+                  const o = {{ dateStyle: 'short', timeStyle: 'medium' }};
+                  return new Intl.DateTimeFormat('en-US', o).format(t)
+                    === new Intl.DateTimeFormat('en-US', {{ ...o, timeZone: zone }}).format(t);
+                }}),
               ]
             }}"#
         ),
     );
-    assert_eq!(out, "[true,true,true]");
+    assert_eq!(out, "[true,true,true,true]");
 }
 
 #[test]
@@ -542,6 +552,766 @@ fn date_to_locale_strings() {
             r#""11/10/2026, 3 PM","Invalid Date","string"]"#
         )
     );
+}
+
+// The date cases from here to `pattern_selection` have the strings Chrome
+// 157.0.8103.51 gives for the same expressions on macOS. Node 22.20 (V8
+// 12.4, ICU 77.1) agrees except where a comment says what it gives.
+//
+// T is as above; V is 2026-11-11T17:30:00Z, S 2026-07-04T18:30:15Z and
+// M 2027-03-05T00:09:07.004Z.
+const DATES: &str = "const T = 1794323045678, V = 1794418200000, S = 1783189815000, M = 1804205347004; \
+    const fmt = (locale, options, t) => new Intl.DateTimeFormat(locale, options).format(t);";
+
+/// As `check`, with the instants and `fmt` in scope.
+fn check_dates(cases: &[(&str, &str)]) {
+    let js = page();
+    for (source, expected) in cases {
+        let out = eval(&js, &format!("{{ {DATES} String({source}) }}"));
+        assert_eq!(out, format!("\"{expected}\""), "{source}");
+    }
+}
+
+/// en-CA writes numeric dates year first, with or without a time. The first
+/// case is the one pages compare against their server-rendered markup.
+#[test]
+fn en_ca_dates() {
+    check_dates(&[
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }, V)",
+            "2026-11-11",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York' }, V)",
+            "2026-11-11",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: 'numeric', day: 'numeric' }, M)",
+            "2027-03-04",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', year: '2-digit', month: '2-digit', day: '2-digit' }, V)",
+            "26-11-11",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', month: '2-digit', day: '2-digit' }, V)",
+            "11-11",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric' }, M)",
+            "03-04",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit' }, V)",
+            "2026-11",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', dateStyle: 'short' }, V)",
+            "2026-11-11",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit' }, V)",
+            "Wed, 2026-11-11",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }, V)",
+            "2026-11-11, 12:30:00 p.m.",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }, V)",
+            "2026-11-11, 12:30:00",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: '2-digit' }, M)",
+            "2027-03-04, 7:09 p.m.",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }, M)",
+            "2027-03-04, 19:09",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', dateStyle: 'short', timeStyle: 'short' }, V)",
+            "2026-11-11, 12:30 p.m.",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', dateStyle: 'short', timeStyle: 'medium', hour12: false }, V)",
+            "2026-11-11, 12:30:00",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', dateStyle: 'medium' }, V)",
+            "Nov 11, 2026",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', dateStyle: 'long', timeStyle: 'short' }, V)",
+            "November 11, 2026 at 12:30 p.m.",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', timeStyle: 'long' }, V)",
+            "12:30:00 p.m. EST",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', month: 'short', day: 'numeric' }, V)",
+            "Nov 11",
+        ),
+        (
+            "new Date(V).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })",
+            "2026-11-11",
+        ),
+        (
+            "new Date(V).toLocaleString('en-CA', { timeZone: 'America/New_York' })",
+            "2026-11-11, 12:30:00 p.m.",
+        ),
+        (
+            "new Date(V).toLocaleTimeString('en-CA', { timeZone: 'America/New_York' })",
+            "12:30:00 p.m.",
+        ),
+        (
+            "new Date(V).toLocaleDateString('en-CA', { timeZone: 'UTC' })",
+            "2026-11-11",
+        ),
+        (
+            "new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(V).map((p) => p.type + '=' + p.value)",
+            "year=2026,literal=-,month=11,literal=-,day=11",
+        ),
+        (
+            "new Intl.DateTimeFormat('en-CA').resolvedOptions().locale",
+            "en-CA",
+        ),
+    ]);
+}
+
+/// Named zones: offsets on both sides of a change, half and quarter hours,
+/// years past the end of the probed range, and how names are accepted.
+#[test]
+fn named_time_zones() {
+    check_dates(&[
+        (
+            "fmt('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'medium', timeStyle: 'short' }, T)",
+            "Nov 10, 2026, 7:04 AM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/London', dateStyle: 'medium', timeStyle: 'short' }, T)",
+            "Nov 10, 2026, 3:04 PM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/London', dateStyle: 'medium', timeStyle: 'short' }, S)",
+            "Jul 4, 2026, 7:30 PM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/Berlin', dateStyle: 'medium', timeStyle: 'short' }, S)",
+            "Jul 4, 2026, 8:30 PM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }, T)",
+            "Nov 10, 2026, 8:34 PM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Asia/Tokyo', dateStyle: 'medium', timeStyle: 'short' }, T)",
+            "Nov 11, 2026, 12:04 AM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Australia/Sydney', dateStyle: 'medium', timeStyle: 'short' }, T)",
+            "Nov 11, 2026, 2:04 AM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Australia/Sydney', dateStyle: 'medium', timeStyle: 'short' }, S)",
+            "Jul 5, 2026, 4:30 AM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/St_Johns', timeStyle: 'medium' }, S)",
+            "4:00:15 PM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Asia/Kathmandu', timeStyle: 'medium' }, S)",
+            "12:15:15 AM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', dateStyle: 'short', timeStyle: 'long' }, 1772953199000)",
+            "3/8/26, 1:59:59 AM EST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', dateStyle: 'short', timeStyle: 'long' }, 1772953200000)",
+            "3/8/26, 3:00:00 AM EDT",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', dateStyle: 'short', timeStyle: 'long' }, 489326400000)",
+            "7/4/85, 8:00:00 AM EDT",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', dateStyle: 'short', timeStyle: 'long' }, 3377937600000)",
+            "1/15/77, 7:00:00 AM EST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', dateStyle: 'short', timeStyle: 'long' }, Date.UTC(6018, 6, 4, 12))",
+            "7/4/18, 8:00:00 AM EDT",
+        ),
+        // British Columbia stays on daylight time from 2026 in Chrome's zone
+        // data. Node 22 gives 1/15/27, 4:00:00 AM PST here.
+        (
+            "fmt('en-US', { timeZone: 'America/Vancouver', dateStyle: 'short', timeStyle: 'long' }, Date.UTC(2027, 0, 15, 12))",
+            "1/15/27, 5:00:00 AM PDT",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'us/pacific', timeStyle: 'short' }, T)",
+            "7:04 AM",
+        ),
+        (
+            "fmt('en-US', { timeZone: '-08', timeStyle: 'long' }, T)",
+            "7:04:05 AM GMT-8",
+        ),
+        (
+            "fmt('en-US', { timeZone: '+0530', timeStyle: 'long' }, T)",
+            "8:34:05 PM GMT+5:30",
+        ),
+        (
+            "new Date(S).toLocaleString('en-US', { timeZone: 'America/Chicago' })",
+            "7/4/2026, 1:30:15 PM",
+        ),
+        (
+            "new Date(S).toLocaleTimeString('en-US', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit', hour12: false })",
+            "20:30",
+        ),
+        (
+            "['us/pacific', 'AMERICA/new_york', 'Asia/Kolkata', 'Europe/Kyiv', 'GB', 'EST', 'Etc/GMT+5', 'etc/utc', 'GMT0', '-0800', '-00:00'].map((z) => new Intl.DateTimeFormat('en', { timeZone: z }).resolvedOptions().timeZone)",
+            "America/Los_Angeles,America/New_York,Asia/Calcutta,Europe/Kiev,Europe/London,America/Panama,Etc/GMT+5,UTC,UTC,-08:00,+00:00",
+        ),
+        (
+            "['America/Nowhere', 'Etc/Unknown', 'Etc/GMT+13', 'GMT+5', 'UTC+1', '+24:00', ' UTC', ''].map((z) => { try { new Intl.DateTimeFormat('en', { timeZone: z }); return 'ok'; } catch (e) { return e.name; } })",
+            "RangeError,RangeError,RangeError,RangeError,RangeError,RangeError,RangeError,RangeError",
+        ),
+        (
+            "[Intl.supportedValuesOf('timeZone').length, Intl.supportedValuesOf('timeZone').slice(0, 2), Intl.supportedValuesOf('timeZone').includes('America/New_York'), Intl.supportedValuesOf('timeZone').includes('UTC')]",
+            "418,Africa/Abidjan,Africa/Accra,true,false",
+        ),
+    ]);
+}
+
+/// Zone names in the styles pages use most. North American zones, Greenwich
+/// Mean Time and UTC have short names in en-US; the rest have none there,
+/// and Chrome writes their offset.
+#[test]
+fn time_zone_names() {
+    check_dates(&[
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeStyle: 'long' }, T)",
+            "10:04:05 AM EST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeStyle: 'long' }, S)",
+            "2:30:15 PM EDT",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeStyle: 'full' }, T)",
+            "10:04:05 AM Eastern Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeStyle: 'full' }, S)",
+            "2:30:15 PM Eastern Daylight Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeZoneName: 'short' }, T)",
+            "11/10/2026, EST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeZoneName: 'shortOffset' }, T)",
+            "11/10/2026, GMT-5",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeZoneName: 'longOffset' }, T)",
+            "11/10/2026, GMT-05:00",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Chicago', timeStyle: 'long' }, S)",
+            "1:30:15 PM CDT",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Denver', timeStyle: 'long' }, T)",
+            "8:04:05 AM MST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Phoenix', timeStyle: 'long' }, S)",
+            "11:30:15 AM MST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Los_Angeles', timeStyle: 'full' }, S)",
+            "11:30:15 AM Pacific Daylight Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Anchorage', timeStyle: 'long' }, T)",
+            "6:04:05 AM AKST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Pacific/Honolulu', timeStyle: 'long' }, T)",
+            "5:04:05 AM HST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Halifax', timeStyle: 'long' }, S)",
+            "3:30:15 PM ADT",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Toronto', timeStyle: 'long' }, T)",
+            "10:04:05 AM EST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/London', timeStyle: 'long' }, T)",
+            "3:04:05 PM GMT",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/London', timeStyle: 'full' }, T)",
+            "3:04:05 PM Greenwich Mean Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/London', timeStyle: 'long' }, S)",
+            "7:30:15 PM GMT+1",
+        ),
+        // Node 22 gives 3:04:05 PM GMT here.
+        (
+            "fmt('en-US', { timeZone: 'Europe/Lisbon', timeStyle: 'long' }, T)",
+            "3:04:05 PM GMT+0",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/Berlin', timeStyle: 'long' }, T)",
+            "4:04:05 PM GMT+1",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Asia/Kolkata', timeStyle: 'long' }, T)",
+            "8:34:05 PM GMT+5:30",
+        ),
+        // Node 22 gives 11/10/2026, GMT here.
+        (
+            "fmt('en-US', { timeZone: 'UTC', timeZoneName: 'shortOffset' }, T)",
+            "11/10/2026, GMT+0",
+        ),
+        // Node 22 gives 11/10/2026, GMT here.
+        (
+            "fmt('en-US', { timeZone: 'UTC', timeZoneName: 'longOffset' }, T)",
+            "11/10/2026, GMT+00:00",
+        ),
+        (
+            "fmt('en-US', { timeZone: '+00:00', timeStyle: 'full' }, T)",
+            "3:04:05 PM Greenwich Mean Time",
+        ),
+        // Node 22 gives 2:30:15 p.m. Eastern Daylight Saving Time here.
+        (
+            "fmt('en-CA', { timeZone: 'America/New_York', timeStyle: 'full' }, S)",
+            "2:30:15 p.m. Eastern Daylight Time",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'America/New_York', timeStyle: 'long' }, T)",
+            "10:04:05 GMT-5",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'America/New_York', timeStyle: 'full' }, T)",
+            "10:04:05 Eastern Standard Time",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'Europe/London', timeStyle: 'long' }, T)",
+            "15:04:05 GMT",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'America/New_York', timeStyle: 'long' }, T)",
+            "10:04:05 GMT-5",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', timeStyle: 'full' }, T)",
+            "15:04:05 Koordinierte Weltzeit",
+        ),
+    ]);
+}
+
+/// Long names, the short names en-CA, en-GB and German add, and generic
+/// names. A zone moves between metazones over the years, and a generic name
+/// is the standard one where the zone keeps one time all year. The generic
+/// names Chrome makes from a country or city (Germany Time) are not
+/// implemented and stay offsets, so none is here.
+#[test]
+fn metazone_names() {
+    check_dates(&[
+        (
+            "fmt('en-US', { timeZone: 'Europe/Berlin', timeStyle: 'full' }, T)",
+            "4:04:05 PM Central European Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/Berlin', timeStyle: 'full' }, S)",
+            "8:30:15 PM Central European Summer Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Asia/Kolkata', timeStyle: 'full' }, T)",
+            "8:34:05 PM India Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Asia/Tokyo', timeZoneName: 'long' }, T)",
+            "11/11/2026, Japan Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Australia/Sydney', timeZoneName: 'long' }, T)",
+            "11/11/2026, Australian Eastern Daylight Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/London', timeZoneName: 'long' }, S)",
+            "7/4/2026, British Summer Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/Dublin', timeZoneName: 'long' }, S)",
+            "7/4/2026, Irish Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/Moscow', timeZoneName: 'long' }, T)",
+            "11/10/2026, Moscow Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/Moscow', timeZoneName: 'long' }, Date.UTC(2012, 0, 15))",
+            "1/15/2012, Moscow Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Indiana/Knox', timeZoneName: 'long' }, Date.UTC(2000, 0, 15))",
+            "1/14/2000, Eastern Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Asia/Almaty', timeZoneName: 'long' }, T)",
+            "11/10/2026, Kazakhstan Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Africa/Casablanca', timeZoneName: 'long' }, S)",
+            "7/4/2026, GMT+01:00",
+        ),
+        // Node 22 gives 11/10/2026, West Africa Standard Time here.
+        (
+            "fmt('en-US', { timeZone: 'Africa/Lagos', timeZoneName: 'long' }, T)",
+            "11/10/2026, West Africa Time",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/St_Johns', timeStyle: 'long' }, T)",
+            "11:34:05 a.m. NST",
+        ),
+        (
+            "fmt('en-CA', { timeZone: 'America/Miquelon', timeZoneName: 'long' }, T)",
+            "2026-11-10, Saint-Pierre-et-Miquelon Standard Time",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'Europe/London', timeStyle: 'long' }, S)",
+            "19:30:15 BST",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'Europe/Paris', timeStyle: 'long' }, S)",
+            "20:30:15 CEST",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'Europe/Athens', timeStyle: 'long' }, T)",
+            "17:04:05 EET",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'Asia/Dubai', timeStyle: 'long' }, T)",
+            "19:04:05 GST",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'Europe/Paris', timeStyle: 'full' }, T)",
+            "16:04:05 Central European Standard Time",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'America/Miquelon', timeZoneName: 'long' }, T)",
+            "10/11/2026, St Pierre & Miquelon Standard Time",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'Europe/Berlin', timeStyle: 'long' }, T)",
+            "16:04:05 MEZ",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'Europe/Berlin', timeStyle: 'long' }, S)",
+            "20:30:15 MESZ",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'Europe/Berlin', timeStyle: 'full' }, S)",
+            "20:30:15 Mitteleuropäische Sommerzeit",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'America/New_York', timeStyle: 'full' }, T)",
+            "10:04:05 Nordamerikanische Ostküsten-Normalzeit",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'Europe/London', timeStyle: 'full' }, T)",
+            "15:04:05 Mittlere Greenwich-Zeit",
+        ),
+        // Node 22 gives 15:04:05 GMT here.
+        (
+            "fmt('de-DE', { timeZone: 'Europe/London', timeStyle: 'long' }, T)",
+            "15:04:05 GMT+0",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'Asia/Tokyo', timeStyle: 'full' }, T)",
+            "00:04:05 Japanische Normalzeit",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeZoneName: 'shortGeneric' }, T)",
+            "11/10/2026, ET",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/New_York', timeZoneName: 'longGeneric' }, S)",
+            "7/4/2026, Eastern Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', timeZoneName: 'shortGeneric' }, S)",
+            "11 AM PT",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Phoenix', timeZoneName: 'shortGeneric' }, S)",
+            "7/4/2026, MST",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'America/Phoenix', timeZoneName: 'longGeneric' }, S)",
+            "7/4/2026, Mountain Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Europe/Berlin', timeZoneName: 'longGeneric' }, T)",
+            "11/10/2026, Central European Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Asia/Kolkata', timeZoneName: 'longGeneric' }, T)",
+            "11/10/2026, India Standard Time",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'Australia/Sydney', timeZoneName: 'longGeneric' }, T)",
+            "11/11/2026, Australian Eastern Time",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'Europe/Paris', timeZoneName: 'shortGeneric' }, T)",
+            "10/11/2026, CET",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'Europe/Berlin', timeZoneName: 'shortGeneric' }, S)",
+            "4.7.2026, MEZ",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'Europe/Berlin', timeZoneName: 'longGeneric' }, S)",
+            "4.7.2026, Mitteleuropäische Zeit",
+        ),
+    ]);
+}
+
+/// en-GB and de-DE: day first, their own separators, 24-hour times.
+#[test]
+fn en_gb_and_de_dates() {
+    check_dates(&[
+        ("fmt('en-GB', { timeZone: 'UTC' }, M)", "05/03/2027"),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }, M)",
+            "05/03/2027",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', year: '2-digit', month: 'numeric', day: 'numeric' }, M)",
+            "05/03/27",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', month: 'numeric', day: 'numeric' }, M)",
+            "05/03",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', dateStyle: 'full' }, T)",
+            "Tuesday, 10 November 2026",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', dateStyle: 'long' }, T)",
+            "10 November 2026",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', dateStyle: 'medium' }, T)",
+            "10 Nov 2026",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', dateStyle: 'short' }, T)",
+            "10/11/2026",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' }, T)",
+            "10 Nov 2026, 15:04",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', dateStyle: 'long', timeStyle: 'short' }, T)",
+            "10 November 2026 at 15:04",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', timeStyle: 'medium', hour12: true }, T)",
+            "03:04:05 pm",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit' }, M)",
+            "0:09",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' }, T)",
+            "Tue 10 Nov",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }, T)",
+            "Tuesday, 10 November 2026",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', month: 'short', year: 'numeric' }, Date.UTC(2026, 8, 15))",
+            "Sept 2026",
+        ),
+        (
+            "fmt('en-GB', { timeZone: 'UTC', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }, T)",
+            "10/11/2026, 15:04:05",
+        ),
+        (
+            "new Date(T).toLocaleDateString('en-GB', { timeZone: 'UTC' })",
+            "10/11/2026",
+        ),
+        (
+            "new Date(T).toLocaleString('en-GB', { timeZone: 'UTC' })",
+            "10/11/2026, 15:04:05",
+        ),
+        ("fmt('de-DE', { timeZone: 'UTC' }, M)", "5.3.2027"),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }, M)",
+            "05.03.2027",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', month: 'numeric', day: 'numeric' }, M)",
+            "5.3.",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', year: 'numeric', month: 'numeric' }, M)",
+            "3/2027",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', dateStyle: 'full' }, M)",
+            "Freitag, 5. März 2027",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', dateStyle: 'long' }, M)",
+            "5. März 2027",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', dateStyle: 'medium' }, M)",
+            "05.03.2027",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', dateStyle: 'short' }, M)",
+            "05.03.27",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' }, T)",
+            "10.11.2026, 15:04",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', dateStyle: 'long', timeStyle: 'short' }, T)",
+            "10. November 2026 um 15:04",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', hour: 'numeric' }, T)",
+            "15 Uhr",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit', hour12: true }, T)",
+            "3:04 PM",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' }, M)",
+            "Fr., 5. März",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', month: 'short' }, M)",
+            "Mär",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', weekday: 'short' }, M)",
+            "Fr",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', month: 'long', year: 'numeric' }, M)",
+            "März 2027",
+        ),
+        (
+            "fmt('de-DE', { timeZone: 'UTC', minute: 'numeric', second: 'numeric', fractionalSecondDigits: 2 }, T)",
+            "04:05,67",
+        ),
+        (
+            "fmt('de', { timeZone: 'Europe/Berlin', dateStyle: 'medium', timeStyle: 'medium' }, S)",
+            "04.07.2026, 20:30:15",
+        ),
+        (
+            "new Date(M).toLocaleDateString('de-DE', { timeZone: 'UTC' })",
+            "5.3.2027",
+        ),
+        (
+            "[new Intl.DateTimeFormat('de-DE').resolvedOptions().locale, new Intl.DateTimeFormat('en-GB', { hour: 'numeric' }).resolvedOptions().hourCycle, new Intl.DateTimeFormat('de-DE', { hour: 'numeric', hour12: true }).resolvedOptions().hourCycle, Intl.DateTimeFormat.supportedLocalesOf(['de-DE', 'en-GB', 'de'])]",
+            "de-DE,h23,h12,de-DE,en-GB,de",
+        ),
+    ]);
+}
+
+/// Field combinations that have no pattern of their own in the locale data
+/// and are put together the way ICU does it.
+#[test]
+fn pattern_selection() {
+    check_dates(&[
+        (
+            "fmt('en-US', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }, T)",
+            "November 10, 2026 at 3:04 PM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }, T)",
+            "Nov 10, 2026, 3:04 PM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }, T)",
+            "Tuesday, November 10 at 3:04 PM UTC",
+        ),
+        // Node 22 gives Tue, 3 PM here.
+        (
+            "fmt('en-US', { timeZone: 'UTC', weekday: 'short', hour: 'numeric' }, T)",
+            "Tue 3 PM",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', weekday: 'short', day: 'numeric' }, T)",
+            "10 Tue",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', hour: 'numeric', hour12: false }, M)",
+            "00",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', hour: 'numeric', minute: 'numeric', hour12: false }, M)",
+            "00:09",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', minute: 'numeric' }, T)",
+            "4",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', year: 'numeric', month: '2-digit' }, M)",
+            "03/2027",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', dateStyle: 'long', timeStyle: 'short', hour12: false }, T)",
+            "November 10, 2026 at 15:04",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', dateStyle: 'full', timeStyle: 'long' }, T)",
+            "Tuesday, November 10, 2026 at 3:04:05 PM UTC",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', hour: 'numeric', dayPeriod: 'short' }, M)",
+            "12 in the morning",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', hour: 'numeric', dayPeriod: 'long' }, 1804248000000)",
+            "12 noon",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', hour: 'numeric', minute: 'numeric', dayPeriod: 'long' }, 1804249800000)",
+            "12:30 in the afternoon",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', era: 'short', year: 'numeric' }, Date.UTC(-500, 5, 1))",
+            "501 BC",
+        ),
+        (
+            "fmt('en-US', { timeZone: 'UTC', year: 'numeric' }, Date.UTC(-500, 5, 1))",
+            "501",
+        ),
+    ]);
 }
 
 #[test]
