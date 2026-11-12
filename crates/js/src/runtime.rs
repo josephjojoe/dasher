@@ -525,6 +525,7 @@ impl JsRuntime {
             .map_err(|e| ScriptError::new(ErrorKind::Internal, e))?;
 
         let (runtime, heap) = heap::new_runtime(options.memory_limit).map_err(internal)?;
+        crate::regexp::install();
         runtime.set_max_stack_size(options.max_stack_size);
         if let Some(threshold) = options.gc_threshold {
             runtime.set_gc_threshold(threshold);

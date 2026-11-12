@@ -1,5 +1,6 @@
-//! The JS heap allocator: the C allocator QuickJS uses by default, with
-//! dasher's memory limit enforced here instead of inside QuickJS.
+//! The JS heap allocator: dasher's slab allocator (see [`crate::slab`])
+//! in place of the C allocator QuickJS uses by default, with dasher's
+//! memory limit enforced here instead of inside QuickJS.
 //!
 //! QuickJS checks its own limit before calling the allocator and, when it
 //! cannot even allocate the error object, throws `null`, which is
@@ -87,14 +88,8 @@ pub(crate) fn new_runtime(limit: Option<usize>) -> rquickjs::Result<(Runtime, Rc
     Ok((runtime, state))
 }
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_vendor = "apple"
-))]
+#[cfg(unix)]
 mod imp {
-    use std::ffi::c_void;
     use std::ptr;
     use std::rc::Rc;
 
@@ -103,98 +98,103 @@ mod imp {
 
     use super::HeapState;
 
-    unsafe extern "C" {
-        fn malloc(size: usize) -> *mut c_void;
-        fn calloc(count: usize, size: usize) -> *mut c_void;
-        fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
-        fn free(ptr: *mut c_void);
-        #[cfg_attr(target_vendor = "apple", link_name = "malloc_size")]
-        #[cfg_attr(not(target_vendor = "apple"), link_name = "malloc_usable_size")]
-        fn usable_size(ptr: *const c_void) -> usize;
+    /// The JS heap on dasher's slab allocator, with the limit in front.
+    struct SlabAllocator {
+        heap: crate::slab::SlabHeap,
+        state: Rc<HeapState>,
     }
 
-    struct LimitedAllocator(Rc<HeapState>);
-
-    impl LimitedAllocator {
-        fn track(&self, ptr: *mut c_void) -> *mut u8 {
+    impl SlabAllocator {
+        #[inline]
+        fn track(&self, ptr: *mut u8) -> *mut u8 {
             if !ptr.is_null() {
-                // SAFETY: `ptr` was just returned by the C allocator.
-                let size = unsafe { usable_size(ptr) };
-                self.0.used.set(self.0.used.get() + size);
+                // SAFETY: `ptr` was just returned by the heap.
+                let size = unsafe { crate::slab::usable_size(ptr) };
+                self.state.used.set(self.state.used.get() + size);
             }
-            ptr.cast()
+            ptr
         }
     }
 
-    // SAFETY: every pointer handed out comes from the C allocator, and is
-    // freed, resized and measured only through it.
-    unsafe impl Allocator for LimitedAllocator {
+    // SAFETY: every pointer handed out comes from `heap`, and is freed,
+    // resized and measured only through it.
+    unsafe impl Allocator for SlabAllocator {
         fn alloc(&mut self, size: usize) -> *mut u8 {
-            if !self.0.admit(size) {
+            if !self.state.admit(size) {
                 return ptr::null_mut();
             }
-            // SAFETY: `malloc` has no preconditions; a null result is passed
-            // through as an allocation failure.
-            self.track(unsafe { malloc(size) })
+            let ptr = self.heap.alloc(size);
+            self.track(ptr)
         }
 
         fn calloc(&mut self, count: usize, size: usize) -> *mut u8 {
             let Some(total) = count.checked_mul(size) else {
                 return ptr::null_mut();
             };
-            if !self.0.admit(total) {
+            if !self.state.admit(total) {
                 return ptr::null_mut();
             }
-            // SAFETY: `calloc` has no preconditions; a null result is passed
-            // through as an allocation failure.
-            self.track(unsafe { calloc(count, size) })
+            let ptr = self.heap.alloc(total);
+            if !ptr.is_null() {
+                // SAFETY: a fresh block of at least `total` bytes.
+                unsafe { ptr::write_bytes(ptr, 0, total) };
+            }
+            self.track(ptr)
         }
 
         unsafe fn dealloc(&mut self, ptr: *mut u8) {
             if ptr.is_null() {
                 return;
             }
-            // SAFETY: the caller passes a live pointer from this allocator.
-            let size = unsafe { usable_size(ptr.cast()) };
-            self.0.used.set(self.0.used.get().saturating_sub(size));
-            // SAFETY: as above; it is not used again after this call.
-            unsafe { free(ptr.cast()) };
+            // SAFETY: the caller passes a live pointer from this allocator,
+            // which is not used again after this call.
+            unsafe {
+                let size = crate::slab::usable_size(ptr);
+                self.state
+                    .used
+                    .set(self.state.used.get().saturating_sub(size));
+                self.heap.free(ptr);
+            }
         }
 
         unsafe fn realloc(&mut self, ptr: *mut u8, new_size: usize) -> *mut u8 {
+            if ptr.is_null() {
+                return self.alloc(new_size);
+            }
             // SAFETY: the caller passes a live pointer from this allocator.
-            let old_size = unsafe { usable_size(ptr.cast()) };
-            if new_size > old_size && !self.0.admit(new_size - old_size) {
+            let old_size = unsafe { crate::slab::usable_size(ptr) };
+            if new_size > old_size && !self.state.admit(new_size - old_size) {
                 return ptr::null_mut();
             }
             // SAFETY: as above; on success the old pointer is no longer used.
-            let new = unsafe { realloc(ptr.cast(), new_size) };
+            let new = unsafe { self.heap.realloc(ptr, new_size.max(1)) };
             if new.is_null() {
                 return ptr::null_mut();
             }
-            self.0.used.set(self.0.used.get().saturating_sub(old_size));
+            self.state
+                .used
+                .set(self.state.used.get().saturating_sub(old_size));
             self.track(new)
         }
 
         unsafe fn usable_size(ptr: *mut u8) -> usize {
             // SAFETY: the caller passes a live pointer from this allocator.
-            unsafe { usable_size(ptr.cast()) }
+            unsafe { crate::slab::usable_size(ptr) }
         }
     }
 
     pub(super) fn new_runtime(state: &Rc<HeapState>) -> rquickjs::Result<Runtime> {
-        Runtime::new_with_alloc(LimitedAllocator(Rc::clone(state)))
+        Runtime::new_with_alloc(SlabAllocator {
+            heap: crate::slab::SlabHeap::new(),
+            state: Rc::clone(state),
+        })
     }
 }
 
-/// Platforms without `malloc_usable_size`: QuickJS enforces the limit itself
-/// and allocation failures that throw `null` are reported as such.
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_vendor = "apple"
-)))]
+/// Platforms without `mmap`: QuickJS uses the C allocator and enforces the
+/// limit itself, and allocation failures that throw `null` are reported as
+/// such.
+#[cfg(not(unix))]
 mod imp {
     use std::rc::Rc;
 

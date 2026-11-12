@@ -351,9 +351,13 @@ mod media;
 mod modules;
 mod net;
 mod random;
+#[doc(hidden)]
+pub mod regexp;
 mod remote;
 mod run;
 mod runtime;
+#[cfg(unix)]
+mod slab;
 mod storage;
 mod timers;
 mod urls;

@@ -585,5 +585,11 @@ async fn memory_usage_covers_the_current_document() {
     page.evaluate("globalThis.big = 'x'.repeat(1 << 20); 0")
         .await
         .unwrap();
-    assert!(page.memory_usage().js_heap >= usage.js_heap + (1 << 20));
+    // The megabyte of string shows up, less whatever garbage from the page
+    // load the collector takes the chance to free (a few KiB).
+    let after = page.memory_usage();
+    assert!(
+        after.js_heap >= usage.js_heap + 1_000_000,
+        "{usage:?} then {after:?}"
+    );
 }

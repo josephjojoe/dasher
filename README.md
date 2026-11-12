@@ -57,7 +57,10 @@ crates:
 
 - **JavaScript:** [QuickJS](https://bellard.org/quickjs/) via
   [rquickjs](https://crates.io/crates/rquickjs), chosen over V8 for memory and
-  size.
+  size. The engine is built from [`vendor/rquickjs-sys`](vendor/rquickjs-sys),
+  which carries a few changes of dasher's own; its
+  [`PATCHES.md`](vendor/rquickjs-sys/PATCHES.md) lists them. Its heap is a
+  slab allocator of dasher's (`crates/js/src/slab.rs`), not `malloc`.
 - **HTML parsing:** [html5ever](https://crates.io/crates/html5ever) tokenizes
   and builds the tree, into dasher's own arena DOM.
 - **HTTP:** [hyper](https://crates.io/crates/hyper) with

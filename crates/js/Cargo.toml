@@ -16,11 +16,17 @@ dasher-css.workspace = true
 dasher-dom.workspace = true
 dasher-net.workspace = true
 getrandom = "0.2"
+# Scans a regexp's subject for the characters a match can start with.
+memchr = "2"
 # Already linked for TLS by dasher-net; used here for crypto.subtle.digest.
 ring = { version = "0.17", default-features = false }
 rquickjs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 url = "2"
+
+[target.'cfg(unix)'.dependencies]
+# mmap and friends, for the JS heap's slab allocator.
+libc = "0.2"
 
 [dev-dependencies]
 dasher-test-server.workspace = true
