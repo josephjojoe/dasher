@@ -13541,6 +13541,9 @@ static JSValue JS_ToStringInternal(JSContext *ctx, JSValueConst val,
 
 JSValue JS_ToString(JSContext *ctx, JSValueConst val)
 {
+    /* dasher: a string is its own string, without the call */
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_STRING)
+        return js_dup(val);
     return JS_ToStringInternal(ctx, val, /*flags*/0);
 }
 
@@ -44231,11 +44234,51 @@ static int string_indexof_char(JSString *p, int c, int from)
                 return i;
         }
     } else {
-        if ((c & ~0xff) == 0) {
-            for (i = from; i < len; i++) {
-                if (str8(p)[i] == (uint8_t)c)
-                    return i;
-            }
+        if ((c & ~0xff) == 0 && from < len) {
+            /* dasher: memchr */
+            const uint8_t *s = str8(p);
+            const uint8_t *q = memchr(s + from, c, len - from);
+            return q ? q - s : -1;
+        }
+    }
+    return -1;
+}
+
+/* dasher: whether p2 is at position 'pos' of p1 (pos + p2->len <= p1->len) */
+static bool string_match_at(JSString *p1, JSString *p2, int pos)
+{
+    int len2 = p2->len;
+    if (p1->is_wide_char == p2->is_wide_char) {
+        return memcmp(str8(p1) + (pos << p1->is_wide_char), str8(p2),
+                      len2 << p2->is_wide_char) == 0;
+    }
+    return string_cmp(p1, p2, pos, 0, len2) == 0;
+}
+
+/* dasher: the last position <= 'from' of p2 in p1, or -1 */
+static int string_lastindexof(JSString *p1, JSString *p2, int from)
+{
+    int i, c, len2 = p2->len;
+    if (len2 > p1->len)
+        return -1;
+    if (from > p1->len - len2)
+        from = p1->len - len2;
+    if (len2 == 0)
+        return from;
+    c = string_get(p2, 0);
+    if (!p1->is_wide_char) {
+        const uint8_t *s = str8(p1);
+        if (c > 0xff)
+            return -1;
+        for (i = from; i >= 0; i--) {
+            if (s[i] == c && string_match_at(p1, p2, i))
+                return i;
+        }
+    } else {
+        const uint16_t *s = str16(p1);
+        for (i = from; i >= 0; i--) {
+            if (s[i] == c && string_match_at(p1, p2, i))
+                return i;
         }
     }
     return -1;
@@ -44247,11 +44290,29 @@ static int string_indexof(JSString *p1, JSString *p2, int from)
     int c, i, j, len1 = p1->len, len2 = p2->len;
     if (len2 == 0)
         return from;
+    if (!p1->is_wide_char && !p2->is_wide_char) {
+        /* dasher: memchr for the first character, memcmp for the rest */
+        const uint8_t *s1 = str8(p1), *s2 = str8(p2), *q, *end;
+        if (len2 > len1 - from)
+            return -1;
+        q = s1 + from;
+        end = s1 + len1 - len2 + 1;
+        c = s2[0];
+        while (q < end) {
+            q = memchr(q, c, end - q);
+            if (!q)
+                break;
+            if (memcmp(q + 1, s2 + 1, len2 - 1) == 0)
+                return q - s1;
+            q++;
+        }
+        return -1;
+    }
     for (i = from, c = string_get(p2, 0); i + len2 <= len1; i = j + 1) {
         j = string_indexof_char(p1, c, i);
         if (j < 0 || j + len2 > len1)
             break;
-        if (!string_cmp(p1, p2, j + 1, 1, len2 - 1))
+        if (string_match_at(p1, p2, j))
             return j;
     }
     return -1;
@@ -44390,15 +44451,13 @@ static JSValue js_string_indexOf(JSContext *ctx, JSValueConst this_val,
     }
     ret = -1;
     if (len >= v_len && inc * (stop - start) >= 0) {
-        for (i = start;; i += inc) {
-            if (!string_cmp(p, p1, i, 0, v_len)) {
-                ret = i;
-                break;
-            }
-            if (i == stop)
-                break;
-        }
+        /* dasher: the searches above, not a comparison at each position */
+        if (inc > 0)
+            ret = string_indexof(p, p1, start);
+        else
+            ret = string_lastindexof(p, p1, start);
     }
+    (void)i;
     JS_FreeValue(ctx, str);
     JS_FreeValue(ctx, v);
     return js_int32(ret);
@@ -44456,15 +44515,13 @@ static JSValue js_string_includes(JSContext *ctx, JSValueConst this_val,
         start = stop = pos;
     }
     if (start >= 0 && start <= stop) {
-        for (i = start;; i++) {
-            if (!string_cmp(p, p1, i, 0, v_len)) {
-                ret = 1;
-                break;
-            }
-            if (i == stop)
-                break;
-        }
+        /* dasher: one search, or one comparison for startsWith/endsWith */
+        if (magic == 0)
+            ret = string_indexof(p, p1, start) >= 0;
+        else
+            ret = string_match_at(p, p1, start);
     }
+    (void)i;
  done:
     JS_FreeValue(ctx, str);
     JS_FreeValue(ctx, v);
@@ -44698,7 +44755,10 @@ static JSValue js_string_replace(JSContext *ctx, JSValueConst this_val,
             return JS_CallFree(ctx, replacer, searchValue, 2, args);
         }
     }
-    string_buffer_init(ctx, b, 0);
+    /* dasher: the buffer is made at the first match, about the size of
+       the result */
+    b->ctx = ctx;
+    b->str = NULL;
 
     str = JS_ToString(ctx, O);
     if (JS_IsException(str))
@@ -44743,6 +44803,10 @@ static JSValue js_string_replace(JSContext *ctx, JSValueConst this_val,
             args[1] = js_int32(pos);
             args[2] = str;
             repl_str = JS_ToStringFree(ctx, JS_Call(ctx, replaceValue, JS_UNDEFINED, 3, args));
+        } else if (string_indexof_char(JS_VALUE_GET_STRING(replaceValue_str),
+                                       '$', 0) < 0) {
+            /* dasher: no '$' patterns: the replacement is used as it is */
+            repl_str = js_dup(replaceValue_str);
         } else {
             args[0] = search_str;
             args[1] = str;
@@ -44755,6 +44819,12 @@ static JSValue js_string_replace(JSContext *ctx, JSValueConst this_val,
         if (JS_IsException(repl_str))
             goto exception;
 
+        if (!b->str &&
+            string_buffer_init(ctx, b, sp->len - searchp->len +
+                               JS_VALUE_GET_STRING(repl_str)->len)) {
+            JS_FreeValue(ctx, repl_str);
+            goto exception;
+        }
         string_buffer_concat(b, sp, endOfLastMatch, pos);
         string_buffer_concat_value_free(b, repl_str);
         endOfLastMatch = pos + searchp->len;
@@ -44836,17 +44906,79 @@ static JSValue js_string_split(JSContext *ctx, JSValueConst this_val,
         goto done;
     }
     q = p;
-    for (q = p; (q += !r) <= s - r - !r; q = p = e + r) {
-        e = string_indexof(sp, rp, q);
-        if (e < 0)
-            break;
-        T = js_sub_string(ctx, sp, p, e);
-        if (JS_IsException(T))
-            goto exception;
-        if (JS_CreateDataPropertyUint32(ctx, A, lengthA++, T, 0) < 0)
-            goto exception;
-        if (lengthA == lim)
+    /* dasher: the pieces of a split by a string are collected and the
+       array made from them at once; nothing else can see A meanwhile */
+    {
+        JSValue tab_buf[16], *tab = tab_buf, *new_tab;
+        uint32_t n = 0, size = countof(tab_buf);
+        bool full = false;
+
+        for (q = p; (q += !r) <= s - r - !r; q = p = e + r) {
+            e = string_indexof(sp, rp, q);
+            if (e < 0)
+                break;
+            T = js_sub_string(ctx, sp, p, e);
+            if (JS_IsException(T))
+                goto split_fail;
+            if (n >= size) {
+                size *= 2;
+                if (tab == tab_buf) {
+                    new_tab = js_malloc(ctx, sizeof(*tab) * size);
+                    if (new_tab)
+                        memcpy(new_tab, tab_buf, sizeof(tab_buf));
+                } else {
+                    new_tab = js_realloc(ctx, tab, sizeof(*tab) * size);
+                }
+                if (!new_tab) {
+                    JS_FreeValue(ctx, T);
+                    goto split_fail;
+                }
+                tab = new_tab;
+            }
+            tab[n++] = T;
+            if (n == lim) {
+                full = true;
+                break;
+            }
+        }
+        if (n > 0 || full) {
+            if (!full) {
+                T = js_sub_string(ctx, sp, p, s);
+                if (JS_IsException(T))
+                    goto split_fail;
+                if (n >= size) {
+                    if (tab == tab_buf) {
+                        new_tab = js_malloc(ctx, sizeof(*tab) * (n + 1));
+                        if (new_tab)
+                            memcpy(new_tab, tab_buf, sizeof(tab_buf));
+                    } else {
+                        new_tab = js_realloc(ctx, tab, sizeof(*tab) * (n + 1));
+                    }
+                    if (!new_tab) {
+                        JS_FreeValue(ctx, T);
+                        goto split_fail;
+                    }
+                    tab = new_tab;
+                }
+                tab[n++] = T;
+            }
+            JS_FreeValue(ctx, A);
+            /* takes the values, even when it fails */
+            A = JS_NewArrayFrom(ctx, n, tab);
+            if (tab != tab_buf)
+                js_free(ctx, tab);
+            if (JS_IsException(A))
+                goto exception;
             goto done;
+        split_fail:
+            while (n > 0)
+                JS_FreeValue(ctx, tab[--n]);
+            if (tab != tab_buf)
+                js_free(ctx, tab);
+            goto exception;
+        }
+        if (tab != tab_buf)
+            js_free(ctx, tab);
     }
 add_tail:
     T = js_sub_string(ctx, sp, p, s);
@@ -45241,6 +45373,52 @@ static JSValue js_string_toLowerCase(JSContext *ctx, JSValueConst this_val,
     p = JS_VALUE_GET_STRING(val);
     if (p->len == 0)
         return val;
+    /* dasher: an 8-bit string maps character by character within Latin-1,
+       except for the three characters whose upper case is not in it */
+    if (!p->is_wide_char) {
+        const uint8_t *src = str8(p);
+        JSString *q;
+        int n = p->len, k;
+        for (k = 0; k < n; k++) {
+            c = src[k];
+            if (c == 0xb5 || c == 0xdf || c == 0xff) {
+                if (!to_lower)
+                    goto slow;
+            } else if (to_lower ? ((c >= 'A' && c <= 'Z') ||
+                                   (c >= 0xc0 && c <= 0xde && c != 0xd7))
+                                : ((c >= 'a' && c <= 'z') ||
+                                   (c >= 0xe0 && c <= 0xfe && c != 0xf7))) {
+                break;
+            }
+        }
+        if (k == n)
+            return val; /* nothing changes */
+        q = js_alloc_string(ctx, n, 0);
+        if (!q)
+            goto fail1;
+        memcpy(str8(q), src, k);
+        for (; k < n; k++) {
+            c = src[k];
+            if (to_lower) {
+                if ((c >= 'A' && c <= 'Z') ||
+                    (c >= 0xc0 && c <= 0xde && c != 0xd7))
+                    c += 0x20;
+            } else {
+                if (c == 0xb5 || c == 0xdf || c == 0xff) {
+                    js_free_string(ctx->rt, q);
+                    goto slow;
+                }
+                if ((c >= 'a' && c <= 'z') ||
+                    (c >= 0xe0 && c <= 0xfe && c != 0xf7))
+                    c -= 0x20;
+            }
+            str8(q)[k] = c;
+        }
+        str8(q)[n] = '\0';
+        JS_FreeValue(ctx, val);
+        return JS_MKPTR(JS_TAG_STRING, q);
+    }
+ slow:
     if (string_buffer_init(ctx, b, p->len))
         goto fail;
     for(i = 0; i < p->len;) {
@@ -45259,8 +45437,9 @@ static JSValue js_string_toLowerCase(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, val);
     return string_buffer_end(b);
  fail:
-    JS_FreeValue(ctx, val);
     string_buffer_free(b);
+ fail1:
+    JS_FreeValue(ctx, val);
     return JS_EXCEPTION;
 }
 
