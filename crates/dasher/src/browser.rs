@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dasher_js::{ClockMode, LayoutMode, RuntimeOptions, StorageStore, Viewport, WindowOptions};
+use dasher_js::{ClockMode, RuntimeOptions, StorageStore, Viewport, Visibility, WindowOptions};
 use dasher_net::header::{HeaderName, HeaderValue};
 use dasher_net::{Client, Cookie, CookieJar, HeaderMap, Proxy, RequestPolicy, Url, header};
 
@@ -151,7 +151,7 @@ pub struct BrowserBuilder {
     max_response_size: Option<u64>,
     root_certificates: Vec<Vec<u8>>,
     viewport: Viewport,
-    layout: LayoutMode,
+    visibility: Visibility,
     clock: ClockMode,
     memory_limit: Option<usize>,
     max_dom_nodes: Option<usize>,
@@ -171,7 +171,7 @@ impl Default for BrowserBuilder {
             max_response_size: None,
             root_certificates: Vec::new(),
             viewport: Viewport::default(),
-            layout: LayoutMode::default(),
+            visibility: Visibility::default(),
             clock: ClockMode::Virtual,
             memory_limit: Some(dasher_js::DEFAULT_MEMORY_LIMIT),
             max_dom_nodes: Some(dasher_js::DEFAULT_MAX_DOM_NODES),
@@ -275,11 +275,24 @@ impl BrowserBuilder {
         self
     }
 
-    /// How the synthetic layout decides what is in view. The default,
-    /// [`LayoutMode::InView`], counts every element as visible so
-    /// lazy-loaded content loads without scrolling.
-    pub fn layout(mut self, layout: LayoutMode) -> Self {
-        self.layout = layout;
+    /// What counts as in view, which decides how much lazily loaded
+    /// content pages fetch, and so trades CPU time and requests for
+    /// content:
+    ///
+    /// - [`Visibility::Loaded`] (the default): what the document holds
+    ///   once the load event has run is in view, so lazy sections and
+    ///   images present at load arrive; what the page appends after that
+    ///   is below the fold until auto-scroll reveals it, so no loader can
+    ///   keep itself going.
+    /// - [`Visibility::All`]: everything is in view, whenever it was
+    ///   inserted. The most content, but a page whose loader checks for
+    ///   visibility after each batch loads until the timeout.
+    /// - [`Visibility::Viewport`]: a real viewport; only what is scrolled
+    ///   to is in view. The least work, and the least lazy content.
+    ///
+    /// The README's "Visibility" section has what each cost on real pages.
+    pub fn visibility(mut self, visibility: Visibility) -> Self {
+        self.visibility = visibility;
         self
     }
 
@@ -337,7 +350,7 @@ impl BrowserBuilder {
 
         let mut window = WindowOptions {
             viewport: self.viewport,
-            layout: self.layout,
+            visibility: self.visibility,
             local_storage: StorageStore::new(),
             ..WindowOptions::default()
         };

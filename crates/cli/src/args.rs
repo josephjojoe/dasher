@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use dasher::Visibility;
+
 use crate::service::{self, ServeOptions};
 
 pub const USAGE: &str = "\
@@ -38,6 +40,16 @@ Browser:
                             wildcard: '*://*.doubleclick.net/*' (repeatable)
       --realtime            run timers in real time instead of skipping
                             ahead when the page is only waiting on them
+      --visibility <policy> what counts as in view, which decides how much
+                            lazy content loads [default: loaded]
+                              loaded    the page as it stood at load is in
+                                        view; what it adds later is below
+                                        the fold until --scroll reveals it
+                              all       everything, always: the most lazy
+                                        content, but a page that keeps
+                                        loading more can run to the timeout
+                              viewport  only what is scrolled to: the
+                                        least work and the least content
       --memory-limit <MiB>  cap the page's JS heap; 0 for no cap [default: 256]
       --max-dom-nodes <n>   cap the nodes in the page's DOM; 0 for no cap
                             [default: 500000]. A page over either limit is
@@ -96,6 +108,7 @@ pub struct Options {
     pub proxy: Option<String>,
     pub block: Vec<String>,
     pub realtime: bool,
+    pub visibility: Option<Visibility>,
     /// In MiB; `Some(0)` lifts the limit, `None` keeps the default.
     pub memory_limit: Option<usize>,
     /// `Some(0)` lifts the limit, `None` keeps the default.
@@ -123,6 +136,7 @@ impl Options {
             proxy: None,
             block: Vec::new(),
             realtime: false,
+            visibility: None,
             memory_limit: None,
             max_dom_nodes: None,
             eval: None,
@@ -203,6 +217,7 @@ pub fn parse(
             "--proxy" => options.proxy = Some(value("a proxy URL")?),
             "--block" => options.block.push(value("a URL pattern")?),
             "--realtime" => options.realtime = true,
+            "--visibility" => options.visibility = Some(parse_visibility(&value("a policy")?)?),
             "--memory-limit" => options.memory_limit = Some(number(&name, &value("MiB")?)?),
             "--max-dom-nodes" => options.max_dom_nodes = Some(number(&name, &value("a count")?)?),
             "-e" | "--eval" => options.eval = Some(value("an expression")?),
@@ -227,6 +242,12 @@ fn parse_wait(s: &str) -> Result<Wait, String> {
         "dom-quiet" => Wait::DomQuiet,
         "settled" => Wait::Settled,
         _ => return Err(format!("unknown --wait strategy {s:?}")),
+    })
+}
+
+fn parse_visibility(s: &str) -> Result<Visibility, String> {
+    Visibility::from_name(s).ok_or_else(|| {
+        format!("unknown --visibility policy {s:?}: expected loaded, all or viewport")
     })
 }
 
@@ -320,6 +341,8 @@ mod tests {
             "--block",
             "*track*",
             "--realtime",
+            "--visibility",
+            "viewport",
             "--memory-limit",
             "64",
             "--max-dom-nodes=0",
@@ -352,6 +375,7 @@ mod tests {
         assert_eq!(options.proxy.as_deref(), Some("http://proxy:3128"));
         assert_eq!(options.block, ["*ads*", "*track*"]);
         assert!(options.realtime && options.json && options.verbose);
+        assert_eq!(options.visibility, Some(Visibility::Viewport));
         assert_eq!(options.memory_limit, Some(64));
         assert_eq!(options.max_dom_nodes, Some(0));
         assert_eq!(options.eval.as_deref(), Some("document.title"));
@@ -377,6 +401,7 @@ mod tests {
         let err = |args: &[&str]| run(args).unwrap_err();
         assert_eq!(err(&[]), "no URL given");
         assert_eq!(err(&["a", "b"]), "only one URL may be given");
+        assert!(err(&["--visibility", "some", "x"]).contains("expected loaded, all or viewport"));
         assert_eq!(err(&["--bogus", "u"]), "unknown option --bogus");
         assert_eq!(err(&["u", "--eval"]), "--eval needs an expression");
         assert_eq!(err(&["u", "--json=yes"]), "--json takes no value");

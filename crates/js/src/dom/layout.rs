@@ -66,6 +66,89 @@ pub(crate) fn lines(doc: &Document, targets: &[NodeId]) -> Vec<i32> {
     out
 }
 
+/// Each target's place in the `loaded` visibility's layout, as `[line,
+/// lines]` pairs in one flat list. Only elements inserted in the
+/// document's current [insertion epoch](Document::insertion_epoch) (since
+/// the page last revealed what it holds), and elements inside them, take up
+/// a line; everything else is stacked at the top, taking none. So an
+/// element's line is the number of such appended elements before it in
+/// document order, and its span the number in its own subtree, itself
+/// included. Shadow trees are walked before their host's children.
+/// Elements outside `<body>` get `[-1, 0]`. While nothing has been
+/// inserted in the current epoch, every target gets `[0, 0]` at once.
+pub(crate) fn loaded_lines(doc: &Document, targets: &[NodeId]) -> Vec<i32> {
+    let epoch = doc.insertion_epoch();
+    if epoch == 0 || !doc.inserted_in_epoch() {
+        return vec![0; 2 * targets.len()];
+    }
+    let mut out = [-1, 0].repeat(targets.len());
+    let Some(body) = doc.body() else {
+        return out;
+    };
+    let mut wanted: HashMap<NodeId, Vec<usize>> = HashMap::with_capacity(targets.len());
+    for (i, &t) in targets.iter().enumerate() {
+        wanted.entry(t).or_default().push(i);
+    }
+    let mut left = wanted.len();
+    let appended = |node: NodeId| doc.node_epoch(node) == epoch;
+    // An open element: its next child to visit, whether that cursor is
+    // still in its shadow tree, its line, and whether it is appended.
+    struct Open {
+        node: NodeId,
+        next: Option<NodeId>,
+        in_shadow: bool,
+        line: i32,
+        appended: bool,
+    }
+    let open_element = |node: NodeId, line: i32, appended: bool| {
+        let shadow = doc.shadow_root(node);
+        Open {
+            node,
+            next: match shadow {
+                Some(root) => doc.first_child(root),
+                None => doc.first_child(node),
+            },
+            in_shadow: shadow.is_some(),
+            line,
+            appended,
+        }
+    };
+    let body_appended = appended(body);
+    let mut next = i32::from(body_appended);
+    let mut open = vec![open_element(body, 0, body_appended)];
+    while let Some(top) = open.last_mut() {
+        match top.next {
+            Some(child) => {
+                top.next = doc.next_sibling(child);
+                if doc.is_element(child) {
+                    let is_appended = top.appended || appended(child);
+                    let element = open_element(child, next, is_appended);
+                    next += i32::from(is_appended);
+                    open.push(element);
+                }
+            }
+            None if top.in_shadow => {
+                top.in_shadow = false;
+                top.next = doc.first_child(top.node);
+            }
+            None => {
+                let done = open.pop().expect("not empty");
+                if let Some(indices) = wanted.get(&done.node) {
+                    for &i in indices {
+                        out[2 * i] = done.line;
+                        out[2 * i + 1] = next - done.line;
+                    }
+                    left -= 1;
+                    if left == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 impl DomState {
     /// Sets whether the layout hook wants to hear about changes, counting
     /// the document as seen as it is now.
@@ -81,6 +164,22 @@ impl DomState {
 }
 
 impl JsRuntime {
+    /// Counts everything in the document now as seen, for the
+    /// [`Visibility::Loaded`](crate::Visibility::Loaded) policy: it is all
+    /// in view from now on, and what is inserted after this call is below
+    /// the fold until the next one. The page loader calls it once the load
+    /// event has run, and auto-scroll before each round. Under the other
+    /// policies it changes nothing that scripts can see.
+    ///
+    /// `IntersectionObserver`s look again once the task queue next drains.
+    pub fn reveal(&self) {
+        let dom = &self.shared().dom;
+        dom.doc_mut().begin_insertion_epoch();
+        // Geometry changed without the tree changing: make the layout hook
+        // run on the next drain.
+        dom.layout_seen.set(dom.version().wrapping_sub(1));
+    }
+
     /// Calls the layout hook, followed by a microtask checkpoint, if the
     /// document changed since it last ran. Returns whether it ran.
     pub(crate) fn update_layout(&self) -> bool {
@@ -128,6 +227,34 @@ mod tests {
             [1, 4, 2, 1, 3, 2, 4, 1, 5, 1, -1, 0, 1, 4]
         );
         assert_eq!(lines(&doc, &[body]), [0, 6]);
+    }
+
+    #[test]
+    fn only_appended_elements_take_lines() {
+        let mut doc = Document::parse(
+            "<body><div id=a><p id=b>one</p></div><div id=c></div><footer id=e></footer></body>",
+        );
+        let [a, b, c, e] = ["a", "b", "c", "e"].map(|id| find(&doc, id));
+        // Before any epoch, and while nothing is inserted in it, all at 0.
+        assert_eq!(loaded_lines(&doc, &[a, e]), [0, 0, 0, 0]);
+        doc.begin_insertion_epoch();
+        assert_eq!(loaded_lines(&doc, &[a, e]), [0, 0, 0, 0]);
+        // Three appended elements in c push the footer three lines down;
+        // what came before stays put.
+        for _ in 0..2 {
+            let item = doc.create_element("li");
+            let inner = doc.create_element("b");
+            doc.append_child(item, inner).unwrap();
+            doc.append_child(c, item).unwrap();
+        }
+        let first = doc.first_child(c).unwrap();
+        assert_eq!(
+            loaded_lines(&doc, &[a, b, c, first, e]),
+            [0, 0, 0, 0, 0, 4, 0, 2, 4, 0]
+        );
+        // A new epoch counts all of it as seen.
+        doc.begin_insertion_epoch();
+        assert_eq!(loaded_lines(&doc, &[e]), [0, 0]);
     }
 
     #[test]
