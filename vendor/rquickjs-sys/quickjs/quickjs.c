@@ -50550,6 +50550,19 @@ static JSMapRecord *map_find_record(JSContext *ctx, JSMapState *s,
     h = map_hash_key(ctx, key) & (s->hash_size - 1);
     list_for_each(el, &s->hash_table[h]) {
         mr = list_entry(el, JSMapRecord, hash_link);
+        /* dasher: two ints, or two objects or symbols, are the same
+           value zero exactly when their bits are equal; every other pair
+           of keys is compared in full */
+        if (JS_VALUE_GET_TAG(mr->key) == JS_VALUE_GET_TAG(key) &&
+            (JS_VALUE_GET_TAG(key) == JS_TAG_INT ||
+             JS_VALUE_GET_TAG(key) == JS_TAG_OBJECT ||
+             JS_VALUE_GET_TAG(key) == JS_TAG_SYMBOL)) {
+            if (JS_VALUE_GET_TAG(key) == JS_TAG_INT ?
+                JS_VALUE_GET_INT(mr->key) == JS_VALUE_GET_INT(key) :
+                JS_VALUE_GET_PTR(mr->key) == JS_VALUE_GET_PTR(key))
+                return mr;
+            continue;
+        }
         if (js_same_value_zero(ctx, mr->key, key))
             return mr;
     }
