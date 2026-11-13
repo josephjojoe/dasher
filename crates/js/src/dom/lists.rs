@@ -367,6 +367,105 @@ pub(super) fn attributes<'c>(c: &'c Call<'_>, _: NodeId, _: &[qjs::JSValue]) -> 
     kept(c, Extra::Attributes, ListClass::NamedNodeMap, proto, None)
 }
 
+/// A new list over the call's node.
+fn fresh(
+    ctx: *mut qjs::JSContext,
+    members: &Members,
+    node: qjs::JSValue,
+    wrapper: &NodeWrapper<'_>,
+    class: ListClass,
+    filter: Filter,
+) -> std::result::Result<qjs::JSValue, Thrown> {
+    let proto = members.proto(match class {
+        ListClass::NodeList => Proto::NodeList,
+        _ => Proto::HtmlCollection,
+    });
+    let list = List::new(ctx, node, wrapper, Some(filter));
+    let obj = members.lists().create(ctx, class, proto, list);
+    // SAFETY: a tag check.
+    if unsafe { qjs::JS_IsException(obj) } {
+        return Err(Thrown::Pending);
+    }
+    Ok(obj)
+}
+
+pub(super) fn get_elements_by_tag_name<'c>(
+    c: &'c Call<'_>,
+    _: NodeId,
+    _: &[qjs::JSValue],
+) -> Outcome<'c> {
+    let name = c.str_arg(0)?.as_str().into_owned();
+    let filter = Filter::Tag(name);
+    fresh(
+        c.ctx,
+        c.members,
+        c.node,
+        c.wrapper,
+        ListClass::HtmlCollection,
+        filter,
+    )
+    .map(Ret::Value)
+}
+
+pub(super) fn get_elements_by_class_name<'c>(
+    c: &'c Call<'_>,
+    _: NodeId,
+    _: &[qjs::JSValue],
+) -> Outcome<'c> {
+    let names = c.str_arg(0)?.as_str().into_owned();
+    let filter = Filter::Class(names);
+    fresh(
+        c.ctx,
+        c.members,
+        c.node,
+        c.wrapper,
+        ListClass::HtmlCollection,
+        filter,
+    )
+    .map(Ret::Value)
+}
+
+pub(super) fn get_elements_by_name<'c>(
+    c: &'c Call<'_>,
+    _: NodeId,
+    _: &[qjs::JSValue],
+) -> Outcome<'c> {
+    let name = c.str_arg(0)?.as_str().into_owned();
+    let filter = Filter::Name(name);
+    fresh(
+        c.ctx,
+        c.members,
+        c.node,
+        c.wrapper,
+        ListClass::NodeList,
+        filter,
+    )
+    .map(Ret::Value)
+}
+
+pub(super) fn get_elements_by_tag_name_ns(
+    w: &super::members::Write<'_>,
+) -> std::result::Result<Ret<'static>, Thrown> {
+    let ns = w.arg(0);
+    // SAFETY: tag checks of a live value.
+    let ns = if unsafe { qjs::JS_IsNull(ns) || qjs::JS_IsUndefined(ns) } {
+        None
+    } else {
+        Some(w.str_arg(0)?.as_str().into_owned()).filter(|s| !s.is_empty())
+    };
+    let local = w.str_arg(1)?.as_str().into_owned();
+    let filter = Filter::TagNs(ns, local);
+    fresh(
+        w.ctx,
+        w.members,
+        w.node,
+        w.wrapper,
+        ListClass::HtmlCollection,
+        filter,
+    )
+    .map(Ret::Value)
+}
+
 /// The prototypes lists are made with.
 #[derive(Clone, Copy)]
 pub(crate) enum Proto {

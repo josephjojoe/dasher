@@ -252,6 +252,8 @@ const DOCUMENT: &[&str] = &["Document"];
 const NODE_LIST: Receiver = Receiver::List(ListClass::NodeList);
 const COLLECTION: Receiver = Receiver::List(ListClass::HtmlCollection);
 const ATTRIBUTES: Receiver = Receiver::List(ListClass::NamedNodeMap);
+/// The interfaces with `getElementsByTagName` and friends.
+const BY_TAG: &[&str] = &["Element", "Document"];
 /// The interfaces with `getElementById`.
 const BY_ID: &[&str] = &["Document", "DocumentFragment"];
 /// The `ElementCSSInlineStyle` and `HTMLOrSVGElement` mixins' interfaces.
@@ -419,6 +421,10 @@ static MEMBERS: &[Member] = &[
     reader("item", 1, COLLECTION, &["HTMLCollection"], INDEX, lists::collection_item),
     reader("namedItem", 1, COLLECTION, &["HTMLCollection"], STR, lists::named_item_member),
     getter("length", ATTRIBUTES, &["NamedNodeMap"], lists::attributes_length),
+    reader("getElementsByTagName", 1, Receiver::Node, BY_TAG, STR, lists::get_elements_by_tag_name),
+    reader("getElementsByClassName", 1, Receiver::Node, BY_TAG, STR, lists::get_elements_by_class_name),
+    writer("getElementsByTagNameNS", 2, Receiver::Node, BY_TAG, lists::get_elements_by_tag_name_ns),
+    reader("getElementsByName", 1, Receiver::Node, DOCUMENT, STR, lists::get_elements_by_name),
 ];
 
 // -------------------------------------------------------------------------
