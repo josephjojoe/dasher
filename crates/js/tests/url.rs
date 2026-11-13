@@ -115,3 +115,75 @@ fn search_params_are_live() {
         r#"{"one":"http://a/?x=1&y=a+b","two":["3",false],"three":"http://a/","same":true}"#
     );
 }
+
+/// Strings reach Rust as USVStrings: lone surrogates become U+FFFD, and
+/// other values are stringified first.
+#[test]
+fn inputs_are_converted_to_usv_strings() {
+    let js = runtime();
+    let out = eval(
+        &js,
+        r#"
+        const u = new URL('http://a/\ud800?q=\udc00#😀');
+        u.hash = 'x\ud800';
+        ({ href: u.href, q: u.searchParams.get('q'),
+           obj: new URL({ toString() { return '/p'; } }, 'http://b/').href,
+           num: new URL(42, 'http://c/d/').href,
+           base: new URL('x', 'http://d/\ud800/').href })
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"{"href":"http://a/%EF%BF%BD?q=%EF%BF%BD#x%EF%BF%BD","q":"�","obj":"http://b/p","num":"http://c/d/42","base":"http://d/%EF%BF%BD/x"}"#
+    );
+}
+
+/// The last base is kept for the next parse: changing it, or giving a bad
+/// one, must not reuse the old one.
+#[test]
+fn bases_are_parsed_afresh_when_they_change() {
+    let js = runtime();
+    let out = eval(
+        &js,
+        r#"
+        const r = [];
+        for (const base of ['http://a/x/', 'http://a/x/', 'http://b/', 'nope', 'http://b/', '']) {
+          try { r.push(new URL('y?z', base).href); } catch (e) { r.push(e.message); }
+        }
+        r
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"["http://a/x/y?z","http://a/x/y?z","http://b/y?z","Failed to construct 'URL': Invalid URL","http://b/y?z","Failed to construct 'URL': Invalid URL"]"#
+    );
+}
+
+/// Setters change the URL in place: a failed `href` setter leaves it as it
+/// was, and the `href` and `search` setters refresh its searchParams.
+#[test]
+fn setters_change_the_url_in_place() {
+    let js = runtime();
+    let out = eval(
+        &js,
+        r#"
+        const u = new URL('https://h.example/p?a=1');
+        const p = u.searchParams;
+        let err;
+        try { u.href = 'not a url'; } catch (e) { err = e.message; }
+        const kept = u.href;
+        u.href = 'http://other.example:81/q?b=2#f';
+        const afterHref = [p.get('a'), p.get('b'), u.port, u.origin];
+        u.protocol = 'nope nope';
+        u.host = '';
+        p.set('c', '3');
+        const parsed = URL.parse('/r', u);
+        ({ err, kept, afterHref, href: u.href, same: u.searchParams === p,
+           parsed: [parsed.href, parsed === URL.parse('/r', u), URL.parse('::', u)] })
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"{"err":"Failed to set the 'href' property on 'URL': Invalid URL","kept":"https://h.example/p?a=1","afterHref":[null,"2","81","http://other.example:81"],"href":"http://other.example:81/q?b=2&c=3#f","same":true,"parsed":["http://other.example:81/r",false,"http://other.example:81/::"]}"#
+    );
+}

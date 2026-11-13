@@ -344,6 +344,7 @@ mod evaluate;
 mod event_loop;
 mod glue;
 mod heap;
+mod intl;
 mod limits;
 mod loader;
 mod log;

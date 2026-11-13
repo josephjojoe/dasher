@@ -2017,8 +2017,7 @@
   // Attribute reflection helpers for HTML element interfaces.
 
   function resolveURL(url) {
-    const parts = internals.urlParse(url, internals.baseURL());
-    return parts === undefined ? url : parts[internals.URL_PARTS.HREF];
+    return internals.urlHref(url, internals.baseURL()) ?? url;
   }
 
   // spec: { prop: type } or { prop: [type, attr, extra] }. Types: 'string',
@@ -2409,8 +2408,7 @@
     get href() {
       const v = N.getAttr(this, 'href');
       if (v === null) return internals.documentURL();
-      const parts = internals.urlParse(v, internals.documentURL());
-      return parts === undefined ? v : parts[internals.URL_PARTS.HREF];
+      return internals.urlHref(v, internals.documentURL()) ?? v;
     },
     set href(v) { N.setAttr(this, 'href', str(v)); },
   });
@@ -4587,8 +4585,8 @@
       base.version = v;
       base.url = url;
       const href = N.baseHref();
-      const parts = href === null || href === undefined ? undefined : internals.urlParse(href, url);
-      base.href = parts === undefined ? url : parts[internals.URL_PARTS.HREF];
+      const resolved = href === null || href === undefined ? undefined : internals.urlHref(href, url);
+      base.href = resolved ?? url;
     }
     return base.href;
   };
