@@ -16,7 +16,7 @@ settles, and prints the resulting HTML. See `dasher serve --help` for
 the service modes.
 
 Waiting:
-      --wait <strategy>     when the page counts as ready [default: settled]
+      --wait <strategy>     when the page counts as ready [default: network-idle]
                               load           the load event has fired
                               network-idle   no requests for the quiet period
                               network-idle2  at most 2 requests for it
@@ -138,7 +138,7 @@ impl Options {
     fn new(url: String) -> Self {
         Self {
             url,
-            wait: Wait::Settled,
+            wait: Wait::NetworkIdle,
             quiet: Duration::from_millis(500),
             wait_for: None,
             wait_until: None,

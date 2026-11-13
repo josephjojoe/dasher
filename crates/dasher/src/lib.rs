@@ -70,8 +70,10 @@
 //! # Waiting for content
 //!
 //! By default [`goto`](Page::goto) waits for the `load` event, then until
-//! the network has been idle and the DOM unchanged for 500ms (see
-//! [`SettleOptions`]). [`GotoOptions`] chooses other conditions, and
+//! the network has been idle for 500ms (see [`SettleOptions`]), within
+//! the budgets that keep any page from running on: 5 s of page time, 10 s
+//! of CPU and 1000 requests ([`Navigation::budget_exhausted`] says if one
+//! ended it). [`GotoOptions`] chooses other conditions, and
 //! [`Page::wait_for_selector`] and [`Page::wait_for_function`] wait for
 //! something specific. For infinite feeds, auto-scroll after settling:
 //!

@@ -598,8 +598,21 @@ async fn memory_usage_covers_the_current_document() {
 async fn a_page_that_never_goes_quiet_ends_on_its_page_time_budget() {
     let server = server();
     let mut page = browser().new_page();
-    let started = Instant::now();
+    // By default only the network has to go idle, which it does.
     let navigation = page.goto(&server.url("/ticker.html")).await.unwrap();
+    assert_eq!(navigation.settle, Some(SettleOutcome::Settled));
+    assert_eq!(navigation.budget_exhausted, None);
+
+    // Waiting for DOM quiet too, the page never gets there.
+    let options = GotoOptions::settle(SettleOptions {
+        dom_quiet: Some(dasher::DEFAULT_QUIET),
+        ..SettleOptions::default()
+    });
+    let started = Instant::now();
+    let navigation = page
+        .goto_with(&server.url("/ticker.html"), &options)
+        .await
+        .unwrap();
     assert!(started.elapsed() < Duration::from_secs(3));
     assert!(!navigation.timed_out);
     assert_eq!(navigation.budget_exhausted, Some(Budget::PageTime));

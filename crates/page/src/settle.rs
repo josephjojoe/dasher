@@ -93,12 +93,19 @@ pub struct SettleOptions {
 }
 
 impl Default for SettleOptions {
-    /// Network idle and DOM quiet, each for [`DEFAULT_QUIET`], within
+    /// Network idle for [`DEFAULT_QUIET`], within
     /// [`DEFAULT_SETTLE_TIMEOUT`] and [`DEFAULT_PAGE_TIME_BUDGET`].
+    ///
+    /// DOM quiet is not waited for by default. On 142 recorded real sites,
+    /// network idle alone kept the text of as many pages as network idle
+    /// and DOM quiet together, for less CPU time: pages that change their
+    /// document on a timer forever never go DOM-quiet (see
+    /// `crates/bench/README.md`). Set [`dom_quiet`](Self::dom_quiet) to
+    /// wait for both.
     fn default() -> Self {
         Self {
             network_idle: Some(NetworkIdle::default()),
-            dom_quiet: Some(DEFAULT_QUIET),
+            dom_quiet: None,
             selector: None,
             predicate: None,
             timeout: DEFAULT_SETTLE_TIMEOUT,

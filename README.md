@@ -53,8 +53,9 @@ dasher does not support yet.
 
 ## Bounded page loads
 
-dasher waits for a page to go quiet (network idle and no DOM changes)
-under a virtual clock that skips ahead to the page's next timer instead
+dasher waits for a page to go quiet (by default, the network idle for
+500 ms; `--wait settled` also waits for the DOM to stop changing) under a
+virtual clock that skips ahead to the page's next timer instead
 of sleeping. Some pages never go quiet: carousels and tickers change the
 DOM on a timer forever, and some feeds fetch more as soon as the last
 batch arrives. Three budgets bound every load, and when one runs out the

@@ -322,6 +322,13 @@ fn help_and_version() {
 fn budgets_end_pages_that_never_finish_and_say_so() {
     let server = server();
     let out = json(&dasher(&[&server.url("/ticker.html"), "--json"]));
+    assert_eq!(out["settle"], "settled");
+    let out = json(&dasher(&[
+        &server.url("/ticker.html"),
+        "--json",
+        "--wait",
+        "settled",
+    ]));
     assert_eq!(out["timed_out"], false);
     assert_eq!(out["settle"], "budget_exhausted");
     assert_eq!(out["budget_exhausted"], "page_time");
@@ -340,6 +347,7 @@ fn budgets_end_pages_that_never_finish_and_say_so() {
     let out = json(&dasher(&[
         &server.url("/ticker.html"),
         "--json",
+        "--wait=settled",
         "--page-time-budget",
         "0",
         "-t",

@@ -103,7 +103,7 @@
 //! - a CSS selector matches;
 //! - a JavaScript predicate is truthy.
 //!
-//! The default waits for both kinds of quiet, 500ms each, for up to 10s.
+//! The default waits for network idle, 500ms of it, for up to 10s.
 //! Quiet periods are page time, so under the virtual clock a page that is
 //! only waiting on timers settles without real waiting.
 //!

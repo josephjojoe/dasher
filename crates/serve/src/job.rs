@@ -39,7 +39,7 @@ pub const DEFAULT_QUIET: Duration = Duration::from_millis(500);
 pub struct Job {
     /// The `http(s)` URL to load.
     pub url: String,
-    /// When the page counts as loaded. Defaults to [`Wait::Settled`].
+    /// When the page counts as loaded. Defaults to [`Wait::NetworkIdle`].
     #[serde(default)]
     pub wait: Wait,
     /// The quiet period, in milliseconds, of the wait strategies: how long
@@ -201,7 +201,8 @@ impl Job {
 pub enum Wait {
     /// The `load` event has fired.
     Load,
-    /// No requests in flight for the quiet period.
+    /// No requests in flight for the quiet period (the default).
+    #[default]
     #[serde(alias = "networkidle", alias = "networkidle0")]
     NetworkIdle,
     /// At most two requests in flight for the quiet period.
@@ -209,8 +210,7 @@ pub enum Wait {
     NetworkIdle2,
     /// No DOM changes for the quiet period.
     DomQuiet,
-    /// Both `network-idle` and `dom-quiet` (the default).
-    #[default]
+    /// Both `network-idle` and `dom-quiet`.
     Settled,
 }
 
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn a_url_alone_uses_the_defaults() {
         let job = job(json!({"url": "https://example.com/"})).unwrap();
-        assert_eq!(job.wait, Wait::Settled);
+        assert_eq!(job.wait, Wait::NetworkIdle);
         assert_eq!(job.timeout(), DEFAULT_JOB_TIMEOUT);
         assert_eq!(job.quiet(), DEFAULT_QUIET);
         assert_eq!(job.scroll, Scroll::Off);

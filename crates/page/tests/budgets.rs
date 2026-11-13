@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use dasher_js::{Budget, ClockMode, RunLimits, RunOutcome, RuntimeOptions, thread_cpu_time};
 use dasher_net::{Client, Session};
 use dasher_page::{
-    AutoScrollOptions, AutoScrollStop, Page, PageOptions, SettleOptions, SettleOutcome, WorkBudget,
+    AutoScrollOptions, AutoScrollStop, DEFAULT_QUIET, Page, PageOptions, SettleOptions,
+    SettleOutcome, WorkBudget,
 };
 use dasher_test_server::{FixtureResponse, FixtureServer, fixtures_dir};
 
@@ -56,6 +57,14 @@ async fn load(server: &FixtureServer, path: &str) -> Page {
     load_with(server, path, WorkBudget::default()).await
 }
 
+/// Network idle and DOM quiet: what a page ticking forever never reaches.
+fn settled() -> SettleOptions {
+    SettleOptions {
+        dom_quiet: Some(DEFAULT_QUIET),
+        ..SettleOptions::default()
+    }
+}
+
 fn json(page: &Page, expr: &str) -> String {
     page.js()
         .eval_json(expr)
@@ -73,7 +82,7 @@ async fn a_page_ticking_forever_ends_on_the_page_time_budget() {
     let mut page = load(&server, "/budget/interval.html").await;
     let cpu = thread_cpu_time();
     let started = Instant::now();
-    let outcome = page.settle(&SettleOptions::default()).await.unwrap();
+    let outcome = page.settle(&settled()).await.unwrap();
     assert_eq!(outcome, SettleOutcome::BudgetExhausted(Budget::PageTime));
     assert!(
         started.elapsed() < Duration::from_secs(3),
@@ -93,13 +102,41 @@ async fn a_page_ticking_forever_ends_on_the_page_time_budget() {
 }
 
 #[tokio::test]
+async fn by_default_a_page_ticking_forever_settles_once_the_network_is_idle() {
+    let server = server();
+    let mut page = load(&server, "/budget/interval.html").await;
+    assert_eq!(
+        page.settle(&SettleOptions::default()).await.unwrap(),
+        SettleOutcome::Settled
+    );
+    assert_eq!(
+        json(&page, "document.getElementById('loaded').textContent"),
+        r#""one,two,three""#
+    );
+}
+
+#[tokio::test]
+async fn a_page_polling_forever_ends_on_the_page_time_budget() {
+    let server = server();
+    let mut page = load(&server, "/budget/poll.html").await;
+    let cpu = thread_cpu_time();
+    let outcome = page.settle(&SettleOptions::default()).await.unwrap();
+    assert_eq!(outcome, SettleOutcome::BudgetExhausted(Budget::PageTime));
+    assert!(thread_cpu_time() - cpu < Duration::from_secs(1));
+    // Five seconds of idle page time, plus the 100 ms each poll spends in
+    // flight, which does not count: a poll per 300 ms of it.
+    let polls = number(&page, "+document.getElementById('count').textContent");
+    assert!((15..=30).contains(&polls), "{polls}");
+}
+
+#[tokio::test]
 async fn without_a_page_time_budget_the_same_page_spins_to_the_timeout() {
     let server = server();
     let mut page = load(&server, "/budget/interval.html").await;
     let options = SettleOptions {
         page_time_budget: None,
         timeout: MS(500),
-        ..SettleOptions::default()
+        ..settled()
     };
     assert_eq!(
         page.settle(&options).await.unwrap(),
@@ -116,7 +153,7 @@ async fn past_the_budget_an_explicit_wait_goes_on_in_real_time() {
     let options = SettleOptions {
         selector: Some("#late".into()),
         page_time_budget: Some(MS(300)),
-        ..SettleOptions::default()
+        ..settled()
     };
     let started = Instant::now();
     let cpu = thread_cpu_time();
@@ -147,7 +184,7 @@ async fn page_time_passing_for_real_counts_too() {
     .await;
     let options = SettleOptions {
         page_time_budget: Some(MS(600)),
-        ..SettleOptions::default()
+        ..settled()
     };
     let started = Instant::now();
     assert_eq!(

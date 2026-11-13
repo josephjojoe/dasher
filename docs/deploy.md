@@ -167,7 +167,7 @@ error, so typos don't go unnoticed.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `url` | (required) | The `http(s)` URL to load. |
-| `wait` | `"settled"` | When the page counts as loaded: `"load"`, `"network-idle"`, `"network-idle2"` (≤ 2 requests), `"dom-quiet"`, or `"settled"` (network idle and DOM quiet). |
+| `wait` | `"network-idle"` | When the page counts as loaded: `"load"`, `"network-idle"` (no requests for the quiet period), `"network-idle2"` (≤ 2 requests), `"dom-quiet"`, or `"settled"` (network idle and DOM quiet). |
 | `quiet_ms` | `500` | The quiet period for `wait`. |
 | `wait_for` | | Also wait until an element matches this CSS selector. |
 | `wait_until` | | Also wait until this JS expression is truthy. |

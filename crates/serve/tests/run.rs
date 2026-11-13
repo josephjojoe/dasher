@@ -296,6 +296,8 @@ async fn the_time_limit_is_capped_by_the_service_and_the_deadline() {
 async fn budgets_end_pages_that_never_finish_as_successes() {
     let site = common::site();
     let outcome = run_json(json!({ "url": site.url("/ticker.html") })).await;
+    assert_eq!(outcome.body["settle"], "settled");
+    let outcome = run_json(json!({ "url": site.url("/ticker.html"), "wait": "settled" })).await;
     assert_eq!(outcome.status, 200, "{}", outcome.body);
     assert_eq!(outcome.body["settle"], "budget_exhausted");
     assert_eq!(outcome.body["budget_exhausted"], "page_time");
@@ -315,6 +317,7 @@ async fn budgets_end_pages_that_never_finish_as_successes() {
     // A page-time budget of 0 turns it off; the timeout ends the job.
     let outcome = run_json(json!({
         "url": site.url("/ticker.html"),
+        "wait": "settled",
         "page_time_budget_ms": 0,
         "cpu_budget_ms": 0,
         "timeout_ms": 500,

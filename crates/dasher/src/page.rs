@@ -31,8 +31,8 @@ const BLANK: &str = "<html><head></head><body></body></html>";
 /// How [`Page::goto_with`] loads a page and decides it is ready.
 ///
 /// The default waits for the `load` event, then settles with
-/// [`SettleOptions::default`] (network idle and no DOM changes for 500ms
-/// each, skipping at most 5 seconds of page time), all within the page's
+/// [`SettleOptions::default`] (network idle for 500ms, within 5 seconds of
+/// page time), all within the page's
 /// [timeout](Page::set_timeout) and the default [`WorkBudget`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GotoOptions {
