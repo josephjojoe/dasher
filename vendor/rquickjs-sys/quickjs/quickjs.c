@@ -1507,6 +1507,25 @@ static inline void js_free_value_inline(JSRuntime *rt, JSValue v)
 #define JS_FreeValueRT(rt, v) js_free_value_inline(rt, v)
 #define JS_FreeValue(ctx, v) js_free_value_inline((ctx)->rt, v)
 
+/* dasher: the same for JS_MarkValue, which the cycle collector calls for
+   every value it visits. */
+static inline void js_mark_value_inline(JSRuntime *rt, JSValueConst val,
+                                        JS_MarkFunc *mark_func)
+{
+    if (JS_VALUE_HAS_REF_COUNT(val)) {
+        switch(JS_VALUE_GET_TAG(val)) {
+        case JS_TAG_OBJECT:
+        case JS_TAG_FUNCTION_BYTECODE:
+            mark_func(rt, JS_VALUE_GET_PTR(val));
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+#define JS_MarkValue(rt, val, mark_func) js_mark_value_inline(rt, val, mark_func)
+
 static void js_trigger_gc(JSRuntime *rt, size_t size)
 {
     bool force_gc;
@@ -5877,15 +5896,21 @@ static void js_array_finalizer(JSRuntime *rt, JSValueConst val)
     js_free_rt(rt, p->u.array.u.values);
 }
 
-static void js_array_mark(JSRuntime *rt, JSValueConst val,
-                          JS_MarkFunc *mark_func)
+/* dasher: the body is inlined into mark_children (see there) */
+static force_inline void js_array_mark_inline(JSRuntime *rt, JSObject *p,
+                                              JS_MarkFunc *mark_func)
 {
-    JSObject *p = JS_VALUE_GET_OBJ(val);
     int i;
 
     for(i = 0; i < p->u.array.count; i++) {
         JS_MarkValue(rt, p->u.array.u.values[i], mark_func);
     }
+}
+
+static void js_array_mark(JSRuntime *rt, JSValueConst val,
+                          JS_MarkFunc *mark_func)
+{
+    js_array_mark_inline(rt, JS_VALUE_GET_OBJ(val), mark_func);
 }
 
 static void js_object_data_finalizer(JSRuntime *rt, JSValueConst val)
@@ -5942,10 +5967,11 @@ static void js_bytecode_function_finalizer(JSRuntime *rt, JSValueConst val)
     }
 }
 
-static void js_bytecode_function_mark(JSRuntime *rt, JSValueConst val,
-                                      JS_MarkFunc *mark_func)
+/* dasher: the body is inlined into mark_children (see there) */
+static force_inline void js_bytecode_function_mark_inline(JSRuntime *rt,
+                                                          JSObject *p,
+                                                          JS_MarkFunc *mark_func)
 {
-    JSObject *p = JS_VALUE_GET_OBJ(val);
     JSVarRef **var_refs = p->u.func.var_refs;
     JSFunctionBytecode *b = p->u.func.function_bytecode;
     int i;
@@ -5967,6 +5993,12 @@ static void js_bytecode_function_mark(JSRuntime *rt, JSValueConst val,
            part of a cycle */
         JS_MarkValue(rt, JS_MKPTR(JS_TAG_FUNCTION_BYTECODE, b), mark_func);
     }
+}
+
+static void js_bytecode_function_mark(JSRuntime *rt, JSValueConst val,
+                                      JS_MarkFunc *mark_func)
+{
+    js_bytecode_function_mark_inline(rt, JS_VALUE_GET_OBJ(val), mark_func);
 }
 
 static void js_bound_function_finalizer(JSRuntime *rt, JSValueConst val)
@@ -6179,7 +6211,7 @@ static void remove_gc_object(JSGCObjectHeader *h)
     list_del(&h->link);
 }
 
-void JS_MarkValue(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func)
+void (JS_MarkValue)(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func)
 {
     if (JS_VALUE_HAS_REF_COUNT(val)) {
         switch(JS_VALUE_GET_TAG(val)) {
@@ -6209,8 +6241,13 @@ static void mark_weak_map_value(JSRuntime *rt, JSWeakRefRecord *first_weak_ref, 
     }
 }
 
-static void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
-                          JS_MarkFunc *mark_func)
+/* dasher: inlined into each pass of the cycle collector, which passes a
+   constant mark_func, so that marking a child is a direct, inlined step
+   instead of a call through a pointer. Plain arrays, arguments objects and
+   bytecode functions, the most common objects with a class mark function,
+   are marked here directly rather than through the class table. */
+static force_inline void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
+                                       JS_MarkFunc *mark_func)
 {
     switch(gp->gc_obj_type) {
     case JS_GC_OBJ_TYPE_JS_OBJECT:
@@ -6252,7 +6289,14 @@ static void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
                 mark_weak_map_value(rt, p->first_weak_ref, mark_func);
             }
 
-            if (p->class_id != JS_CLASS_OBJECT) {
+            if (p->class_id == JS_CLASS_OBJECT) {
+                /* no class mark function */
+            } else if (p->class_id == JS_CLASS_BYTECODE_FUNCTION) {
+                js_bytecode_function_mark_inline(rt, p, mark_func);
+            } else if (p->class_id == JS_CLASS_ARRAY ||
+                       p->class_id == JS_CLASS_ARGUMENTS) {
+                js_array_mark_inline(rt, p, mark_func);
+            } else {
                 JSClassGCMark *gc_mark;
                 gc_mark = rt->class_array[p->class_id].gc_mark;
                 if (gc_mark)
