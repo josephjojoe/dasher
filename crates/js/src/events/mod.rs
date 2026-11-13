@@ -322,16 +322,16 @@ impl Layout {
         Self { vtable, offset }
     }
 
-    /// The `T` behind `value`, if it is an object of `T`'s class.
+    /// The `T` behind `value`, if it is an object of `T`'s class with the
+    /// vtable learned. Cheap: a class check and a pointer compare.
     ///
     /// # Safety
     ///
     /// `value` must be alive and stay so for the result's life, and this
     /// must be `T`'s layout.
     #[inline]
-    unsafe fn get<'v, 'js, T: JsClass<'js, Mutable = Readable> + 'v>(
+    unsafe fn fast<'v, 'js, T: JsClass<'js, Mutable = Readable> + 'v>(
         &self,
-        ctx: *mut qjs::JSContext,
         class_id: qjs::JSClassID,
         value: qjs::JSValue,
     ) -> Option<&'v T> {
@@ -339,18 +339,51 @@ impl Layout {
         // rquickjs's class has a class cell as its opaque.
         unsafe {
             let cell = qjs::JS_GetOpaque(value, class_id);
-            if cell.is_null() {
+            if cell.is_null() || *cell.cast::<*const c_void>() != self.vtable {
                 return None;
             }
-            if *cell.cast::<*const c_void>() == self.vtable {
-                return Some(&*cell.cast::<u8>().add(self.offset).cast::<T>());
-            }
+            Some(&*cell.cast::<u8>().add(self.offset).cast::<T>())
         }
-        // Another Rust class, or `T` with a second vtable (generic code can
-        // be instantiated twice): ask rquickjs.
-        // SAFETY: `ctx` is live and `value` alive; the `Value` owns its new
-        // reference, and the object outlives it as the caller promises.
+    }
+
+    /// The `T` behind `value`, if it is an object of `T`'s class.
+    ///
+    /// # Safety
+    ///
+    /// As for [`fast`](Self::fast).
+    #[inline]
+    unsafe fn get<'v, 'js, T: JsClass<'js, Mutable = Readable> + 'v>(
+        &self,
+        ctx: *mut qjs::JSContext,
+        class_id: qjs::JSClassID,
+        value: qjs::JSValue,
+    ) -> Option<&'v T> {
+        // SAFETY: as for the function.
+        if let Some(v) = unsafe { self.fast(class_id, value) } {
+            return Some(v);
+        }
+        // SAFETY: as above.
+        unsafe { Self::slow(ctx, class_id, value) }
+    }
+
+    /// [`get`](Self::get) for anything but the vtable learned: another Rust
+    /// class, or `T` with a second vtable (generic code can be
+    /// instantiated twice). Asks rquickjs.
+    ///
+    /// # Safety
+    ///
+    /// As for [`fast`](Self::fast), and `ctx` must be live.
+    unsafe fn slow<'v, 'js, T: JsClass<'js, Mutable = Readable> + 'v>(
+        ctx: *mut qjs::JSContext,
+        class_id: qjs::JSClassID,
+        value: qjs::JSValue,
+    ) -> Option<&'v T> {
+        // SAFETY: as for the function; the `Value` owns its new reference,
+        // and the object outlives it as the caller promises.
         unsafe {
+            if qjs::JS_GetOpaque(value, class_id).is_null() {
+                return None;
+            }
             let ctx = natives::ctx_of(ctx);
             let value =
                 Value::from_raw(ctx.clone(), qjs::JS_DupValue(ctx.as_raw().as_ptr(), value));
@@ -477,19 +510,20 @@ impl<'js> EventsData<'js> {
         if unsafe { qjs::JS_VALUE_GET_PTR(value) } == self.global {
             return Some(TargetRef::Global);
         }
-        // SAFETY: as for the function.
+        // SAFETY: as for the function. The cheap checks go first; a slow
+        // one only runs for objects that are neither (or have a second
+        // vtable).
         unsafe {
-            if let Some(data) = self
-                .target_layout
-                .get::<TargetData<'js>>(ctx, self.class_id, value)
-            {
+            if let Some(data) = self.target_layout.fast(self.class_id, value) {
                 return Some(TargetRef::Object(data));
             }
-            let members = NativeData::of(ctx)?.members()?;
-            let wrapper = members.wrapper(ctx, value)?;
-            Some(TargetRef::Node(
-                &*(wrapper as *const NodeWrapper<'_>).cast(),
-            ))
+            if let Some(members) = NativeData::of(ctx).and_then(NativeData::members)
+                && let Some(wrapper) = members.wrapper(ctx, value)
+            {
+                let wrapper: *const NodeWrapper<'_> = wrapper;
+                return Some(TargetRef::Node(&*wrapper.cast()));
+            }
+            Layout::slow::<TargetData<'js>>(ctx, self.class_id, value).map(TargetRef::Object)
         }
     }
 
