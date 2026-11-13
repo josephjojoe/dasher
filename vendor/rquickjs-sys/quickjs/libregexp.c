@@ -2518,6 +2518,15 @@ typedef int lre_search_hook_t(void *search, const uint8_t *body,
 
 static lre_search_hook_t *lre_search_hook;
 
+/* dasher: the fast paths in this file and in quickjs.c's RegExp methods
+   check this, so a test can run the engine's own way beside them */
+bool lre_dasher_fast = true;
+
+void lre_set_fast_paths(bool on)
+{
+    lre_dasher_fast = on;
+}
+
 void lre_set_search_hook(lre_search_hook_t *hook)
 {
     lre_search_hook = hook;

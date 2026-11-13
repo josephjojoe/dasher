@@ -56,6 +56,11 @@ int lre_exec(uint8_t **capture,
              const uint8_t *bc_buf, const uint8_t *cbuf, int cindex, int clen,
              int cbuf_type, void *opaque);
 
+/* dasher: true unless a test has turned dasher's regexp fast paths off
+   to compare them with the engine's own (lre_set_fast_paths()) */
+extern bool lre_dasher_fast;
+void lre_set_fast_paths(bool on);
+
 int lre_parse_escape(const uint8_t **pp, int allow_utf16);
 bool lre_is_space(int c);
 

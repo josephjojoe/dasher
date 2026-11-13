@@ -38,23 +38,33 @@ unsafe extern "C" {
     fn lre_set_search_hook(hook: Option<Hook>);
     fn lre_search_try(search: *mut c_void, index: c_int) -> c_int;
     fn lre_canonicalize(c: u32, is_unicode: bool) -> c_int;
+    fn lre_set_fast_paths(on: bool);
 }
 
-/// Hands regexp searches in this process to [`search`]. Safe to call more
-/// than once and from any thread: it stores the same pointer each time.
+/// Hands regexp searches in this process to [`search`] and turns on the
+/// engine patch's other regexp fast paths (see `PATCHES.md`). Safe to
+/// call more than once and from any thread: it stores the same values
+/// each time.
 pub(crate) fn install() {
     // SAFETY: `search` has the signature the engine calls the hook with,
-    // and the engine reads the pointer only when it runs a regexp.
-    unsafe { lre_set_search_hook(Some(search)) };
+    // and the engine reads the pointer only when it runs a regexp. The
+    // flag is a plain global the engine reads.
+    unsafe {
+        lre_set_search_hook(Some(search));
+        lre_set_fast_paths(true);
+    }
 }
 
-/// Puts the engine's own search loop back. For tests that compare the
-/// two. The next [`JsRuntime`](crate::JsRuntime) created installs
-/// [`search`] again.
+/// Puts the engine's own search loop and RegExp methods back. For tests
+/// that compare the two. The next [`JsRuntime`](crate::JsRuntime) created
+/// installs dasher's again.
 #[doc(hidden)]
 pub fn uninstall() {
-    // SAFETY: a null hook is the engine's default.
-    unsafe { lre_set_search_hook(None) };
+    // SAFETY: a null hook and the flag off are the engine's default.
+    unsafe {
+        lre_set_search_hook(None);
+        lre_set_fast_paths(false);
+    }
 }
 
 thread_local! {
