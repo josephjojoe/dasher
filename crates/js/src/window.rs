@@ -50,36 +50,85 @@ impl Default for Viewport {
     }
 }
 
-/// How the synthetic layout places elements, which decides what counts as
-/// in view.
+/// What counts as in view: how the synthetic layout places elements.
 ///
-/// Nothing is really laid out. Either way, every rendered element has a
-/// non-zero box, as wide as the viewport, and hidden ones (`display: none`
-/// inline, `hidden`, never-rendered elements) have an empty one.
+/// Nothing is really laid out. Under every policy each rendered element has
+/// a non-zero box, as wide as the viewport, and hidden ones (`display: none`
+/// inline, `hidden`, never-rendered elements) have an empty one. The policy
+/// decides where boxes sit, and so what `getBoundingClientRect`,
+/// `IntersectionObserver` and scroll checks see as visible, which decides
+/// how much lazily loaded content a page fetches. It trades CPU time and
+/// requests for content: see the README's "Visibility" section for what
+/// each policy cost on real pages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum LayoutMode {
-    /// Everything is in view. Every rendered element is a 20px-tall box at
-    /// the top of the viewport, wherever the page is scrolled, and
+pub enum Visibility {
+    /// Everything is in view, always. Every rendered element is a 20px-tall
+    /// box at the top of the viewport, wherever the page is scrolled, and
     /// `IntersectionObserver` reports it intersecting as soon as it is
     /// observed. The page can be scrolled without limit.
     ///
-    /// One concession to infinite scroll: a target that content inserted
-    /// before it pushes further down the document counts as having left
-    /// the viewport, until the page next scrolls. That lets a "load more"
-    /// sentinel fire again on every scroll, as it would in a browser.
+    /// One concession to infinite scroll: an `IntersectionObserver` target
+    /// that content inserted before it pushes further down the document
+    /// counts as having left the viewport, until the page next scrolls.
+    /// That lets a "load more" sentinel fire again on every scroll, as it
+    /// would in a browser.
+    ///
+    /// The most content, at the most cost: a loader that checks an
+    /// element's position after each batch it appends (rather than waiting
+    /// for a scroll or an observer) finds it in view every time, and loads
+    /// until the page is stopped.
+    All,
+    /// The document as it stood at the load event is in view, once; what
+    /// is inserted after that is below the fold until the page is next
+    /// [revealed](crate::JsRuntime::reveal) (by auto-scroll, in dasher).
+    ///
+    /// Until the first reveal this is [`All`](Self::All). From then on,
+    /// elements inserted since the last reveal (moved ones included) each
+    /// take a 20px line in a stack that starts at the top of the viewport;
+    /// everything else takes no room. So content present at load stays in
+    /// view and its lazy parts load, but whatever follows an insertion is
+    /// pushed down by it: a "load more" element moves below the fold once a
+    /// viewport's worth of items has been appended above it, and the
+    /// appended items themselves leave the viewport after its first
+    /// screenful. The document is two viewports tall plus that stack, and
+    /// the window scrolls no further than its bottom, so a check against
+    /// `scrollY + innerHeight` turns false too. A loader can therefore
+    /// append only a viewport or two of content between reveals, however
+    /// it checks for visibility. Scrolling by the page itself moves the
+    /// scroll position and fires `scroll` events, but boxes stay put, so it
+    /// brings nothing new into view.
     #[default]
-    InView,
-    /// Elements are only in view once scrolled to. The elements under
-    /// `<body>` are stacked in document order, 20px per element, each
-    /// spanning its descendants, and the document is as tall as the stack
-    /// (at least the viewport). Boxes move as the page scrolls, scrolling
-    /// stops at the bottom, and `IntersectionObserver` reports what overlaps
-    /// the viewport.
+    Loaded,
+    /// A real viewport: elements are only in view once scrolled to. The
+    /// elements under `<body>` are stacked in document order, 20px per
+    /// element, each spanning its descendants, and the document is as tall
+    /// as the stack (at least the viewport). Boxes move as the page
+    /// scrolls, scrolling stops at the bottom, and `IntersectionObserver`
+    /// reports what overlaps the viewport.
     ///
     /// Content below the fold only loads once scrolled to, as in a browser,
     /// and a page whose content does not fill the viewport may stop loading
     /// more, as it would in a browser with a tall window.
-    Scrolled,
+    Viewport,
+}
+
+impl Visibility {
+    /// The policy's name in the CLI and the service's jobs: `all`,
+    /// `loaded` or `viewport`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Loaded => "loaded",
+            Self::Viewport => "viewport",
+        }
+    }
+
+    /// The policy with the given [name](Self::name).
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::All, Self::Loaded, Self::Viewport]
+            .into_iter()
+            .find(|v| v.name() == name)
+    }
 }
 
 /// How a page's window environment is set up.
@@ -103,8 +152,8 @@ pub struct WindowOptions {
     pub device_memory: u32,
     /// Window and screen dimensions.
     pub viewport: Viewport,
-    /// How elements are placed, and so what is in view.
-    pub layout: LayoutMode,
+    /// What counts as in view, and so how much lazy content loads.
+    pub visibility: Visibility,
     /// Backs `localStorage`. Pass the same store to several pages to share
     /// items between them, as a browser profile would.
     pub local_storage: StorageStore,
@@ -123,7 +172,7 @@ impl Default for WindowOptions {
             hardware_concurrency: 8,
             device_memory: 8,
             viewport: Viewport::default(),
-            layout: LayoutMode::default(),
+            visibility: Visibility::default(),
             local_storage: StorageStore::new(),
             session_storage: StorageStore::new(),
         }
@@ -219,13 +268,7 @@ pub(crate) fn install<'js>(
     env.set("screenWidth", viewport.screen_width)?;
     env.set("screenHeight", viewport.screen_height)?;
     env.set("touch", viewport.touch)?;
-    env.set(
-        "layout",
-        match options.layout {
-            LayoutMode::InView => "inView",
-            LayoutMode::Scrolled => "scrolled",
-        },
-    )?;
+    env.set("visibility", options.visibility.name())?;
     native.set("env", env)?;
     media::install(ctx, native, &options.viewport)?;
     storage::install(
