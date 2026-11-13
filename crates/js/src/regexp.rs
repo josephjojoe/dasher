@@ -341,7 +341,7 @@ fn analyse(code: &[u8], flags: c_int) -> Plan {
         Start::Anywhere | Start::Line => usize::MAX,
     };
     let required = required_chars(code, flags)
-        .filter(|chars| chars.count < start_count)
+        .filter(|chars| chars.count < start_count || chars.count <= 3 && start_count > 3)
         .map(Box::new);
     let run = matches!(start, Start::Chars(_)) && leading_run(code);
     Plan {
@@ -542,7 +542,7 @@ fn required_chars(code: &[u8], flags: c_int) -> Option<Chars> {
     }
 
     // The one-character tests on the way from `match` up its dominators.
-    let mut best: Option<(usize, Vec<(u32, u32)>)> = None;
+    let mut best: Option<(u32, Vec<(u32, u32)>)> = None;
     let mut node = end;
     while node != 0 {
         node = idom[node];
@@ -567,31 +567,45 @@ fn required_chars(code: &[u8], flags: c_int) -> Option<Chars> {
             _ => test_chars(code, pc),
         };
         if let Some(ranges) = ranges {
-            let count = latin1_count(&ranges, flags);
-            if best.as_ref().is_none_or(|(best, _)| count < *best) {
-                best = Some((count, ranges));
+            let score = commonness(&ranges, flags);
+            if best.as_ref().is_none_or(|(best, _)| score < *best) {
+                best = Some((score, ranges));
             }
         }
     }
     best.map(|(_, ranges)| Chars::new(ranges, flags))
 }
 
-/// How many characters below 256 a set of ranges holds, as
-/// [`Chars::count`] would say, without building the set when no case is
-/// folded.
-fn latin1_count(ranges: &[(u32, u32)], flags: c_int) -> usize {
-    if flags & IGNORE_CASE != 0 {
-        return (0..=255u8)
-            .filter(|&c| in_ranges(ranges, fold_latin1(c, flags)))
-            .count();
-    }
+/// How often a set of characters can be expected in page text, roughly:
+/// [`required_chars`] picks the set with the lowest. Spaces and lower-case
+/// letters are everywhere, an `@` is rare.
+fn commonness(ranges: &[(u32, u32)], flags: c_int) -> u32 {
+    let weight = |c: u8| -> u32 {
+        match c {
+            b' ' => 100,
+            b'a'..=b'z' => 20,
+            b'A'..=b'Z' | b'0'..=b'9' => 5,
+            b'.' | b',' | b'-' | b'/' | b':' | b';' | b'(' | b')' | b'"' | b'\'' | b'=' | b'_'
+            | b'\n' | b'\t' => 5,
+            _ => 1,
+        }
+    };
     let mut seen = [false; 256];
-    for &(low, high) in ranges {
-        for c in low.min(256)..=high.min(255) {
-            seen[c as usize] = true;
+    if flags & IGNORE_CASE != 0 {
+        for c in 0..=255u8 {
+            seen[usize::from(c)] = in_ranges(ranges, fold_latin1(c, flags));
+        }
+    } else {
+        for &(low, high) in ranges {
+            for c in low.min(256)..=high.min(255) {
+                seen[c as usize] = true;
+            }
         }
     }
-    seen.iter().filter(|&&b| b).count()
+    (0..=255u8)
+        .filter(|&c| seen[usize::from(c)])
+        .map(weight)
+        .sum()
 }
 
 /// Whether the pattern is an unbounded greedy repeat, at least once, of a
@@ -853,6 +867,8 @@ unsafe extern "C" fn search(
         (code, subject)
     };
     SEARCHES.set(SEARCHES.get() + 1);
+    #[cfg(test)]
+    tests::LAST_CODE.with_borrow_mut(|last| *last = (code.to_vec(), flags));
     let plan = plan_of(code, flags);
     let try_at = |at: usize| -> c_int {
         // SAFETY: `search` is the engine's, and `at` is within the subject
@@ -964,6 +980,64 @@ fn run_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// The bytecode and flags of the last search on this thread.
+        pub(super) static LAST_CODE: RefCell<(Vec<u8>, c_int)> = const { RefCell::new((Vec::new(), 0)) };
+    }
+
+    /// The bytecode the engine compiles `/source/flags` to, as the hook
+    /// sees it, and the flags.
+    fn compiled(source: &str, flags: &str) -> (Vec<u8>, c_int) {
+        let js = crate::JsRuntime::new(crate::RuntimeOptions::default()).expect("runtime");
+        let script = format!("new RegExp({source:?}, {flags:?}).exec('')");
+        js.eval_json(&script).expect("compiles");
+        LAST_CODE.with_borrow(Clone::clone)
+    }
+
+    fn required_of(source: &str, flags: &str) -> Option<Vec<u8>> {
+        let (code, flags) = compiled(source, flags);
+        analyse(&code, flags)
+            .required
+            .map(|chars| (0..=255u8).filter(|&c| chars.latin1[usize::from(c)]).collect())
+    }
+
+    #[test]
+    fn a_character_every_match_needs_is_required() {
+        let email = "[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+";
+        assert_eq!(required_of(email, "g").as_deref(), Some(&b"@"[..]));
+        assert_eq!(required_of("\\w+@\\w+", "").as_deref(), Some(&b"@"[..]));
+        assert_eq!(required_of("(?:a|c)bx?", "").as_deref(), Some(&b"b"[..]));
+        // The same character on two branches is two tests, neither of
+        // which every match passes.
+        assert_eq!(required_of("(?:ab|cb)x?", ""), None);
+        assert_eq!(required_of("x*[ab]", "").as_deref(), Some(&b"ab"[..]));
+        assert_eq!(required_of(".q(?=@)", "").as_deref(), Some(&b"q"[..]));
+        assert_eq!(required_of("\\s+[=:]\\s*\\d", "i").as_deref(), Some(&b":="[..]));
+        // Nothing every match needs, or nothing rarer than the start.
+        assert_eq!(required_of("a?b?", ""), None);
+        assert_eq!(required_of("@\\w+", ""), None);
+        assert_eq!(required_of("(?:a|b)+", ""), None);
+        assert_eq!(required_of("(?<=@).x", "").as_deref(), Some(&b"x"[..]));
+        assert_eq!(required_of("(\\w)\\1@", "").as_deref(), Some(&b"@"[..]));
+        // A required character the start already looks for adds nothing.
+        assert_eq!(required_of("q(?=@)", ""), None);
+    }
+
+    #[test]
+    fn a_leading_unbounded_repeat_skips_its_run() {
+        let run_of = |source: &str| {
+            let (code, flags) = compiled(source, "");
+            analyse(&code, flags).run
+        };
+        assert!(run_of("[a-z]+@"));
+        assert!(run_of("\\w+@\\w+"));
+        assert!(!run_of("[a-z]*@"));
+        assert!(!run_of("[a-z]{1,9}@"));
+        assert!(!run_of("([a-z]+)@\\1"));
+        assert!(!run_of("x[a-z]+@"));
+    }
 
     /// `save_start 0` then the given code.
     fn body(rest: &[u8]) -> Vec<u8> {

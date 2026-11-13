@@ -2752,6 +2752,87 @@ int lre_search_try(void *search, int index)
                               false);
 }
 
+/* dasher: the most characters lre_exec_literal() takes a pattern of */
+#define LRE_LITERAL_MAX 32
+
+/* dasher: a pattern that is a string of characters and nothing else,
+   `/foo/`, `/\./g` or `/iphone/i`, is run here as a string search: try
+   each position as the search loop would and compare the characters as
+   the char opcodes do, but without starting the interpreter at every
+   position. In an 8-bit subject a position can only match where its first
+   character does, which memchr() finds. `pc` is the pattern's bytecode
+   after the search loop, if it has one. Returns what lre_exec() returns,
+   or -1 when the pattern is not such a string. */
+static int lre_exec_literal(uint8_t **capture, const uint8_t *pc,
+                            const uint8_t *pc_end, bool search,
+                            const uint8_t *cbuf, int cindex, int clen,
+                            int cbuf_type, bool ignore_case, bool is_unicode)
+{
+    uint32_t lit[LRE_LITERAL_MAX], c;
+    int n = 0, i, shift = cbuf_type != 0;
+    const uint8_t *cbuf_end = cbuf + ((size_t)clen << shift);
+    const uint8_t *start, *cptr;
+
+    if (pc + 2 > pc_end || pc[0] != REOP_save_start || pc[1] != 0)
+        return -1;
+    pc += 2;
+    while (pc < pc_end && pc[0] != REOP_save_end) {
+        if (n == LRE_LITERAL_MAX)
+            return -1;
+        switch(pc[0]) {
+        case REOP_char8:
+            lit[n++] = pc[1];
+            pc += 2;
+            break;
+        case REOP_char16:
+            lit[n++] = get_u16(pc + 1);
+            pc += 3;
+            break;
+        case REOP_char32:
+            lit[n++] = get_u32(pc + 1);
+            pc += 5;
+            break;
+        default:
+            return -1;
+        }
+    }
+    if (n == 0 || pc + 3 != pc_end || pc[1] != 0 || pc[2] != REOP_match)
+        return -1;
+
+    start = cbuf + ((size_t)cindex << shift);
+    for(;;) {
+        if (cbuf_type == 0 && !ignore_case) {
+            /* only where the first character is */
+            if (lit[0] > 0xff)
+                return 0;
+            start = search ? memchr(start, lit[0], cbuf_end - start) : start;
+            if (!start)
+                return 0;
+        }
+        cptr = start;
+        for(i = 0; i < n; i++) {
+            if (cptr >= cbuf_end)
+                return 0; /* nor at any later position */
+            GET_CHAR(c, cptr, cbuf_end, cbuf_type);
+            if (ignore_case)
+                c = re_canonicalize(c, is_unicode);
+            if (c != lit[i])
+                break;
+        }
+        if (i == n) {
+            capture[0] = (uint8_t *)start;
+            capture[1] = (uint8_t *)cptr;
+            return 1;
+        }
+        if (!search || start >= cbuf_end)
+            return 0;
+        /* the next position, as the search loop's `any` steps */
+        cptr = start;
+        GET_CHAR(c, cptr, cbuf_end, cbuf_type);
+        start = cptr;
+    }
+}
+
 int lre_exec(uint8_t **capture,
              const uint8_t *bc_buf, const uint8_t *cbuf, int cindex, int clen,
              int cbuf_type, void *opaque)
@@ -2791,6 +2872,30 @@ int lre_exec(uint8_t **capture,
 
     for(i = 0; i < s->capture_count * 2; i++)
         capture[i] = NULL;
+    /* dasher: see lre_exec_literal() */
+    if (lre_dasher_fast && s->capture_count == 1) {
+        const uint8_t *pc = bc_buf + RE_HEADER_LEN;
+        uint32_t bc_len = get_u32(bc_buf + RE_HEADER_BYTECODE_LEN);
+        bool search = !(re_flags & LRE_FLAG_STICKY);
+        ret = -1;
+        if (search) {
+            /* the loop as lre_compile() writes it, as below */
+            if (bc_len > 11 && pc[0] == REOP_split_goto_first &&
+                get_u32(pc + 1) == 6 && pc[5] == REOP_any &&
+                pc[6] == REOP_goto && get_u32(pc + 7) == (uint32_t)-11) {
+                pc += 11;
+                bc_len -= 11;
+            } else {
+                bc_len = 0;
+            }
+        }
+        if (bc_len > 0)
+            ret = lre_exec_literal(capture, pc, pc + bc_len, search, cbuf,
+                                   cindex, clen, s->cbuf_type,
+                                   s->ignore_case, s->is_unicode);
+        if (ret >= 0)
+            return ret;
+    }
     alloca_size = s->stack_size_max * sizeof(stack_buf[0]);
     stack_buf = alloca(alloca_size);
     /* dasher: see lre_set_search_hook() */
