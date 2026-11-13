@@ -1,0 +1,13 @@
+<!doctype html>
+<title>Polls forever</title>
+<p id="count">0</p>
+<script>
+  // Asks the server for news every 300 ms, forever: the network never
+  // stays idle for the 500 ms quiet period.
+  let polls = 0;
+  setInterval(() => {
+    fetch('/api/items').then(() => {
+      document.getElementById('count').textContent = ++polls;
+    });
+  }, 300);
+</script>

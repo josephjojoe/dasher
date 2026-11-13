@@ -1,0 +1,9 @@
+<!doctype html>
+<title>Ticker</title>
+<p id="clock">0</p>
+<p id="news">Headline</p>
+<script>
+  // Changes the DOM on a timer forever.
+  let ticks = 0;
+  setInterval(() => { document.getElementById('clock').textContent = ++ticks; }, 250);
+</script>

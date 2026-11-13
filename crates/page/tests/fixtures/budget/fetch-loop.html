@@ -1,0 +1,16 @@
+<!doctype html>
+<title>Loads more forever</title>
+<ul id="items"></ul>
+<script>
+  // Fetches "more stories" again as soon as the last batch arrives.
+  window.batches = 0;
+  (function more() {
+    fetch('/api/more').then((r) => r.json()).then((items) => {
+      window.batches++;
+      const li = document.createElement('li');
+      li.textContent = items.join(',');
+      document.getElementById('items').append(li);
+      more();
+    });
+  })();
+</script>
