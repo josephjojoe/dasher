@@ -181,7 +181,31 @@ DASHER_REPLAY=rec/verge /usr/bin/time -l target/profiling/dasher -t 60 https://w
 
 Compare CPU time (user plus system), not wall time: under the virtual clock
 a page's wall time is its CPU time plus fixed waits. Run each page three
-times and take the median. Runs of one build agree to about 1%.
+times and take the median. Runs of one build agree to about 1%. On a
+machine that is busy with other work they agree much less, so alternate
+the two builds page by page rather than running one after the other.
+
+Page output is not byte-for-byte the same from one run to the next, even
+on one build: pages put timestamps and random IDs into it, and some insert
+styles in an order that varies. Compare the element count, the count of
+each tag, the link count and the visible text with digits masked.
+
+### The parse-only corpus
+
+How fast the engine compiles scripts is measured on the scripts of the
+recorded pages, compiled without being run. Every response whose
+`content-type` is JavaScript is a script (`*.meta` holds the headers and
+`*.body` the bytes). Copy those bodies into one directory, drop
+duplicates, and run
+
+```sh
+cargo run --profile profiling -p dasher-js --example compile_corpus -- corpus/
+```
+
+It compiles each file as a classic script, or as a module if that fails
+(imports resolve to empty modules), in a page's runtime, and prints the
+bytes compiled, the CPU time it took, the rate in MB/s and how much of the
+JS heap the compiled scripts hold.
 
 ### What it showed
 
