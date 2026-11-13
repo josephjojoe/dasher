@@ -4,7 +4,9 @@ Measures dasher's footprint (memory, time and binary size) on a fixed
 fixture suite, and checks the results against [`budgets.json`](budgets.json).
 CI runs it on every push, on the static musl release build, and fails if a
 budget is exceeded. The results show up in the job summary and are
-uploaded as the `benchmarks` artifact.
+uploaded as the `benchmarks` artifact. [Micro-benchmarks](#micro-benchmarks)
+are a separate mode, for the CPU cost of single language operations and
+DOM calls.
 
 ```sh
 cargo build --release -p dasher-cli -p dasher-bench
@@ -344,6 +346,129 @@ What it showed:
   the four pages checked, it came to 4,000 calls and 85 ms of 7 s. A paired
   rerun of `loaded` and `all`, four runs each, gave the same CPU on
   zillow.com and 2% more on theverge.com, within the spread of either.
+
+## Micro-benchmarks
+
+`dasher-bench micro` times small fixed loops of one language operation or
+one DOM call each, and prints the CPU time per operation. Engine and DOM
+work measures itself with it: run it before and after a change, on the same
+machine. It is not run or budgeted in CI, because the numbers depend on the
+runner.
+
+```sh
+cargo build --release -p dasher-bench
+target/release/dasher-bench micro                     # both suites, about 50 s
+target/release/dasher-bench micro --filter dom        # one suite
+target/release/dasher-bench micro --filter shape      # names containing "shape"
+target/release/dasher-bench micro --runs 9 --json micro.json
+```
+
+The loops are in [`micro/language.js`](micro/language.js) and
+[`micro/dom.js`](micro/dom.js), one `bench(name, iterations, fn)` call each.
+Each benchmark is a page load, in a new page of one browser. The language
+suite's page is empty. The DOM suite's page is about 9,000 nodes (9,020):
+500 cards of a heading, a paragraph and a list of four links, with the
+`#target` element the calls go to in the middle and `#last` at the end. A
+query string tells the suite's script which loop to run. The same page with
+no loop to run is the baseline. The cost of a benchmark is the median CPU
+time of its loads less the median of the baseline's, divided by its
+iterations. CPU time is that of the thread running the page, so the
+in-process fixture server does not count. Before timing, a loop that takes
+under 100 ms gets more iterations in proportion, so its time stays well
+above the baseline's jitter as dasher gets faster. That leaves ns per op
+comparable across builds. A loop body must not change, though: once it
+does, old numbers no longer compare. Two full runs of one build agreed to
+within 3% on all but one benchmark (innerText, 11%). Check a surprising
+change with `--filter` and more `--runs`.
+
+[`micro/node.js`](micro/node.js) runs the language loops under Node, sized
+and timed the same way, for a V8 reference on the same machine:
+
+```sh
+node --jitless --single-threaded crates/bench/micro/node.js [filter]
+```
+
+`--jitless` takes away V8's compilers but keeps its interpreter's inline
+caches. That is the fair comparison for page-load code: on real pages V8's
+JIT tiers were worth nothing (0.98×). `--single-threaded` keeps GC on one
+thread, as in dasher.
+
+### Baseline
+
+Release build (`aarch64-unknown-linux-gnu`) of commit `babeb38` on an AWS
+Graviton4 (Neoverse-V2), 2026-11-13, median of 5 runs. Node 22.23
+(`--jitless --single-threaded`) on the same machine.
+
+The "audit" columns are from an earlier audit of the same commit against
+V8 with its JIT off, and against Lightpanda for DOM calls. It ran on
+another machine with loops of its own, so its seconds do not compare with
+ns per op here. Compare the ratios instead. Where the two ratios differ by
+a lot (regexps, object literals, for-in, map/filter/reduce, JSON), the loops here do a different
+mix of work. Lightpanda does real layout, which is why its
+`getBoundingClientRect` is slow.
+
+| benchmark | dasher ns/op | Node `--jitless` ns/op | dasher ÷ Node | audit: dasher s | audit: V8 no JIT s | dasher ÷ V8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| function call | 56.5 | 30.6 | 1.8× | 0.66 | 0.45 | 1.5× |
+| method call | 80.5 | 37.8 | 2.1× | 0.71 | 0.62 | 1.1× |
+| create+call closure | 179 | 95.9 | 1.9× | 0.61 | 0.28 | 2.2× |
+| integer loop | 34.0 | 15.6 | 2.2× | 3.09 | 2.18 | 1.4× |
+| property read/write, one shape | 58.0 | 26.3 | 2.2× | 1.99 | 1.31 | 1.5× |
+| property read/write, four shapes | 73.6 | 33.2 | 2.2× | 1.46 | 1.10 | 1.3× |
+| property read/write, 64 shapes | 69.7 | 35.5 | 2.0× | 1.16 | 0.77 | 1.5× |
+| object literal | 264 | 33.1 | 8.0× | 0.94 | 0.27 | 3.5× |
+| spread and Object.assign | 869 | 147 | 5.9× | 0.85 | 0.17 | 5.0× |
+| destructuring and rest/spread | 1,242 | 342 | 3.6× | 2.08 | 0.68 | 3.1× |
+| apply and arguments | 370 | 130 | 2.8× | 1.46 | 0.59 | 2.5× |
+| map/filter/reduce | 2,133 | 670 | 3.2× | 0.26 | 0.20 | 1.3× |
+| concat.apply | 828 | 198 | 4.2× | 0.62 | 0.25 | 2.5× |
+| string concat | 153 | 44.0 | 3.5× | 0.19 | 0.05 | 3.8× |
+| string methods | 1,471 | 564 | 2.6× | 0.29 | 0.16 | 1.8× |
+| regexps | 6,146 | 510 | 12.1× | 0.42 | 0.11 | 3.8× |
+| JSON | 4,337 | 1,178 | 3.7× | 0.29 | 0.04 | 7.2× |
+| Map/Set | 267 | 103 | 2.6× | 0.60 | 0.44 | 1.4× |
+| class instantiation | 264 | 94.2 | 2.8× | 0.87 | 0.44 | 2.0× |
+| promise chain | 1,216 | 294 | 4.1× | 0.23 | 0.09 | 2.6× |
+| async/await | 785 | 138 | 5.7× | 0.19 | 0.05 | 3.8× |
+| generators | 64.1 | 83.3 | 0.8× | 0.09 | 0.17 | 0.5× |
+| Date and Intl formatting | 47,141 | 2,532 | 18.6× | 1.14 | 0.14 | 8.1× |
+| try/catch | 157 | 714 | 0.2× | 0.07 | 0.25 | 0.3× |
+| for-in and Object.keys | 1,311 | 170 | 7.7× | 1.82 | 1.11 | 1.6× |
+| URL parsing | 2,948 | 1,482 | 2.0× | 0.62 | 0.23 | 2.7× |
+| new Function | 3,619 | 1,066 | 3.4× | 0.20 | 0.04 | 5.0× |
+
+| benchmark | dasher ns/op | audit: dasher ns | audit: Lightpanda ns | dasher ÷ Lightpanda |
+| --- | ---: | ---: | ---: | ---: |
+| getElementById | 69,377 | 61,465 | 270 | 227.6× |
+| getComputedStyle | 40,009 | 19,815 | 70 | 283.1× |
+| classList.contains | 5,878 | 3,505 | 130 | 27.0× |
+| style.setProperty | 5,671 | 3,432 | 303 | 11.3× |
+| add+removeEventListener | 3,480 | 2,165 | 220 | 9.8× |
+| clientWidth | 2,406 | 1,685 | 50 | 33.7× |
+| append+removeChild | 1,934 | 1,315 | 220 | 6.0× |
+| dataset.x | 1,894 | 1,198 | 137 | 8.7× |
+| setAttribute | 1,231 | 865 | 170 | 5.1× |
+| attributes.length | 1,319 | 798 | 70 | 11.4× |
+| getAttribute | 715 | 465 | 120 | 3.9× |
+| matches(tag) | 642 | 365 | 90 | 4.1× |
+| querySelector(tag) | 710 | 432 | 103 | 4.2× |
+| tagName | 329 | 175 | 60 | 2.9× |
+| nextSibling | 251 | 165 | 50 | 3.3× |
+| nodeType | 197 | 115 | 40 | 2.9× |
+| shadowRoot | 209 | 115 | 40 | 2.9× |
+| children | 357 | 215 | 350 | 0.6× |
+| innerText | 374 | 215 | 220 | 1.0× |
+| createElement | 1,607 | 915 | 470 | 1.9× |
+| document.cookie | 503 | 165 | 320 | 0.5× |
+| getBoundingClientRect | 2,236 | 1,615 | 24,770 | 0.1× |
+| querySelectorAll(#id) | 116,395 | | | |
+| querySelectorAll(.class) | 171,475 | | | |
+| querySelectorAll(tag) | 269,684 | | | |
+
+Most DOM calls here cost 1.5 to 2 times the audit's figures, ranging from
+1.1 times for getElementById to 3 times for `document.cookie`. That fits a
+slower machine and loops that differ in detail. The ratios to Lightpanda
+are what to aim at.
 
 ## Per-page limits
 

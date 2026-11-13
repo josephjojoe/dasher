@@ -11,9 +11,13 @@
 //! target/release/dasher-bench --budgets crates/bench/budgets.json
 //! ```
 //!
+//! `dasher-bench micro` instead times small loops of language operations
+//! and DOM calls (see `micro.rs`).
+//!
 //! See `crates/bench/README.md` for what each number means.
 
 mod fixtures;
+mod micro;
 mod report;
 mod sys;
 
@@ -29,6 +33,7 @@ use crate::report::{Budgets, Results};
 
 const USAGE: &str = "\
 usage: dasher-bench [options]
+       dasher-bench micro [options]   (CPU per operation; see `micro --help`)
 
 Loads each fixture page in a fresh process and reports peak RSS, per-page
 memory, time to settle, idle RSS, memory over sequential jobs, cold start
@@ -60,6 +65,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("child-page") => child(|| child_page(&args[1..])),
         Some("child-jobs") => child(|| child_jobs(&args[1..])),
+        Some("micro") => micro::main(&args[1..]),
         _ => match parse(&args) {
             Ok(Some(options)) => run(&options),
             Ok(None) => {
