@@ -12,7 +12,7 @@ use std::sync::Arc;
 use dasher_dom::NodeId;
 use rquickjs::{Ctx, Function, JsLifetime, Object, Value};
 
-use crate::dom;
+use crate::dom::{self, HeldNode};
 use crate::error::ScriptError;
 use crate::events::{self, HostTarget};
 use crate::modules;
@@ -106,6 +106,9 @@ pub struct InsertedScript {
     /// time, until the loader is done with the script. Drop it once the
     /// script has run or failed.
     pub operation: PendingOperation,
+    /// Keeps the element from being freed, even if script removes it, until
+    /// the loader is done with it. Drop it with `operation`.
+    pub hold: HeldNode,
 }
 
 /// Loader state shared with the native functions.
@@ -181,6 +184,7 @@ pub(crate) fn install<'js>(
                     element,
                     non_blocking,
                     operation,
+                    hold: HeldNode::new(&s.dom, element),
                 });
                 state.inserted_notify.notify_one();
             },
