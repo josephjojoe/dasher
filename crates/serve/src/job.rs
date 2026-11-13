@@ -101,6 +101,10 @@ pub struct Job {
     /// only waiting on them.
     #[serde(default)]
     pub realtime: bool,
+    /// What counts as in view, which decides how much lazy content loads
+    /// and what it costs. Defaults to [`Visibility::Loaded`].
+    #[serde(default)]
+    pub visibility: Visibility,
 }
 
 impl Job {
@@ -208,6 +212,32 @@ pub enum Wait {
     /// Both `network-idle` and `dom-quiet` (the default).
     #[default]
     Settled,
+}
+
+/// What counts as in view: `"loaded"`, `"all"` or `"viewport"`. See
+/// [`dasher::Visibility`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Visibility {
+    /// The page as it stood at load is in view; what it adds later is
+    /// below the fold until scrolling reveals it (the default).
+    #[default]
+    Loaded,
+    /// Everything is in view, always: the most lazy content, but a page
+    /// that keeps loading more can run to the timeout.
+    All,
+    /// Only what is scrolled to: the least work and the least content.
+    Viewport,
+}
+
+impl From<Visibility> for dasher::Visibility {
+    fn from(v: Visibility) -> Self {
+        match v {
+            Visibility::Loaded => Self::Loaded,
+            Visibility::All => Self::All,
+            Visibility::Viewport => Self::Viewport,
+        }
+    }
 }
 
 /// Whether, and how far, to scroll the page after loading it.
@@ -427,6 +457,7 @@ mod tests {
         assert!(job.wants_html());
         assert!(job.extract.is_empty() && job.headers.is_empty());
         assert!(!job.realtime);
+        assert_eq!(job.visibility, Visibility::Loaded);
     }
 
     #[test]
@@ -449,6 +480,7 @@ mod tests {
             "block": ["*ads*"],
             "proxy": "http://proxy:3128",
             "realtime": true,
+            "visibility": "viewport",
         }))
         .unwrap();
         assert_eq!(job.wait, Wait::NetworkIdle2);
@@ -471,6 +503,15 @@ mod tests {
         );
         assert_eq!(job.selectors().collect::<Vec<_>>(), [".item", "h1"]);
         assert!(job.realtime);
+        assert_eq!(job.visibility, Visibility::Viewport);
+    }
+
+    #[test]
+    fn visibility_is_one_of_three_names() {
+        let visibility = |v| job(json!({"url": "u", "visibility": v})).map(|j| j.visibility);
+        assert_eq!(visibility(json!("all")), Ok(Visibility::All));
+        assert_eq!(visibility(json!("loaded")), Ok(Visibility::Loaded));
+        assert!(visibility(json!("everything")).is_err());
     }
 
     #[test]

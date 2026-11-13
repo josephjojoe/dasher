@@ -186,6 +186,7 @@ error, so typos don't go unnoticed.
 | `block` | | URL patterns to refuse, `*` as a wildcard: `"*://*.doubleclick.net/*"`. |
 | `proxy` | | An `http://user:pass@host:port` proxy. It resolves host names itself, so the private address check sees less; see [Security](#security). |
 | `realtime` | `false` | Run timers in real time instead of skipping ahead when the page only waits on them. |
+| `visibility` | `"loaded"` | What counts as in view, which decides how much lazy content loads: `"loaded"` (the page as it stood at load; what it adds later is below the fold until `scroll` reveals it), `"all"` (everything, always: the most lazy content, but a page that keeps loading more runs to the timeout) or `"viewport"` (only what is scrolled to: the least work and content). See [Visibility](../README.md#visibility). |
 
 Each `extract` entry is either a CSS selector, giving the text of the
 first match (or `null`), or an object:

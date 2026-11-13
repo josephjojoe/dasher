@@ -141,17 +141,22 @@
 //! # Scrolling and lazy content
 //!
 //! Nothing is laid out, but layout queries get synthetic answers chosen so
-//! that lazy content loads (see [`LayoutMode`]). By default every element
-//! is in view: `IntersectionObserver` reports it intersecting as soon as it
-//! is observed, so lazy images and sections load during the settle, and
-//! the document is tall enough to scroll. [`Page::auto_scroll`] then works
+//! that lazy content loads (see [`Visibility`]). By default everything the
+//! document holds when the load event has run is in view:
+//! `IntersectionObserver` reports it intersecting as soon as it is
+//! observed, so lazy images and sections present at load arrive during the
+//! settle, and the document is tall enough to scroll. What the page
+//! inserts after load is below the fold, pushing what follows it down, so
+//! a loader that keeps checking whether its "load more" element is still
+//! in view stops after about a viewport of new content, as in a browser.
+//! [`Page::auto_scroll`] reveals it before each round, and so works
 //! through infinite feeds: it scrolls to the bottom a viewport at a time,
 //! settles, and repeats until scrolling brings nothing new or a limit is
 //! hit. Feeds that listen for `scroll` events and ones that watch a
 //! sentinel element with `IntersectionObserver` both keep loading.
 //!
 //! [`ClockMode::Virtual`]: dasher_js::ClockMode::Virtual
-//! [`LayoutMode`]: dasher_js::LayoutMode
+//! [`Visibility`]: dasher_js::Visibility
 //!
 //! ```no_run
 //! use dasher_net::Client;

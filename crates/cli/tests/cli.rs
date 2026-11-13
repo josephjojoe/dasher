@@ -179,12 +179,29 @@ fn scroll_loads_more_of_a_feed() {
     let count = "document.querySelectorAll('article').length";
     assert_eq!(stdout(&dasher(&[&url, "-e", count])), "1\n");
     assert_eq!(stdout(&dasher(&[&url, "--scroll", "-e", count])), "7\n");
+    // One round steps a viewport down and then nudges at the bottom: two
+    // scroll events, and this feed loads a page on each.
     assert_eq!(
         stdout(&dasher(&[&url, "--max-scrolls", "1", "-e", count])),
+        "5\n"
+    );
+    // Under `all` the one-post document is a single viewport tall, so
+    // there is only the nudge.
+    assert_eq!(
+        stdout(&dasher(&[
+            &url,
+            "--visibility",
+            "all",
+            "--max-scrolls",
+            "1",
+            "-e",
+            count
+        ])),
         "3\n"
     );
+    // Its three pages come in over two rounds.
     let out = json(&dasher(&[&url, "--scroll", "--json", "-e", "1"]));
-    assert_eq!(out["scroll"]["productive_scrolls"], 3);
+    assert_eq!(out["scroll"]["productive_scrolls"], 2);
     assert_eq!(out["scroll"]["stopped"], "no_new_content");
 }
 

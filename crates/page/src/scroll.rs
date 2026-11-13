@@ -122,7 +122,7 @@ impl Page {
     /// Each round scrolls the window down to the bottom of the document a
     /// viewport at a time, letting the page handle each step (`scroll`
     /// events, `IntersectionObserver` callbacks; see
-    /// [`LayoutMode`](dasher_js::LayoutMode)), then
+    /// [`Visibility`](dasher_js::Visibility)), then
     /// [settles](Self::settle) with [`AutoScrollOptions::settle`]. A round
     /// brought new content if the elements or text in the document changed.
     ///
@@ -194,6 +194,9 @@ impl Page {
     /// to each step, so whatever watches for elements coming into view
     /// sees every one pass, then scrolls to the very bottom.
     fn scroll_down(&self) {
+        // Scrolling is what brings appended content into view under the
+        // default visibility.
+        self.js.reveal();
         for _ in 0..MAX_STEPS {
             let more = self.js.eval_truthy(STEP_DOWN).unwrap_or(false);
             // Scroll listeners and IntersectionObserver callbacks; errors are
