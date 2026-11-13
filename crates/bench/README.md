@@ -560,6 +560,43 @@ run-to-run noise (±0.5 MiB). There is no class or tag index and no
 ancestor filter: a tree walk costs about 10 ns per element, and an index
 would cost every page memory for the few that query that way.
 
+### Native events
+
+Events are native since DAS-44 (see `crates/js/src/events/`): listener
+storage, `Event` objects and dispatch are Rust, and the event path is
+walked on node ids. On this machine, median of 5 runs, against
+Lightpanda's nightly (1.1.0-nightly.12116) timed on the same loops with
+[`micro/lightpanda.py`](micro/lightpanda.py):
+
+| benchmark | before (main at `c13aea4`) | after | Lightpanda | after ÷ Lightpanda |
+| --- | ---: | ---: | ---: | ---: |
+| add+removeEventListener | 3,378 | 235 | 233 | 1.0× |
+| dispatchEvent, bubbling 3 levels | 19,073 | 1,369 | 1,734 | 0.8× |
+| tagName (for scale) | 97.3 | 95.3 | 72 | 1.3× |
+
+The other DOM rows did not move beyond noise.
+
+The dispatch loop makes a bubbling `Event` and dispatches it at a span
+whose listener is three levels up, on the body: seven targets on the path
+(span, `#target`, `main`, body, html, document, window), one of them with
+a listener. Firing an event no listener could hear, as the host does for
+`load`, `DOMContentLoaded`, script `load` and `error` or
+`readystatechange` on most pages, makes no event object and no wrappers
+and runs no JS: the path is checked for listeners, handlers and handler
+attributes first.
+
+`micro/lightpanda.py` serves the micro-benchmark page and loops to a
+Lightpanda binary and reports ns per op the way `dasher-bench micro` does,
+from the process CPU time of `lightpanda fetch` with and without a loop:
+
+```sh
+python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
+    "add+removeEventListener=500000" "dispatchEvent, bubbling 3 levels=200000"
+```
+
+Its tagName figure (72 ns here, 60 in the audit) puts this machine about
+1.2 times slower than the audit's for Lightpanda.
+
 ## Per-page limits
 
 Each page has two hard limits. Going over either one stops the page and

@@ -44,6 +44,5 @@
       }
       return internals.fire(target ?? globalThis, type, init);
     },
-    document: internals.document,
   };
 })

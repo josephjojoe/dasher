@@ -826,7 +826,9 @@ fn install<'js>(
     shared: &Rc<Shared>,
     options: &RuntimeOptions,
 ) -> rquickjs::Result<()> {
+    crate::native_data::NativeData::install(ctx)?;
     let native = Object::new(ctx.clone())?;
+    crate::events::install(ctx, &native, shared)?;
 
     let s = Rc::clone(shared);
     native.set(
