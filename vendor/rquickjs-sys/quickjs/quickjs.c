@@ -738,6 +738,12 @@ typedef struct JSFunctionBytecode {
     /* dasher: when not NULL, `source` points into this shared copy of the
        whole script instead of being a block of its own */
     struct JSSourceText *source_text;
+    /* dasher: for each object literal site (OP_object_site), the shape
+       its object had when the literal ended, or NULL until one has run.
+       Grown on demand, so bytecode read back with JS_ReadObject starts
+       with none. */
+    JSShape **object_shapes;
+    int object_shape_count;
 } JSFunctionBytecode;
 
 /* dasher: the text of one compiled script, shared by every function that
@@ -6211,6 +6217,11 @@ static void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
             int i;
             for(i = 0; i < b->cpool_count; i++) {
                 JS_MarkValue(rt, b->cpool[i], mark_func);
+            }
+            /* dasher: the shapes noted for object literals */
+            for(i = 0; i < b->object_shape_count; i++) {
+                if (b->object_shapes[i])
+                    mark_func(rt, &b->object_shapes[i]->header);
             }
             if (b->realm)
                 mark_func(rt, &b->realm->header);
@@ -16646,6 +16657,46 @@ static bool needs_backtrace(JSValue exc)
     return !find_own_property1(p, JS_ATOM_stack);
 }
 
+/* dasher: notes the shape the object literal at 'site' of 'b' ended with,
+   for OP_object_site to make the next one with. Only a hashed shape with
+   Object.prototype and nothing but configurable, writable and enumerable
+   data properties is kept: the shape a run of define_field ops gives. The
+   reference held here keeps it from being changed in place. Failing to
+   note it only means the next literal is built the long way. */
+static void js_note_object_shape(JSContext *ctx, JSFunctionBytecode *b,
+                                 int site, JSValueConst obj)
+{
+    JSObject *p;
+    JSShape *sh;
+    int i;
+
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return;
+    p = JS_VALUE_GET_OBJ(obj);
+    sh = p->shape;
+    if (p->class_id != JS_CLASS_OBJECT || !sh->is_hashed ||
+        sh->deleted_prop_count != 0 || sh->prop_count == 0 ||
+        JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_OBJECT]) != JS_TAG_OBJECT ||
+        sh->proto != JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_OBJECT]))
+        return;
+    for(i = 0; i < sh->prop_count; i++) {
+        if (sh->prop[i].flags != JS_PROP_C_W_E)
+            return;
+    }
+    if (site >= b->object_shape_count) {
+        JSShape **tab;
+        int n = max_int(site + 1, b->object_shape_count * 2);
+        tab = js_realloc_rt(ctx->rt, b->object_shapes, sizeof(tab[0]) * n);
+        if (!tab)
+            return;
+        for(i = b->object_shape_count; i < n; i++)
+            tab[i] = NULL;
+        b->object_shapes = tab;
+        b->object_shape_count = n;
+    }
+    b->object_shapes[site] = js_dup_shape(sh);
+}
+
 /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
 static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                JSValueConst this_obj, JSValueConst new_target,
@@ -16879,6 +16930,46 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             *sp++ = JS_NewObject(ctx);
             if (unlikely(JS_IsException(sp[-1])))
                 goto exception;
+            BREAK;
+        CASE(OP_object_site):
+            /* dasher: an object literal with fixed keys. Once one has run,
+               the next is made with the shape it ended with, every
+               property already in place and undefined, and each
+               define_field that follows stores its value in place. Until
+               the literal ends nothing but this frame can reach the
+               object, so the order of the properties and their attributes
+               are all a script can see, and those are the same. */
+            {
+                int site = get_u16(pc);
+                JSShape *sh;
+                pc += 2;
+                if (likely(site < b->object_shape_count) &&
+                    (sh = b->object_shapes[site]) != NULL) {
+                    JSValue obj;
+                    JSProperty *pr;
+                    obj = JS_NewObjectFromShape(ctx, js_dup_shape(sh),
+                                                JS_CLASS_OBJECT);
+                    if (unlikely(JS_IsException(obj)))
+                        goto exception;
+                    pr = JS_VALUE_GET_OBJ(obj)->prop;
+                    for(i = 0; i < sh->prop_count; i++)
+                        pr[i].u.value = JS_UNDEFINED;
+                    *sp++ = obj;
+                } else {
+                    *sp++ = JS_NewObject(ctx);
+                    if (unlikely(JS_IsException(sp[-1])))
+                        goto exception;
+                }
+            }
+            BREAK;
+        CASE(OP_object_site_end):
+            {
+                int site = get_u16(pc);
+                pc += 2;
+                if (unlikely(site >= b->object_shape_count ||
+                             !b->object_shapes[site]))
+                    js_note_object_shape(ctx, b, site, sp[-1]);
+            }
             BREAK;
         CASE(OP_special_object):
             {
@@ -18146,6 +18237,24 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 JSAtom atom;
                 atom = get_u32(pc);
                 pc += 4;
+
+                /* dasher: an existing plain data property that is
+                   configurable, writable and enumerable takes the value
+                   as it is, which is all a definition with those
+                   attributes does to it. This is every property of an
+                   object made by OP_object_site. */
+                if (likely(JS_VALUE_GET_TAG(sp[-2]) == JS_TAG_OBJECT)) {
+                    JSObject *p1 = JS_VALUE_GET_OBJ(sp[-2]);
+                    JSShapeProperty *prs;
+                    JSProperty *pr;
+                    if (p1->class_id == JS_CLASS_OBJECT &&
+                        (prs = find_own_property(&pr, p1, atom)) != NULL &&
+                        prs->flags == JS_PROP_C_W_E) {
+                        set_value(ctx, &pr->u.value, sp[-1]);
+                        sp--;
+                        BREAK;
+                    }
+                }
 
                 ret = JS_DefinePropertyValue(ctx, sp[-2], atom, sp[-1],
                                              JS_PROP_C_W_E | JS_PROP_THROW);
@@ -20600,6 +20709,7 @@ typedef struct JSFunctionDef {
     char *source;  /* raw source, utf-8 encoded; points into source_text */
     int source_len;
     JSSourceText *source_text; /* dasher: counted reference, or NULL */
+    int object_site_count; /* dasher: object literal sites numbered so far */
 
     JSModuleDef *module; /* != NULL when parsing a module */
 } JSFunctionDef;
@@ -23628,11 +23738,19 @@ static __exception int js_parse_object_literal(JSParseState *s)
     const uint8_t *start_ptr;
     int start_line, start_col, prop_type;
     bool has_proto;
+    bool fixed_keys; /* dasher */
+    int site_pos, prop_count; /* dasher */
 
     if (next_token(s))
         goto fail;
-    /* XXX: add an initial length that will be patched back */
-    emit_op(s, OP_object);
+    /* dasher: a literal whose properties are all `name: value` or
+       `name` gets a site (see OP_object_site); the operand is patched
+       once that is known. */
+    emit_op(s, OP_object_start);
+    site_pos = s->cur_func->byte_code.size;
+    emit_u16(s, 0xffff);
+    fixed_keys = true;
+    prop_count = 0;
     has_proto = false;
     while (s->token.val != '}') {
         /* specific case for getter/setter */
@@ -23640,7 +23758,9 @@ static __exception int js_parse_object_literal(JSParseState *s)
         start_line = s->token.line_num;
         start_col = s->token.col_num;
 
+        prop_count++;
         if (s->token.val == TOK_ELLIPSIS) {
+            fixed_keys = false;
             if (next_token(s))
                 return -1;
             if (js_parse_assign_expr(s))
@@ -23671,6 +23791,7 @@ static __exception int js_parse_object_literal(JSParseState *s)
             JSFunctionKindEnum func_kind;
             int op_flags;
 
+            fixed_keys = false;
             func_kind = JS_FUNC_NORMAL;
             if (is_getset) {
                 func_type = JS_PARSE_FUNC_GETTER + prop_type - PROP_TYPE_GET;
@@ -23705,10 +23826,12 @@ static __exception int js_parse_object_literal(JSParseState *s)
             if (js_parse_assign_expr(s))
                 goto fail;
             if (name == JS_ATOM_NULL) {
+                fixed_keys = false;
                 set_object_name_computed(s);
                 emit_op(s, OP_define_array_el);
                 emit_op(s, OP_drop);
             } else if (name == JS_ATOM___proto__) {
+                fixed_keys = false;
                 if (has_proto) {
                     js_parse_error(s, "duplicate __proto__ property name");
                     goto fail;
@@ -23731,6 +23854,14 @@ static __exception int js_parse_object_literal(JSParseState *s)
     }
     if (js_parse_expect(s, '}'))
         goto fail;
+    /* dasher: number the site, and mark where the literal ends */
+    if (fixed_keys && prop_count > 0 &&
+        s->cur_func->object_site_count < 0xffff) {
+        int site = s->cur_func->object_site_count++;
+        put_u16(s->cur_func->byte_code.buf + site_pos, site);
+        emit_op(s, OP_object_end);
+        emit_u16(s, site);
+    }
     return 0;
  fail:
     JS_FreeAtom(s->ctx, name);
@@ -33968,6 +34099,15 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
             }
             goto no_change;
 
+        case OP_object_start:
+            /* dasher: a literal with a site, or a plain OP_object */
+            if (get_u16(bc_buf + pos + 1) != 0xffff) {
+                add_pc2line_info(s, bc_out.size, line_num, col_num);
+                dbuf_putc(&bc_out, OP_object_site);
+                dbuf_put_u16(&bc_out, get_u16(bc_buf + pos + 1));
+                break;
+            }
+            /* fall through */
         case OP_object:
             if (code_match(&cc, pos_next, OP_null, OP_set_proto, -1)) {
                 if (cc.line_num >= 0) line_num = cc.line_num;
@@ -33978,7 +34118,18 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                 pos_next = cc.pos;
                 break;
             }
+            if (op == OP_object_start) {
+                add_pc2line_info(s, bc_out.size, line_num, col_num);
+                dbuf_putc(&bc_out, OP_object);
+                break;
+            }
             goto no_change;
+
+        case OP_object_end:
+            add_pc2line_info(s, bc_out.size, line_num, col_num);
+            dbuf_putc(&bc_out, OP_object_site_end);
+            dbuf_put_u16(&bc_out, get_u16(bc_buf + pos + 1));
+            break;
 
         default:
         no_change:
@@ -34598,6 +34749,11 @@ static void free_function_bytecode(JSRuntime *rt, JSFunctionBytecode *b)
     }
     for(i = 0; i < b->cpool_count; i++)
         JS_FreeValueRT(rt, b->cpool[i]);
+
+    /* dasher: the shapes noted for object literals */
+    for(i = 0; i < b->object_shape_count; i++)
+        js_free_shape_null(rt, b->object_shapes[i]);
+    js_free_rt(rt, b->object_shapes);
 
     for(i = 0; i < b->closure_var_count; i++) {
         JSClosureVar *cv = &b->closure_var[i];

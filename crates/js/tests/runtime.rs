@@ -466,3 +466,21 @@ fn increments_give_the_same_values_on_every_path() {
     );
     assert!(js.errors().is_empty());
 }
+
+/// An object literal with fixed keys is made, after its first run, from the
+/// shape it ended with, and `define_field` stores into a property already
+/// there (see `PATCHES.md`). Scripts see the same properties, order and
+/// attributes, and class fields behave as before.
+#[test]
+fn object_literals_have_the_properties_scripts_expect() {
+    let js = runtime();
+    assert_eq!(
+        js.eval_json(include_str!("fixtures/object_literals.js"))
+            .unwrap()
+            .as_deref(),
+        Some(
+            r#"["a:0:111 b:2:111 c:x:111 d:null:111","a:3:111 b:2:111","0:zero:111 1:one:111 2:two:111 z:0:111 quoted key:1:111 x:sx0:111","a:1:111 proto:null","a:1:111 isArray:true","__proto__:5:111 a:1:111","sx0:1:111 a:2:111","a:3:111 b:2:111 c:4:111","m:fn:111 g:accessor:NaN11 a:1:111","fn:fn:111 arrow:fn:111 cls:fn:111 fn,arrow,cls","nested:obj:111 after:1:111","b:2:111 c:3:111 / a:1:111 b:2:111","a:1:010 b:2:010 / a:1:111 b:2:111 false","k:1:101 / k:1:111","in value","10,b,a {\"b\":1,\"a\":[1,{\"c\":2}]}","21 191","a:A:111 b:B:111","a:changed:111 b:2:111 / a:1:111","a:1:111 b:2:111 c:x:111 d:null:111","a:3:111 b:2:111","0:zero:111 1:one:111 2:two:111 z:0:111 quoted key:1:111 x:sx1:111","a:1:111 proto:null","a:1:111 isArray:true","__proto__:5:111 a:1:111","sx1:1:111 a:2:111","a:3:111 b:2:111 c:4:111","m:fn:111 g:accessor:NaN11 a:1:111","fn:fn:111 arrow:fn:111 cls:fn:111 fn,arrow,cls","nested:obj:111 after:1:111","b:2:111 c:3:111 / a:1:111 b:2:111","a:1:010 b:2:010 / a:1:111 b:2:111 false","k:1:101 / k:1:111","in value","10,b,a {\"b\":1,\"a\":[1,{\"c\":2}]}","21 191","a:A:111 b:B:111","a:changed:111 b:2:111 / a:1:111","a:2:111 b:2:111 c:x:111 d:null:111","a:3:111 b:2:111","0:zero:111 1:one:111 2:two:111 z:0:111 quoted key:1:111 x:sx2:111","a:1:111 proto:null","a:1:111 isArray:true","__proto__:5:111 a:1:111","sx2:1:111 a:2:111","a:3:111 b:2:111 c:4:111","m:fn:111 g:accessor:NaN11 a:1:111","fn:fn:111 arrow:fn:111 cls:fn:111 fn,arrow,cls","nested:obj:111 after:1:111","b:2:111 c:3:111 / a:1:111 b:2:111","a:1:010 b:2:010 / a:1:111 b:2:111 false","k:1:101 / k:1:111","in value","10,b,a {\"b\":1,\"a\":[1,{\"c\":2}]}","21 191","a:A:111 b:B:111","a:changed:111 b:2:111 / a:1:111","trap:0:111 other:1:111 proto","trap:1:111 other:1:111 proto","a:1:111 b:2:111 / a:3:111 b:2:111 c:4:111 / x:2:111","TypeError","TypeError","a:1:111 b:2:111 / a:3:111 b:2:111 c:4:111 / x:2:111","TypeError","TypeError","a:1:111 b:2:111 / a:3:111 b:2:111 c:4:111 / x:2:111","TypeError","TypeError","1,2,3,1,2,3,1,2,3,trap f,trap f,trap f"]"#
+        )
+    );
+    assert!(js.errors().is_empty());
+}
