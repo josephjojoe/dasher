@@ -1148,9 +1148,9 @@ static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
 static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,
                                       JSValueConst this_obj,
                                       int argc, JSValueConst *argv, int flags);
-static JSValue JS_CallInternal(JSContext *ctx, JSValueConst func_obj,
-                               JSValueConst this_obj, JSValueConst new_target,
-                               int argc, JSValueConst *argv, int flags);
+static inline JSValue JS_CallInternal(JSContext *ctx, JSValueConst func_obj,
+                                      JSValueConst this_obj, JSValueConst new_target,
+                                      int argc, JSValueConst *argv, int flags);
 static JSValue JS_CallConstructorInternal(JSContext *ctx,
                                           JSValueConst func_obj,
                                           JSValueConst new_target,
@@ -17076,7 +17076,9 @@ static void js_note_object_shape(JSContext *ctx, JSFunctionBytecode *b,
 }
 
 /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
-static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+/* dasher: called through JS_CallInternal(), which calls C functions and
+   the other classes with a call handler itself */
+static no_inline JSValue JS_CallInterpreter(JSContext *caller_ctx, JSValueConst func_obj,
                                JSValueConst this_obj, JSValueConst new_target,
                                int argc, JSValueConst *argv, int flags)
 {
@@ -19740,6 +19742,31 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
     }
     rt->current_stack_frame = sf->prev_frame;
     return ret_val;
+}
+
+/* dasher: a call to anything but bytecode goes to its class's call
+   handler without entering the interpreter, whose entry saves every
+   register and sets up a frame of over a kilobyte. The checks are the
+   ones the interpreter makes first, in the same order. */
+static inline JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                                      JSValueConst this_obj, JSValueConst new_target,
+                                      int argc, JSValueConst *argv, int flags)
+{
+    if (likely(JS_VALUE_GET_TAG(func_obj) == JS_TAG_OBJECT)) {
+        JSObject *p = JS_VALUE_GET_OBJ(func_obj);
+        if (p->class_id != JS_CLASS_BYTECODE_FUNCTION) {
+            JSClassCall *call_func;
+            if (js_poll_interrupts(caller_ctx))
+                return JS_EXCEPTION;
+            call_func = caller_ctx->rt->class_array[p->class_id].call;
+            if (!call_func)
+                return JS_ThrowTypeErrorNotAFunction(caller_ctx);
+            return call_func(caller_ctx, func_obj, this_obj, argc,
+                             argv, flags);
+        }
+    }
+    return JS_CallInterpreter(caller_ctx, func_obj, this_obj, new_target,
+                              argc, argv, flags);
 }
 
 JSValue JS_Call(JSContext *ctx, JSValueConst func_obj, JSValueConst this_obj,
