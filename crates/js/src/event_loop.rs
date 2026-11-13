@@ -307,6 +307,20 @@ impl JsRuntime {
             && !self.shared().dom.layout_changed()
     }
 
+    /// Whether work is runnable right now: a queued task, a task posted
+    /// from another thread, a timer or animation frame that is due, or
+    /// microtasks. `requestIdleCallback` callbacks do not count. A page
+    /// in the middle of a run of tasks is not quiet, however long since
+    /// its document last changed.
+    pub fn has_work_due(&self) -> bool {
+        let state = self.event_loop();
+        let now = state.clock.now();
+        !state.tasks.borrow().is_empty()
+            || self.shared().remote.has_queued()
+            || state.next_holding_wakeup().is_some_and(|due| due <= now)
+            || self.has_pending_microtasks()
+    }
+
     /// Runs everything that is runnable at the current page time (queued
     /// tasks, due timers and a due animation frame, each followed by a
     /// microtask checkpoint) until nothing is. Does not move the clock.

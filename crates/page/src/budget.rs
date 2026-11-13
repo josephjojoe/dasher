@@ -6,7 +6,7 @@ use std::time::Duration;
 pub const DEFAULT_PAGE_TIME_BUDGET: Duration = Duration::from_secs(5);
 
 /// Default for [`WorkBudget::cpu`].
-pub const DEFAULT_CPU_BUDGET: Duration = Duration::from_secs(20);
+pub const DEFAULT_CPU_BUDGET: Duration = Duration::from_secs(10);
 
 /// Default for [`WorkBudget::requests`].
 pub const DEFAULT_REQUEST_BUDGET: u64 = 1000;

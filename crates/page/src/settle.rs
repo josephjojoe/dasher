@@ -259,6 +259,13 @@ impl Page {
                     wake = Some(wake.map_or(since + quiet, |w| w.min(since + quiet)));
                 }
             }
+            // Quiet means nothing is running either: a page working through
+            // a run of tasks has not settled, even if its document has not
+            // changed for a while.
+            let waits_for_quiet = options.network_idle.is_some() || options.dom_quiet.is_some();
+            if met && quiet && waits_for_quiet && self.js.has_work_due() {
+                met = false;
+            }
             if let (true, Some(selector)) = (met, selector) {
                 met = self
                     .js

@@ -60,7 +60,7 @@ pub struct Job {
     /// Defaults to 5000; 0 for no limit.
     pub page_time_budget_ms: Option<u64>,
     /// The most CPU time, in milliseconds, loading, waiting and scrolling
-    /// may use. Defaults to 20 000; 0 for no limit.
+    /// may use. Defaults to 10 000; 0 for no limit.
     pub cpu_budget_ms: Option<u64>,
     /// The most requests the page may make: the document, scripts,
     /// `fetch()` and XHR. Defaults to 1000; 0 for no limit.

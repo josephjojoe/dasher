@@ -277,3 +277,17 @@ async fn idle_callbacks_do_not_hold_the_page_open() {
     assert!(number(&page, "idle") > 0);
     assert_eq!(page.run(RunLimits::default()).await, RunOutcome::Idle);
 }
+
+#[tokio::test]
+async fn a_page_busy_running_tasks_is_not_quiet() {
+    let server = server();
+    let mut page = load(&server, "/budget/busy-then-render.html").await;
+    assert_eq!(
+        page.settle(&SettleOptions::default()).await.unwrap(),
+        SettleOutcome::Settled
+    );
+    assert_eq!(
+        json(&page, "document.getElementById('status').textContent"),
+        r#""rendered""#
+    );
+}

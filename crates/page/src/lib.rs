@@ -107,6 +107,36 @@
 //! Quiet periods are page time, so under the virtual clock a page that is
 //! only waiting on timers settles without real waiting.
 //!
+//! # Budgets
+//!
+//! Some pages never go quiet: a carousel or ticker changes the document on
+//! a timer forever, a feed fetches "more stories" as soon as the last
+//! batch arrives. Under the virtual clock, skipping from one tick to the
+//! next would turn a page doing 20ms of work a second into a busy loop
+//! that runs until the timeout. Three budgets bound every page load, and
+//! when one runs out the page is left as it stands. That is not an error:
+//! what ended it is reported as [`SettleOutcome::BudgetExhausted`],
+//! [`AutoScrollStop::BudgetExhausted`] or [`Page::budget_exhausted`], with
+//! the [`Budget`] that ran out.
+//!
+//! - **Page time** ([`SettleOptions::page_time_budget`], 5 s by default):
+//!   how much page time one settle may use, skipped or passing for real,
+//!   leaving out time spent with requests in flight. Once it is used up
+//!   the clock stops skipping and the quiet conditions are given up.
+//! - **CPU** ([`WorkBudget::cpu`], 10 s by default): CPU time of the
+//!   page's thread, from the start of [`Page::load`] through settling and
+//!   scrolling.
+//! - **Requests** ([`WorkBudget::requests`], 1000 by default): requests
+//!   made through the page's session over the same span.
+//!
+//! The CPU and request budgets are set with [`PageOptions::budget`] and
+//! replaced with [`Page::set_budget`]; a page that used one up runs no JS
+//! until it gets another.
+//!
+//! Callbacks waiting in `requestIdleCallback` run as page time passes, but
+//! never hold a page open: a page whose only work left is idle callbacks
+//! counts as idle.
+//!
 //! # Scrolling and lazy content
 //!
 //! Nothing is laid out, but layout queries get synthetic answers chosen so
