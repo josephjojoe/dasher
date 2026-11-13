@@ -35,6 +35,14 @@
     if (key !== KEY) throw new TypeError('Illegal constructor');
   }
 
+  // The stand-in for a member Rust implements: N.init puts a native
+  // function in its place on the prototype (see "Native members" in
+  // dom.rs), so the stand-in only gives the property its place and
+  // attributes. The list of such members is MEMBERS in dom/members.rs.
+  function nativeMember() {
+    throw new TypeError('Illegal invocation');
+  }
+
   function requireArgs(args, n, what) {
     if (args.length < n) {
       throw new TypeError('Failed to execute ' + what + ': ' + n + ' argument' + (n === 1 ? '' : 's') +
@@ -304,20 +312,20 @@
       super();
     }
     get nodeType() {
-      return N.nodeType(this);
+      return nativeMember();
     }
     get nodeName() {
-      return N.nodeName(this);
+      return nativeMember();
     }
     get baseURI() {
       return internals.baseURL();
     }
     get isConnected() {
       // A shadow tree is connected when its host is.
-      return N.isConnected(this);
+      return nativeMember();
     }
     get ownerDocument() {
-      return N.nodeType(this) === 9 ? null : N.ownerDocument(this);
+      return nativeMember();
     }
     getRootNode(options) {
       let root = N.rootNode(this);
@@ -327,31 +335,31 @@
       return root;
     }
     get parentNode() {
-      return N.nav(this, 0);
+      return nativeMember();
     }
     get parentElement() {
-      return N.nav(this, 5);
+      return nativeMember();
     }
     hasChildNodes() {
-      return N.nav(this, 1) !== null;
+      return nativeMember();
     }
     get childNodes() {
       return cached(this, 'childNodes', () => nodeList(this, KIND.childNodes, null, null));
     }
     get firstChild() {
-      return N.nav(this, 1);
+      return nativeMember();
     }
     get lastChild() {
-      return N.nav(this, 2);
+      return nativeMember();
     }
     get previousSibling() {
-      return N.nav(this, 3);
+      return nativeMember();
     }
     get nextSibling() {
-      return N.nav(this, 4);
+      return nativeMember();
     }
     get nodeValue() {
-      return N.data(this);
+      return nativeMember();
     }
     set nodeValue(value) {
       const type = N.nodeType(this);
@@ -381,8 +389,7 @@
       return N.compare(this, other);
     }
     contains(other) {
-      if (other === null || other === undefined) return false;
-      return N.contains(this, other);
+      return nativeMember(other);
     }
     lookupPrefix(namespace) {
       for (let el = this.nodeType === 1 ? this : this.parentElement; el; el = el.parentElement) {
@@ -463,13 +470,13 @@
       return cached(this, 'children', () => htmlCollection(this, KIND.children, null, null));
     },
     get firstElementChild() {
-      return N.nav(this, 6);
+      return nativeMember();
     },
     get lastElementChild() {
-      return N.nav(this, 7);
+      return nativeMember();
     },
     get childElementCount() {
-      return N.childCount(this, true);
+      return nativeMember();
     },
     prepend(...nodes) {
       connected(N.insert(this, convertNodes(nodes), N.nav(this, 1)));
@@ -528,10 +535,10 @@
 
   const NonDocumentTypeChildNode = {
     get previousElementSibling() {
-      return N.nav(this, 8);
+      return nativeMember();
     },
     get nextElementSibling() {
-      return N.nav(this, 9);
+      return nativeMember();
     },
   };
 
@@ -563,13 +570,13 @@
 
   class CharacterData extends Node {
     get data() {
-      return N.data(this);
+      return nativeMember();
     }
     set data(value) {
       N.setData(this, value === null ? '' : str(value));
     }
     get length() {
-      return N.data(this).length;
+      return nativeMember();
     }
     substringData(offset, count) {
       const data = N.data(this);
@@ -1513,34 +1520,49 @@
   }
 
   // ---------------------------------------------------------------------
-  // Geometry. Nothing is laid out (see LayoutMode in window.rs): every
+  // Geometry. Nothing is laid out (see Visibility in window.rs): every
   // rendered element is a box as wide as the viewport, hidden ones are
-  // empty. In the default 'inView' layout each box is one 20px line at the
-  // top of the viewport, so anything gated on visibility counts as visible
-  // and in view. In the 'scrolled' layout the elements under <body> are
-  // stacked in document order, a line each, every element spanning its
-  // descendants (N.layoutLines), and boxes move as the page scrolls. Either
-  // way the root element is as tall as the content, at least the viewport.
+  // empty. Under 'all' each box is one 20px line at the top of the
+  // viewport, so anything gated on visibility counts as visible and in
+  // view. Under the default 'loaded' the same holds for what the document
+  // held at the last reveal (the load event, then each auto-scroll), but
+  // elements inserted since take a line each in a stack from the top
+  // (N.loadedLines), pushing what follows them down and out of view once
+  // they fill a viewport. Boxes stay put when scrolling under both. Under
+  // 'viewport' the elements under <body> are stacked in document order, a
+  // line each, every element spanning its descendants (N.layoutLines), and
+  // boxes move as the page scrolls. Either way the root element is as tall
+  // as the content, at least the viewport.
   //
   // internals.elementBox gives an element's [x, y, width, height] in
   // document coordinates; replace it to change all of this.
 
   const LINE = 20;
-  const SCROLLED = env.layout === 'scrolled';
-  const ROOT_BOX = { version: -1, height: 0 };
+  const SCROLLED = env.visibility === 'viewport';
+  const LOADED = env.visibility === 'loaded';
+  const ROOT_BOX = { version: -1, epoch: -1, height: 0 };
 
+  // Under 'loaded' the document is two viewports tall, plus the stack of
+  // what was inserted since the last reveal: tall enough to scroll (and so
+  // get scroll events), but short enough that a page checking positions
+  // against scrollY + innerHeight sees new content leave the viewport.
   function rootHeight() {
     const v = N.version();
-    if (ROOT_BOX.version !== v) {
+    const epoch = LOADED ? N.insertionEpoch() : 0;
+    if (ROOT_BOX.version !== v || ROOT_BOX.epoch !== epoch) {
       ROOT_BOX.version = v;
-      let lines;
+      ROOT_BOX.epoch = epoch;
+      let height;
       if (SCROLLED) {
         const body = N.docPart(2);
-        lines = body === null ? 0 : N.layoutLines([body])[1];
+        height = (body === null ? 0 : N.layoutLines([body])[1]) * LINE;
+      } else if (LOADED) {
+        const body = N.docPart(2);
+        height = 2 * env.height + (body === null ? 0 : Math.max(0, N.loadedLines([body])[1])) * LINE;
       } else {
-        lines = N.count(documentNode, 'body *');
+        height = N.count(documentNode, 'body *') * LINE;
       }
-      ROOT_BOX.height = Math.max(env.height, lines * LINE);
+      ROOT_BOX.height = Math.max(env.height, height);
     }
     return ROOT_BOX.height;
   }
@@ -1566,11 +1588,19 @@
     if (SCROLLED) {
       const stacked = stackedBox(el);
       if (stacked !== null) return [0, stacked[0], env.width, stacked[1]];
+    } else if (LOADED) {
+      return loadedBox(N.loadedLines([el]), 0);
     }
     return [0, 0, env.width, LINE];
   }
+
+  // The 'loaded' box for the [line, lines] pair at lines[i]: at least a
+  // line tall, so elements that take no room in the stack are not empty.
+  function loadedBox(lines, i) {
+    return [0, Math.max(0, lines[i]) * LINE, env.width, Math.max(1, lines[i + 1]) * LINE];
+  }
   internals.elementBox = defaultElementBox;
-  if (SCROLLED) {
+  if (SCROLLED || LOADED) {
     internals.scrollLimit = () => [0, Math.max(0, rootHeight() - env.height)];
   }
 
@@ -1579,7 +1609,7 @@
   }
 
   // An element's box relative to the viewport, as getBoundingClientRect()
-  // reports it. In the 'inView' layout boxes stay put when scrolling.
+  // reports it. Under 'all' and 'loaded' boxes stay put when scrolling.
   function clientBox(el) {
     const b = box(el);
     if (!SCROLLED || (b[2] === 0 && b[3] === 0)) return b;
@@ -1728,27 +1758,25 @@
 
   class Element extends Node {
     get namespaceURI() {
-      return N.elementName(this)[1];
+      return nativeMember();
     }
     get prefix() {
       return N.elementName(this)[2];
     }
     get localName() {
-      return N.elementName(this)[0];
+      return nativeMember();
     }
     get tagName() {
-      return N.tagName(this);
+      return nativeMember();
     }
     get id() {
-      const v = N.getAttr(this, 'id');
-      return v === null ? '' : v;
+      return nativeMember();
     }
     set id(value) {
       N.setAttr(this, 'id', str(value));
     }
     get className() {
-      const v = N.getAttr(this, 'class');
-      return v === null ? '' : v;
+      return nativeMember();
     }
     set className(value) {
       N.setAttr(this, 'class', str(value));
@@ -1903,8 +1931,7 @@
       return N.closest(this, str(selectors));
     }
     get shadowRoot() {
-      const root = N.shadowRoot(this);
-      return root !== null && !(shadowBits(root) & 1) ? root : null;
+      return nativeMember();
     }
     get assignedSlot() {
       return assignedSlot(this);
@@ -4533,6 +4560,14 @@
     Document: HTMLDocument.prototype,
     html: htmlProtos,
     svg: svgProtos,
+    // Where the native members go (see nativeMember() above).
+    interfaces: {
+      Node: Node.prototype,
+      CharacterData: CharacterData.prototype,
+      Element: Element.prototype,
+      Document: Document.prototype,
+      DocumentFragment: DocumentFragment.prototype,
+    },
   }, (name, message) => domException(name, message));
   documentNode = N.document();
 
@@ -4594,6 +4629,8 @@
   // For IntersectionObserver.
   internals.geometry = {
     scrolled: SCROLLED,
+    loaded: LOADED,
+    loadedBox,
     rendered,
     clientBox,
     isElement: (value) => value instanceof Element,

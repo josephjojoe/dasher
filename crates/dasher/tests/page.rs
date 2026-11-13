@@ -403,9 +403,9 @@ async fn manual_scrolling_reaches_the_page() {
     assert_eq!(page.evaluate("scrollY").await.unwrap(), 400);
     page.scroll_by(0.0, -100.0).unwrap();
     assert_eq!(page.evaluate("scrollY").await.unwrap(), 300);
-    // A scroll to the bottom fires the feed's listener; settling lets the
-    // fetch it started land.
-    page.scroll_to(0.0, f64::INFINITY).unwrap();
+    // A scroll to the bottom (scrolling stops there) fires the feed's
+    // listener; settling lets the fetch it started land.
+    page.scroll_to(0.0, 1e9).unwrap();
     page.settle(&SettleOptions::default()).await.unwrap();
     assert_eq!(page.count("article").unwrap(), 6);
 }

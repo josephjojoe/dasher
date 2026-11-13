@@ -183,14 +183,17 @@
 //! page's node limit.
 //!
 //! Geometry is synthetic, chosen so content gated on visibility or
-//! scrolling still loads; [`WindowOptions::layout`] picks how (see
-//! [`LayoutMode`]). By default every rendered element is a visible,
-//! non-zero box at the top of the viewport, the document is as tall as its
-//! content and scrolls without limit, and `IntersectionObserver` reports
-//! every observed element as intersecting. [`LayoutMode::Scrolled`] stacks
-//! the elements in document order instead, so they intersect only once
-//! scrolled into view. `ResizeObserver` reports each element's synthetic
-//! size once.
+//! scrolling still loads; [`WindowOptions::visibility`] picks how (see
+//! [`Visibility`]). By default ([`Visibility::Loaded`]) every rendered
+//! element present when the page loaded is a visible, non-zero box at the
+//! top of the viewport, the document is as tall as its content and scrolls
+//! without limit, and `IntersectionObserver` reports those elements as
+//! intersecting; what is inserted after load is stacked below the fold
+//! until the host calls [`JsRuntime::reveal`]. [`Visibility::All`] keeps
+//! every element in view whenever it was inserted, and
+//! [`Visibility::Viewport`] stacks the elements in document order, so they
+//! intersect only once scrolled into view. `ResizeObserver` reports each
+//! element's synthetic size once.
 //!
 //! `MutationObserver` sees every change scripts make to the tree, with the
 //! standard's records (`childList`, `attributes` and `characterData`, with
@@ -381,7 +384,7 @@ pub use runtime::{
 };
 pub use storage::{DEFAULT_STORAGE_QUOTA, QuotaExceeded, StorageStore};
 pub use window::{
-    DEFAULT_USER_AGENT, LayoutMode, NavigationKind, NavigationRequest, Viewport, WindowOptions,
+    DEFAULT_USER_AGENT, NavigationKind, NavigationRequest, Viewport, Visibility, WindowOptions,
 };
 
 /// The rquickjs version dasher is built against, for host bindings.

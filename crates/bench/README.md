@@ -181,6 +181,10 @@ DASHER_RECORD=rec/verge target/profiling/dasher -t 60 https://www.theverge.com/ 
 DASHER_REPLAY=rec/verge /usr/bin/time -l target/profiling/dasher -t 60 https://www.theverge.com/ >/dev/null
 ```
 
+Set `DASHER_REPLAY_LOG` as well to have every request the replay answers
+(or refuses) printed to stderr as `replay: hit|miss <method> <url>`, to
+count a page's requests.
+
 Compare CPU time (user plus system), not wall time: under the virtual clock
 a page's wall time is its CPU time plus fixed waits. Run each page three
 times and take the median. Runs of one build agree to about 1%.
@@ -268,6 +272,80 @@ Tried and left out, with what each measured:
   one after another share them: two thirds of property additions on four
   pages found no shape to reuse, but reusing them was 0.4% less CPU, which
   is within the noise.
+
+### Visibility
+
+What counts as in view (the `--visibility` policy; see the main README)
+decides how much lazy content a page loads. Sixteen pages were recorded
+on 2026-11-13, each once under `all` and once under `viewport` into one
+directory, and replayed on an aarch64 Linux profiling build (8 cores shared
+with other work, 4 runs at a time): CPU seconds, requests and words of
+`document.body.innerText`, median of 3, with a 60 s limit.
+
+| page | `loaded` (default) CPU | requests | words | `all` CPU | requests | words | `viewport` CPU | requests | words |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| engadget.com | 1.73 | 165 | 4,128 | 43.94 | 5,587 | 18,680 | 1.72 | 114 | 1,615 |
+| shopify.com | 3.25 | 168 | 1,052 | 3.18 | 169 | 1,052 | 1.47 | 140 | 1,052 |
+| theverge.com | 7.26 | 229 | 3,753 | 6.91 | 228 | 3,753 | 4.94 | 159 | 3,753 |
+| techcrunch.com | 6.21 | 221 | 1,841 | 5.99 | 220 | 1,841 | 5.32 | 97 | 1,841 |
+| wired.com | 5.36 | 154 | 1,917 | 5.33 | 154 | 1,917 | 5.41 | 150 | 1,917 |
+| zillow.com | 3.28 | 137 | 1,174 | 2.96 | 134 | 1,174 | 3.07 | 134 | 1,174 |
+| cloud.google.com (a docs page) | 2.42 | 59 | 4,283 | 1.72 | 58 | 4,283 | 5.09 | 132 | 4,283 |
+| bbc.com/news | 1.86 | 127 | 1,699 | 1.98 | 127 | 1,699 | 1.73 | 74 | 1,699 |
+| timesofindia.indiatimes.com | 1.18 | 106 | 4,932 | 1.16 | 106 | 4,932 | 1.44 | 106 | 4,932 |
+| github.com (a repository) | 1.09 | 103 | 1,108 | 1.05 | 103 | 1,108 | 1.07 | 103 | 1,108 |
+| espn.com | 0.70 | 42 | 1,635 | 0.69 | 42 | 1,635 | 0.72 | 42 | 1,635 |
+| edition.cnn.com | 0.60 | 19 | 2,079 | 0.58 | 19 | 2,079 | 0.60 | 19 | 2,079 |
+| angular.dev | 0.37 | 39 | 368 | 0.37 | 39 | 368 | 0.37 | 39 | 368 |
+| react.dev | 0.36 | 37 | 1,223 | 0.34 | 37 | 1,223 | 0.33 | 17 | 1,223 |
+| developer.mozilla.org | 0.17 | 40 | 887 | 0.16 | 40 | 887 | 0.17 | 40 | 887 |
+| en.wikipedia.org (an article) | 0.16 | 8 | 3,613 | 0.16 | 8 | 3,613 | 0.16 | 8 | 3,613 |
+| **all sixteen** | **36.00** | **1,654** | **35,692** | **76.52** | **7,071** | **50,244** | **33.61** | **1,374** | **33,179** |
+
+Before `loaded` existed the default was `all`; on the same recordings
+the build before it (`babeb38`) gave 93.3 s and 9,481 requests under
+`all`, and 32.7 s and 1,390 under `viewport`.
+
+What it showed:
+
+- **engadget.com: confirmed, and the trigger is position, not new
+  elements.** Its loader (`loopin.min.js`) calls `loadMore()` again after
+  every batch it appends, and each time checks
+  `document.querySelector('.loading-more').getBoundingClientRect().top - 200
+  <= scrollY + innerHeight`. `.loading-more` is in the document at load.
+  Under `all` every box sits at the top of the viewport, so the check is
+  always true and the loader fetches `?action=more-stories` until the time
+  limit. In a browser the appended stories push `.loading-more` below the
+  fold. `loaded` does the same: content inserted since the last reveal takes
+  room, so after a batch or two the element leaves the viewport and the chain
+  ends. Its run time varied under `all` (37.7 to 46.6 s, 4,815 to 6,021
+  requests) as it filled the limit. Under `all` the extra words are the stories it kept
+  loading. `loaded` with `--scroll` gets them all (18,680 words, the
+  recording's whole supply) in 10.3 CPU seconds and 1,419 requests.
+- **shopify.com: refuted.** Its lazy sections are present at load, and
+  blocking the tracking scripts shows they are cheap. With Google Tag Manager
+  (served from `gtm.shopify.com`) blocked, the page costs 0.41 to 0.43 s
+  under every policy and keeps the same 1,052 words. With it, `all` and
+  `loaded` cost 3.2 s and `viewport` 1.5 s. Of the 27 requests `all` makes
+  beyond `viewport`, 26 are analytics beacons (`google.com/ccm/collect` and
+  `gtm.shopify.com/g/collect`), sent when tagged elements come into view;
+  blocking the beacons alone gives 1.7 s. So the cost is Google Tag
+  Manager's own JavaScript, which visibility only sets going more often.
+  The text is the same either way.
+- **Text kept.** All three policies kept the same text on fifteen pages;
+  only engadget differs, as above.
+- **Elsewhere the policies cost the same**, within the noise of this
+  machine. cloud.google.com has two outcomes, depending on an experiment
+  the page draws at random. One makes 58 requests in about 2 s, the other
+  132 requests (24 of them ad pings missing from the recording) in about
+  4 to 5 s. Each policy happened to land on a different one, so its row
+  says nothing about the policies.
+- **What `loaded` costs itself**: working out where appended content sits
+  is a walk of the document per geometry query once anything has been
+  inserted since the last reveal. On theverge.com, the heaviest user of
+  the four pages checked, it came to 4,000 calls and 85 ms of 7 s. A paired
+  rerun of `loaded` and `all`, four runs each, gave the same CPU on
+  zillow.com and 2% more on theverge.com, within the spread of either.
 
 ## Micro-benchmarks
 
@@ -384,10 +462,10 @@ was busy, so absolute figures run a little high):
 | getAttribute | 715 | 465 | 120 | 3.9× |
 | matches(tag) | 642 | 365 | 90 | 4.1× |
 | querySelector(tag) | 710 | 432 | 103 | 4.2× |
-| tagName | 329 | 175 | 60 | 2.9× |
-| nextSibling | 251 | 165 | 50 | 3.3× |
-| nodeType | 197 | 115 | 40 | 2.9× |
-| shadowRoot | 209 | 115 | 40 | 2.9× |
+| tagName | 97.0 | 175 | 60 | 1.6× |
+| nextSibling | 90.7 | 165 | 50 | 1.8× |
+| nodeType | 90.5 | 115 | 40 | 2.3× |
+| shadowRoot | 79.5 | 115 | 40 | 2.0× |
 | children | 357 | 215 | 350 | 0.6× |
 | innerText | 374 | 215 | 220 | 1.0× |
 | createElement | 1,607 | 915 | 470 | 1.9× |
@@ -401,6 +479,56 @@ Most DOM calls here cost 1.5 to 2 times the audit's figures, ranging from
 1.1 times for getElementById to 3 times for `document.cookie`. That fits a
 slower machine and loops that differ in detail. The ratios to Lightpanda
 are what to aim at.
+
+tagName, nextSibling, nodeType and shadowRoot are native members (see
+"Native members" in `crates/js/src/dom.rs`) since DAS-41; they were 329,
+251, 197 and 209 ns here before. On this machine a native getter that does
+nothing costs about 78 ns in this loop: 51 ns for the loop and the lookup
+through four prototypes (an own data property is 40 ns), and 27 ns for
+QuickJS calling a C function as a getter. The members' own work is the
+rest, 0 to 20 ns.
+
+### DOM indexes and selector plans
+
+The id index in dasher-dom and the query plans in dasher-css (see their
+crate docs) changed these rows. Same machine and build settings as the
+baseline, `main` at `cfa9030` against the change, run back to back, median
+of 5 runs, on a machine under load from other builds:
+
+| benchmark | before ns/op | after ns/op | |
+| --- | ---: | ---: | ---: |
+| getElementById | 69,110 | 556 | 124× |
+| querySelectorAll(#id) | 118,503 | 1,170 | 101× |
+| querySelectorAll(.class) | 174,353 | 146,582 | 1.19× |
+| querySelectorAll(tag) | 272,475 | 233,384 | 1.17× |
+| matches(tag) | 672 | 625 | 1.08× |
+| querySelector(tag) | 728 | 683 | 1.07× |
+
+The other DOM rows did not change beyond noise; `setAttribute` and
+`append+removeChild` pay nothing for keeping the index. Most of what is
+left of these calls is the JS bindings: in Rust, without them,
+`getElementById` takes 54 ns and `querySelector("#id")` 86 ns, against
+57 µs and 108 µs before, and `matches("div")` 14 ns.
+[`../css/examples/query_timing.rs`](../css/examples/query_timing.rs) times
+queries at that level, on the same page:
+
+```sh
+cargo run --release -p dasher-css --example query_timing
+```
+
+It prints the best of 25 rounds per query, which stays steady on a busy
+machine where the median does not. Selectors with an `#id` further left
+(`main #c250 a`, `#target span`) went from 60 to 250 µs to 0.1 to 0.5 µs;
+single-compound selectors (`.text`, `li`, `[data-x='3']`) became 1.3 to
+1.5× faster; descendant and child selectors without an id (`div.a > p`,
+`section.card h2`) stayed where they were.
+
+The index costs 11.8 bytes per element with an id (`tests/memory.rs` in
+dasher-dom), 1.7 bytes per node on its listing page where every ninth
+node has an id. Peak RSS of the four fixture pages did not move beyond
+run-to-run noise (±0.5 MiB). There is no class or tag index and no
+ancestor filter: a tree walk costs about 10 ns per element, and an index
+would cost every page memory for the few that query that way.
 
 ## Per-page limits
 
