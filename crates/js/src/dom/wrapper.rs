@@ -11,6 +11,7 @@ use rquickjs::class::{JsClass, Readable, Trace, Tracer};
 use rquickjs::function::Constructor;
 use rquickjs::{Class, Ctx, Function, JsLifetime, Object, Result, Value, qjs};
 
+use super::host::Hosts;
 use super::members::{self, Members};
 use super::{DomState, any_in_tree_except, group_root, owner};
 use crate::events::Listeners;
@@ -29,6 +30,10 @@ pub(crate) struct NodeWrapper<'js> {
     /// freed by reference counting alone.
     next: RefCell<Option<Node<'js>>>,
     prev: RefCell<Option<Node<'js>>>,
+    /// The objects the element hands out and must keep returning
+    /// (`el.style`, `el.classList`...), made on first use. Traced, so they
+    /// live as long as the wrapper, and they hold the wrapper in turn.
+    extras: RefCell<Option<Box<[Option<Value<'js>>; Extra::COUNT]>>>,
     /// The node's event listeners (see the `events` module). The wrapper
     /// reports them to the GC, so they live as long as its group.
     listeners: Listeners<'js>,
@@ -40,7 +45,20 @@ impl<'js> NodeWrapper<'js> {
     }
 }
 
-impl NodeWrapper<'_> {
+/// The slots of [`NodeWrapper`]'s extras.
+#[derive(Clone, Copy)]
+pub(crate) enum Extra {
+    Style,
+    ComputedStyle,
+    ClassList,
+    Dataset,
+}
+
+impl Extra {
+    const COUNT: usize = 4;
+}
+
+impl<'js> NodeWrapper<'js> {
     /// The node, or `None` if it belonged to a replaced document.
     pub(crate) fn id(&self) -> Option<NodeId> {
         (!self.stale.get()).then_some(self.id)
@@ -49,6 +67,24 @@ impl NodeWrapper<'_> {
     /// The DOM state the node belongs to.
     pub(crate) fn dom(&self) -> &Rc<DomState> {
         &self.dom
+    }
+
+    /// The object in `slot`, borrowed: it stays valid while the wrapper
+    /// does not change the slot.
+    pub(crate) fn extra(&self, slot: Extra) -> Option<qjs::JSValue> {
+        let extras = self.extras.borrow();
+        extras.as_ref()?[slot as usize].as_ref().map(Value::as_raw)
+    }
+
+    /// Puts `value` in `slot`, which must be empty. Allocates nothing that
+    /// the GC could run during (beyond the first slot's box), so the
+    /// tracer never finds the cell borrowed in one phase of a collection
+    /// but not in another.
+    pub(crate) fn set_extra(&self, slot: Extra, value: Value<'js>) {
+        let mut extras = self.extras.borrow_mut();
+        let slots = extras.get_or_insert_with(Box::default);
+        debug_assert!(slots[slot as usize].is_none());
+        slots[slot as usize] = Some(value);
     }
 }
 
@@ -75,6 +111,11 @@ impl<'js> Trace<'js> for NodeWrapper<'js> {
         }
         if let Ok(prev) = self.prev.try_borrow() {
             prev.trace(tracer);
+        }
+        if let Ok(extras) = self.extras.try_borrow() {
+            for v in extras.iter().flat_map(|slots| slots.iter().flatten()) {
+                v.trace(tracer);
+            }
         }
         self.listeners.trace(tracer);
     }
@@ -116,6 +157,9 @@ pub(crate) struct DomData<'js> {
     pub(crate) layout_hook: RefCell<Option<Function<'js>>>,
     /// What the native members need (see the `members` module).
     pub(crate) members: Box<Members>,
+    /// The prototypes of the host objects (see the `host` module), which
+    /// `members` points at.
+    _host_protos: Vec<Object<'js>>,
     element: Object<'js>,
     html_element: Object<'js>,
     html_unknown: Object<'js>,
@@ -149,10 +193,13 @@ pub(crate) fn init<'js>(
     exception: Function<'js>,
 ) -> Result<()> {
     let document = create(dom, dom.doc().root(), protos.get("Document")?)?;
-    members::install(ctx, &protos.get("interfaces")?)?;
+    let interfaces: Object<'js> = protos.get("interfaces")?;
+    members::install(ctx, &interfaces)?;
+    let (hosts, host_protos) = Hosts::register(ctx, &interfaces)?;
     let data = DomData {
         exception,
-        members: Members::attach(ctx, &document),
+        members: Members::attach(ctx, &document, hosts),
+        _host_protos: host_protos,
         document,
         mutation_hook: RefCell::new(None),
         ce_hook: RefCell::new(None),
@@ -222,6 +269,7 @@ fn create<'js>(dom: &Rc<DomState>, id: NodeId, proto: Object<'js>) -> Result<Nod
         stale: Cell::new(false),
         next: RefCell::new(None),
         prev: RefCell::new(None),
+        extras: RefCell::new(None),
         listeners: Listeners::default(),
     };
     let node = Class::instance_proto(wrapper, proto)?;

@@ -149,6 +149,11 @@ impl Shared {
             Document::parse(""),
             options.max_dom_nodes,
             Rc::clone(&event_loop.clock),
+            dom::Geometry {
+                width: i32::try_from(options.window.viewport.width).unwrap_or(i32::MAX),
+                height: i32::try_from(options.window.viewport.height).unwrap_or(i32::MAX),
+                visibility: options.window.visibility,
+            },
         );
         Self {
             deadline: Cell::new(None),
