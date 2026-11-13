@@ -44920,9 +44920,8 @@ static JSValue js_string_split(JSContext *ctx, JSValueConst this_val,
     S = JS_ToString(ctx, O);
     if (JS_IsException(S))
         goto exception;
-    A = JS_NewArray(ctx);
-    if (JS_IsException(A))
-        goto exception;
+    /* dasher: A is made at the end, from the pieces (no script can see
+       it before then) */
     lengthA = 0;
     if (JS_IsUndefined(limit)) {
         lim = 0xffffffff;
@@ -45004,7 +45003,6 @@ static JSValue js_string_split(JSContext *ctx, JSValueConst this_val,
                 }
                 tab[n++] = T;
             }
-            JS_FreeValue(ctx, A);
             /* takes the values, even when it fails */
             A = JS_NewArrayFrom(ctx, n, tab);
             if (tab != tab_buf)
@@ -45026,9 +45024,13 @@ add_tail:
     T = js_sub_string(ctx, sp, p, s);
     if (JS_IsException(T))
         goto exception;
-    if (JS_CreateDataPropertyUint32(ctx, A, lengthA++, T,0 ) < 0)
+    A = JS_NewArrayFrom(ctx, 1, &T);
+    if (JS_IsException(A))
         goto exception;
+    lengthA++;
 done:
+    if (JS_IsUndefined(A))
+        A = JS_NewArray(ctx);
     JS_FreeValue(ctx, S);
     JS_FreeValue(ctx, R);
     return A;
