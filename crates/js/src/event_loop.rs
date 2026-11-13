@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use rquickjs::{Ctx, Function, JsLifetime, Object, Persistent};
 
+use crate::budget::Budget;
 use crate::clock::{Clock, ClockMode};
 use crate::limits::ResourceLimit;
 use crate::remote::TaskSender;
@@ -40,6 +41,9 @@ pub enum Stopped {
     Interrupted,
     /// The page went over a resource limit, and is stopped for good.
     LimitExceeded(ResourceLimit),
+    /// The page used up its CPU time or request budget (see
+    /// [`JsRuntime::set_work_limits`]).
+    BudgetExhausted(Budget),
 }
 
 impl std::fmt::Display for Stopped {
@@ -48,6 +52,7 @@ impl std::fmt::Display for Stopped {
             Self::DeadlineExceeded => f.write_str("the JS deadline passed"),
             Self::Interrupted => f.write_str("JS execution was interrupted"),
             Self::LimitExceeded(limit) => limit.fmt(f),
+            Self::BudgetExhausted(budget) => budget.fmt(f),
         }
     }
 }
@@ -119,6 +124,19 @@ impl LoopState {
     /// time.
     fn next_wakeup(&self) -> Option<Duration> {
         let timer = self.timers.borrow().next_due();
+        self.next_of(timer)
+    }
+
+    /// When the next thing that holds the page open is due: as
+    /// [`next_wakeup`](Self::next_wakeup), leaving out idle callbacks.
+    /// Those run when they are due, but a page with nothing else to do
+    /// is idle.
+    pub(crate) fn next_holding_wakeup(&self) -> Option<Duration> {
+        let timer = self.timers.borrow().next_holding_due();
+        self.next_of(timer)
+    }
+
+    fn next_of(&self, timer: Option<Duration>) -> Option<Duration> {
         let refresh = self.refresh.borrow().as_ref().map(|&(due, _)| due);
         [timer, self.next_frame(), refresh]
             .into_iter()
@@ -143,6 +161,13 @@ impl LoopState {
         self.timers
             .borrow_mut()
             .insert(now, timeout, repeat, nesting)
+    }
+
+    fn set_idle_timer(&self, timeout_ms: u32) -> TimerId {
+        let timeout = Duration::from_millis(u64::from(timeout_ms));
+        let now = self.clock.now();
+        let nesting = self.timer_nesting.get();
+        self.timers.borrow_mut().insert_idle(now, timeout, nesting)
     }
 
     fn request_frame(&self) -> u32 {
@@ -260,24 +285,40 @@ impl JsRuntime {
     }
 
     /// Number of live `setTimeout` / `setInterval` timers.
+    /// `requestIdleCallback` callbacks are not counted.
     pub fn pending_timers(&self) -> usize {
-        self.event_loop().timers.borrow().len()
+        self.event_loop().timers.borrow().holding()
     }
 
     /// Whether there is nothing left to run: no queued tasks, timers,
     /// animation frame callbacks or microtasks, and no host operations in
-    /// progress.
+    /// progress. Callbacks waiting in `requestIdleCallback` do not count:
+    /// they run when page time passes, but do not keep a page busy.
     pub fn is_idle(&self) -> bool {
         let state = self.event_loop();
         let remote = &self.shared().remote;
         !remote.has_pending()
             && !remote.has_queued()
             && state.tasks.borrow().is_empty()
-            && state.timers.borrow().is_empty()
+            && state.timers.borrow().holding() == 0
             && state.frames.borrow().pending.is_empty()
             && state.refresh.borrow().is_none()
             && !self.has_pending_microtasks()
             && !self.shared().dom.layout_changed()
+    }
+
+    /// Whether work is runnable right now: a queued task, a task posted
+    /// from another thread, a timer or animation frame that is due, or
+    /// microtasks. `requestIdleCallback` callbacks do not count. A page
+    /// in the middle of a run of tasks is not quiet, however long since
+    /// its document last changed.
+    pub fn has_work_due(&self) -> bool {
+        let state = self.event_loop();
+        let now = state.clock.now();
+        !state.tasks.borrow().is_empty()
+            || self.shared().remote.has_queued()
+            || state.next_holding_wakeup().is_some_and(|due| due <= now)
+            || self.has_pending_microtasks()
     }
 
     /// Runs everything that is runnable at the current page time (queued
@@ -435,6 +476,13 @@ pub(crate) fn install<'js>(
         "setTimer",
         Function::new(ctx.clone(), move |timeout: u32, repeat: bool| {
             s.event_loop.set_timer(timeout, repeat)
+        })?,
+    )?;
+    let s = Rc::clone(shared);
+    native.set(
+        "setIdleTimer",
+        Function::new(ctx.clone(), move |timeout: u32| {
+            s.event_loop.set_idle_timer(timeout)
         })?,
     )?;
     let s = Rc::clone(shared);

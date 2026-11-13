@@ -1,0 +1,20 @@
+<!doctype html>
+<title>Busy, then renders</title>
+<p id="status">working</p>
+<script>
+  // A scheduler working through a long job in slices, the way React's
+  // does: one MessageChannel task after another, each computing for 10 ms
+  // without touching the document, then the result is rendered.
+  const channel = new MessageChannel();
+  let slices = 0;
+  channel.port1.onmessage = () => {
+    const end = performance.now() + 10;
+    while (performance.now() < end) {}
+    if (++slices < 80) {
+      channel.port2.postMessage(null);
+    } else {
+      document.getElementById('status').textContent = 'rendered';
+    }
+  };
+  addEventListener('load', () => channel.port2.postMessage(null));
+</script>

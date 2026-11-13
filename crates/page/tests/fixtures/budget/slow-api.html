@@ -1,0 +1,11 @@
+<!doctype html>
+<title>Slow API</title>
+<p id="status">loading</p>
+<script>
+  // The content waits on a slow response after load.
+  addEventListener('load', () => {
+    fetch('/api/slow').then((r) => r.json()).then((items) => {
+      document.getElementById('status').textContent = items.join(',');
+    });
+  });
+</script>
