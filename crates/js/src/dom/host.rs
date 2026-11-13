@@ -535,21 +535,30 @@ pub(super) fn css_float<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue]) -> O
     Ok(Ret::Str(value.into()))
 }
 
-/// The inline declarations as they are now, for changing.
-fn current_decls(w: &Write<'_>) -> Vec<Decl> {
-    let doc = w.dom.doc();
-    with_decls(host_of(w.host), &doc, w.id, <[Decl]>::to_vec)
-}
-
-/// Writes `decls` back to the `style` attribute: once, through the path
-/// `setAttribute` takes, recording the text with the declarations.
-fn write_decls(w: &Write<'_>, decls: Vec<Decl>) -> Res<()> {
+/// Changes the inline declarations with `f` and, if it returns `Some`,
+/// writes them back to the `style` attribute: once, through the path
+/// `setAttribute` takes, with the new text recorded alongside them.
+fn edit_decls<R>(w: &Write<'_>, f: impl FnOnce(&mut Vec<Decl>) -> Option<R>) -> Res<Option<R>> {
     let HostKind::Inline(cache) = &host_of(w.host).kind else {
         return Err(read_only());
     };
-    let text = serialize(&decls);
-    cache.borrow_mut().set(&text, decls);
+    let edited = {
+        let doc = w.dom.doc();
+        cache.borrow_mut().edit(style_attribute(&doc, w.id), f)
+    };
+    let Some((r, text)) = edited else {
+        return Ok(None);
+    };
     set_attr(&w.rctx(), w.dom, w.id, "style", &text)?;
+    Ok(Some(r))
+}
+
+/// Writes `decls` to the `style` attribute in place of what it has.
+fn write_decls(w: &Write<'_>, decls: Vec<Decl>) -> Res<()> {
+    edit_decls(w, |d| {
+        *d = decls;
+        Some(())
+    })?;
     Ok(())
 }
 
@@ -610,17 +619,21 @@ fn set_named(
     if is_computed(host_of(w.host)) {
         return Err(read_only());
     }
-    let mut decls = current_decls(w);
-    let decl = Decl {
-        name: name.into(),
-        value: value.into(),
-        important,
-    };
-    match decls.iter_mut().find(|d| *d.name == *name) {
-        Some(d) => *d = decl,
-        None => decls.push(decl),
-    }
-    write_decls(w, decls)
+    edit_decls(w, |decls| {
+        match decls.iter_mut().find(|d| *d.name == *name) {
+            Some(d) => {
+                d.value = value.into();
+                d.important = important;
+            }
+            None => decls.push(Decl {
+                name: name.into(),
+                value: value.into(),
+                important,
+            }),
+        }
+        Some(())
+    })?;
+    Ok(())
 }
 
 /// `removeProperty(name)`: the old value, or `""` if it was not set.
@@ -636,13 +649,11 @@ fn remove_named(w: &Write<'_>, name: &str) -> Res<String> {
             Ok(String::new())
         };
     }
-    let mut decls = current_decls(w);
-    let Some(i) = decls.iter().position(|d| &*d.name == name) else {
-        return Ok(String::new());
-    };
-    let old = decls.remove(i).value.into_string();
-    write_decls(w, decls)?;
-    Ok(old)
+    let old = edit_decls(w, |decls| {
+        let i = decls.iter().position(|d| &*d.name == name)?;
+        Some(decls.remove(i).value.into_string())
+    })?;
+    Ok(old.unwrap_or_default())
 }
 
 pub(super) fn remove_property(w: &Write<'_>) -> Res<Ret<'static>> {

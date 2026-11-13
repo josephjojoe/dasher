@@ -440,13 +440,13 @@ mix of work. Lightpanda does real layout, which is why its
 | benchmark | dasher ns/op | audit: dasher ns | audit: Lightpanda ns | dasher ÷ Lightpanda |
 | --- | ---: | ---: | ---: | ---: |
 | getElementById | 69,377 | 61,465 | 270 | 227.6× |
-| getComputedStyle | 40,009 | 19,815 | 70 | 283.1× |
-| classList.contains | 5,878 | 3,505 | 130 | 27.0× |
-| style.setProperty | 5,671 | 3,432 | 303 | 11.3× |
+| getComputedStyle | 282 | 19,815 | 70 | 4.0× |
+| classList.contains | 190 | 3,505 | 130 | 1.5× |
+| style.setProperty | 753 | 3,432 | 303 | 2.5× |
 | add+removeEventListener | 3,480 | 2,165 | 220 | 9.8× |
-| clientWidth | 2,406 | 1,685 | 50 | 33.7× |
+| clientWidth | 107 | 1,685 | 50 | 2.1× |
 | append+removeChild | 1,934 | 1,315 | 220 | 6.0× |
-| dataset.x | 1,894 | 1,198 | 137 | 8.7× |
+| dataset.x | 276 | 1,198 | 137 | 2.0× |
 | setAttribute | 1,231 | 865 | 170 | 5.1× |
 | attributes.length | 1,319 | 798 | 70 | 11.4× |
 | getAttribute | 715 | 465 | 120 | 3.9× |
@@ -460,7 +460,7 @@ mix of work. Lightpanda does real layout, which is why its
 | innerText | 374 | 215 | 220 | 1.0× |
 | createElement | 1,607 | 915 | 470 | 1.9× |
 | document.cookie | 503 | 165 | 320 | 0.5× |
-| getBoundingClientRect | 2,236 | 1,615 | 24,770 | 0.1× |
+| getBoundingClientRect | 1,095 | 1,615 | 24,770 | 0.04× |
 | querySelectorAll(#id) | 116,395 | | | |
 | querySelectorAll(.class) | 171,475 | | | |
 | querySelectorAll(tag) | 269,684 | | | |
@@ -477,6 +477,26 @@ nothing costs about 78 ns in this loop: 51 ns for the loop and the lookup
 through four prototypes (an own data property is 40 ns), and 27 ns for
 QuickJS calling a C function as a getter. The members' own work is the
 rest, 0 to 20 ns.
+
+Inline style, `classList`, `dataset`, `getComputedStyle` and the layout
+getters are native since DAS-42 (see `crates/js/src/dom/host.rs`). Before,
+getComputedStyle was 40,009 ns here, classList.contains 5,878,
+style.setProperty 5,671, clientWidth 2,406, dataset.x 1,894 and
+getBoundingClientRect 2,236. Where the time goes now:
+
+- `getComputedStyle(el).display` is the native function returning the
+  element's cached computed style (88 ns), then the property read, which
+  QuickJS asks the object's exotic `get_own_property` for: converting the
+  key, checking the prototype chain, finding the inline declaration and
+  resolving the default (about 200 ns). Visibility (`:visible`, which walks
+  the ancestors) and boxes are cached until the document next changes.
+- `style.setProperty` includes building the value string in the loop
+  (about 90 ns) and `el.style` (about 90 ns). Of the rest, much is the
+  attribute write shared with `setAttribute` (mutation records, custom
+  element reactions).
+- clientWidth (107 ns) and dataset.x (276 ns, a property answered by the
+  exotic method: one attribute lookup) are near the floor of a native
+  getter described above.
 
 ## Per-page limits
 
