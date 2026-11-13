@@ -221,10 +221,11 @@ compiled.
 A record also holds the records of the functions inside the function, so
 compiling it skips over each of them (resuming the tokenizer at the token
 after it) instead of parsing it again, and makes it a lazy function in
-turn. A function is then read twice at most, once with its script and
-once when it is first called, unless it is inside one that is compiled
-with its parent (above) and whose parent is not. The bracket lookahead skips them too
-(`js_lazy_peek`), so the record notes whether the function had an `=`
+turn. A function is then read twice at most: with its script, and when
+it is first called. (One inside a function that a dropped function had to
+keep, such as a constructor, has no record of its own and is read again
+when the dropped function is compiled.) The bracket lookahead skips them
+too (`js_lazy_peek`), so the record notes whether the function had an `=`
 token, the one thing the lookahead reports from inside a function.
 
 **What is compiled with its parent.** Constructors and class static
@@ -269,8 +270,8 @@ with other work, the two ways from one build (`DASHER_EAGER_JS`, see
   over the pages (1338 to 1230 MiB; 22% less on edition.cnn.com, 16% on
   espn.com, 13% on github.com, 11% on yahoo.com), and 3% more CPU time
   (41.0 to 42.3 s), with 7 to 9% more on theverge.com, wired.com and
-  zillow.com. Element counts, tag counts, link counts and page text were
-  the same on every page.
+  zillow.com. Element counts, tag counts, link counts and page text
+  (digits masked) were the same on every page.
 
 The CPU time goes two ways. Less is spent compiling, since the later
 passes run only for the functions that are called, but a function that
@@ -279,8 +280,8 @@ the smaller heap is collected more often, because a collection is due
 when the heap has grown by half since the last one. On theverge.com,
 6.5% more cycles over all: 0.25 G cycles more in the cycle collector, 0.4
 G more parsing and scanning names, 0.17 G fewer in `resolve_variables`,
-`resolve_labels` and `js_create_function`. Anything that makes the parser
-faster makes the first two smaller.
+`resolve_labels` and `js_create_function`. A faster parser makes the
+second of these smaller.
 
 Tried and left out: taking a function written as an argument of a call
 (`f(function () {...})`, the factory of a UMD wrapper) to be called at

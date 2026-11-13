@@ -487,8 +487,16 @@ fn syntax_errors_in_functions_not_yet_compiled_stop_the_script() {
     ] {
         js.run_script("var ran = false;", "init.js").unwrap();
         let err = js.run_script(source, "bad.js").unwrap_err();
-        assert!(err.message.starts_with("SyntaxError"), "{source}: {}", err.message);
-        assert_eq!(js.eval_json("ran").unwrap().as_deref(), Some("false"), "{source}");
+        assert!(
+            err.message.starts_with("SyntaxError"),
+            "{source}: {}",
+            err.message
+        );
+        assert_eq!(
+            js.eval_json("ran").unwrap().as_deref(),
+            Some("false"),
+            "{source}"
+        );
     }
     js.take_errors();
 }

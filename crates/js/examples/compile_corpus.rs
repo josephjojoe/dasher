@@ -26,7 +26,12 @@ fn main() {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--repeat" => repeat = args.next().and_then(|n| n.parse().ok()).expect("--repeat N"),
+            "--repeat" => {
+                repeat = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .expect("--repeat N")
+            }
             _ => collect(Path::new(&arg), &mut paths),
         }
     }
@@ -54,7 +59,12 @@ fn main() {
             let raw = ctx.as_raw().as_ptr();
             // SAFETY: `raw` is live and the loader only makes empty modules.
             unsafe {
-                qjs::JS_SetModuleLoaderFunc(qjs::JS_GetRuntime(raw), None, Some(empty_module), std::ptr::null_mut());
+                qjs::JS_SetModuleLoaderFunc(
+                    qjs::JS_GetRuntime(raw),
+                    None,
+                    Some(empty_module),
+                    std::ptr::null_mut(),
+                );
             }
             for (path, source) in &scripts {
                 let name = CString::new(path.to_string_lossy().as_bytes()).unwrap();
@@ -86,7 +96,10 @@ fn main() {
 
 fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_dir() {
-        for entry in std::fs::read_dir(path).expect("readable directory").flatten() {
+        for entry in std::fs::read_dir(path)
+            .expect("readable directory")
+            .flatten()
+        {
             collect(&entry.path(), out);
         }
     } else {
@@ -96,7 +109,7 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) {
 
 /// Compiles `source` as a script, or as a module if that fails, and frees
 /// the result. Returns whether either compiled, the CPU time the successful
-/// compile took and the JS heap's size just before the result was freed.
+/// compile took and how much the JS heap grew by it.
 fn compile(ctx: *mut qjs::JSContext, source: &CString, name: &CString) -> (bool, Duration, i64) {
     let len = source.as_bytes().len() as _;
     for kind in [qjs::JS_EVAL_TYPE_GLOBAL, qjs::JS_EVAL_TYPE_MODULE] {
@@ -105,23 +118,22 @@ fn compile(ctx: *mut qjs::JSContext, source: &CString, name: &CString) -> (bool,
         let start = cpu_time();
         // SAFETY: `ctx` is the live context of the runtime the caller holds
         // locked, and `source` and `name` are NUL-terminated and outlive the
-        // call. The result is freed once, below.
-        let (ok, heap) = unsafe {
+        // call. The result, or the exception, is freed once.
+        let (ok, took, grew) = unsafe {
             let value = qjs::JS_Eval(ctx, source.as_ptr(), len, name.as_ptr(), flags);
-            let ok = !qjs::JS_IsException(value);
             let took = cpu_time() - start;
-            let heap = heap_size(ctx) - before;
+            let ok = !qjs::JS_IsException(value);
+            let grew = heap_size(ctx) - before;
             if ok {
                 qjs::JS_FreeValue(ctx, value);
             } else {
                 qjs::JS_FreeValue(ctx, qjs::JS_GetException(ctx));
             }
-            if ok {
-                return (true, took, heap);
-            }
-            (ok, heap)
+            (ok, took, grew)
         };
-        let _ = (ok, heap);
+        if ok {
+            return (true, took, grew);
+        }
     }
     (false, Duration::ZERO, 0)
 }
