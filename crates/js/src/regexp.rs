@@ -142,6 +142,41 @@ struct Plan {
     /// of exactly the characters of [`Start::Chars`], with nothing in
     /// front of it: see the module documentation.
     run: bool,
+    /// The pairs of characters a match can begin with, for a pattern that
+    /// starts with [`Start::Chars`] and needs at least two characters.
+    pairs: Option<Vec<Pair>>,
+}
+
+/// The most one-character tests a match can begin with that
+/// [`second_chars`] keeps pairs for.
+const PAIRS_MAX: usize = 16;
+
+/// A character a match can begin with and one that can follow it, below
+/// 256 and folded as the matcher compares them, as bit sets.
+#[derive(Clone, Debug, PartialEq)]
+struct Pair {
+    first: [u64; 4],
+    second: [u64; 4],
+}
+
+fn has_bit(bits: &[u64; 4], c: u32) -> bool {
+    c < 256 && bits[(c / 64) as usize] & (1 << (c % 64)) != 0
+}
+
+/// Whether the characters at `at` could begin a match, by [`Pair`]s.
+/// Characters from 256 up are not in the sets and always could.
+fn pairs_allow(pairs: &[Pair], subject: Subject<'_>, at: usize) -> bool {
+    let (first, width) = subject.char_at(at);
+    let Some(second) = (at + width < subject.len()).then(|| subject.char_at(at + width).0) else {
+        // A match needs two characters.
+        return false;
+    };
+    if first >= 256 || second >= 256 {
+        return true;
+    }
+    pairs
+        .iter()
+        .any(|pair| has_bit(&pair.first, first) && has_bit(&pair.second, second))
 }
 
 /// What the start of a pattern says about where it can match.
@@ -344,10 +379,16 @@ fn analyse(code: &[u8], flags: c_int) -> Plan {
         .filter(|chars| chars.count < start_count || chars.count <= 3 && start_count > 3)
         .map(Box::new);
     let run = matches!(start, Start::Chars(_)) && leading_run(code);
+    let pairs = if matches!(start, Start::Chars(_)) && !run {
+        second_chars(code, flags)
+    } else {
+        None
+    };
     Plan {
         start,
         required,
         run,
+        pairs,
     }
 }
 
@@ -635,9 +676,17 @@ fn leading_run(code: &[u8]) -> bool {
 }
 
 fn first_chars(code: &[u8]) -> Option<Vec<(u32, u32)>> {
-    let mut ranges = Vec::new();
+    let tests = first_tests(code, 0)?;
+    Some(tests.into_iter().flat_map(|(_, ranges)| ranges).collect())
+}
+
+/// The one-character tests a match can begin with, from `from`, each with
+/// where it is and what it accepts. `None` when the pattern can begin
+/// with something else: see [`first_chars`].
+fn first_tests(code: &[u8], from: usize) -> Option<Vec<(usize, Vec<(u32, u32)>)>> {
+    let mut tests = Vec::new();
     let mut seen = vec![false; code.len()];
-    let mut todo = vec![0usize];
+    let mut todo = vec![from];
     while let Some(mut pc) = todo.pop() {
         loop {
             let opcode = *code.get(pc)?;
@@ -645,41 +694,8 @@ fn first_chars(code: &[u8]) -> Option<Vec<(u32, u32)>> {
                 break;
             }
             match opcode {
-                op::CHAR8 => {
-                    let c = u32::from(*code.get(pc + 1)?);
-                    ranges.push((c, c));
-                    break;
-                }
-                op::CHAR16 => {
-                    let c = u16_at(code, pc + 1)?;
-                    ranges.push((c, c));
-                    break;
-                }
-                op::CHAR32 => {
-                    let c = u32_at(code, pc + 1)?;
-                    ranges.push((c, c));
-                    break;
-                }
-                op::RANGE => {
-                    let count = usize::try_from(u16_at(code, pc + 1)?).ok()?;
-                    for i in 0..count {
-                        let low = u16_at(code, pc + 3 + 4 * i)?;
-                        let mut high = u16_at(code, pc + 5 + 4 * i)?;
-                        // In the last pair 0xffff stands for no upper end.
-                        if i + 1 == count && high == 0xffff {
-                            high = u32::MAX;
-                        }
-                        ranges.push((low, high));
-                    }
-                    break;
-                }
-                op::RANGE32 => {
-                    let count = usize::try_from(u16_at(code, pc + 1)?).ok()?;
-                    for i in 0..count {
-                        let low = u32_at(code, pc + 3 + 8 * i)?;
-                        let high = u32_at(code, pc + 7 + 8 * i)?;
-                        ranges.push((low, high));
-                    }
+                op::CHAR8 | op::CHAR16 | op::CHAR32 | op::RANGE | op::RANGE32 => {
+                    tests.push((pc, test_chars(code, pc)?));
                     break;
                 }
                 // These consume nothing. Reading past an assertion as if
@@ -720,7 +736,38 @@ fn first_chars(code: &[u8]) -> Option<Vec<(u32, u32)>> {
             }
         }
     }
-    Some(ranges)
+    Some(tests)
+}
+
+/// What the second character of a match can be, given the first: for
+/// each one-character test a match can begin with, the characters below
+/// 256 it accepts and those the pattern can test for next. `None` when
+/// that is not known for every such test.
+fn second_chars(code: &[u8], flags: c_int) -> Option<Vec<Pair>> {
+    let tests = first_tests(code, 0)?;
+    if tests.len() > PAIRS_MAX {
+        return None;
+    }
+    let bits = |ranges: &[(u32, u32)]| -> [u64; 4] {
+        let chars = Chars::new(ranges.to_vec(), flags);
+        let mut bits = [0u64; 4];
+        for (c, &member) in chars.latin1.iter().enumerate() {
+            if member {
+                bits[c / 64] |= 1 << (c % 64);
+            }
+        }
+        bits
+    };
+    let mut pairs = Vec::with_capacity(tests.len());
+    for (pc, first) in tests {
+        let next = first_tests(code, pc + op_size(code, pc)?)?;
+        let second: Vec<(u32, u32)> = next.into_iter().flat_map(|(_, ranges)| ranges).collect();
+        pairs.push(Pair {
+            first: bits(&first),
+            second: bits(&second),
+        });
+    }
+    Some(pairs)
 }
 
 /// How many patterns keep their [`Plan`], in sets of [`CACHE_WAYS`]. A
@@ -963,6 +1010,12 @@ fn run_from(
         Start::Chars(chars) => {
             let mut at = from;
             while let Some(hit) = chars.find(subject, at, flags) {
+                if let Some(pairs) = &plan.pairs {
+                    if !pairs_allow(pairs, subject, hit) {
+                        at = hit + subject.char_at(hit).1;
+                        continue;
+                    }
+                }
                 let found = try_at(hit);
                 if found != 0 {
                     return found;
@@ -1023,6 +1076,22 @@ mod tests {
         assert_eq!(required_of("(\\w)\\1@", "").as_deref(), Some(&b"@"[..]));
         // A required character the start already looks for adds nothing.
         assert_eq!(required_of("q(?=@)", ""), None);
+    }
+
+    #[test]
+    fn an_alternation_is_tried_only_where_a_branch_can_begin() {
+        let (code, flags) = compiled("\\b(?:casino|viagra|loans?)\\b", "gi");
+        let plan = analyse(&code, flags);
+        assert!(plan.pairs.is_some());
+        // "cl" and a final "c" cannot begin a branch; "ca", "vi" and "lo"
+        // can.
+        let subject = Subject::Narrow(b"cat vim Casino lot LOAN clc");
+        assert_eq!(tried_by(&plan, subject, 0, flags), [0, 4, 8, 15, 19]);
+        // A pattern that can match one character has no pairs.
+        for source in ["ab?", "a$", "a\\b", "a|bc", "a.", "(a)\\1"] {
+            let (code, flags) = compiled(source, "");
+            assert_eq!(analyse(&code, flags).pairs, None, "{source}");
+        }
     }
 
     #[test]
@@ -1116,6 +1185,7 @@ mod tests {
             start: start.clone(),
             required: None,
             run: false,
+            pairs: None,
         }
     }
 
