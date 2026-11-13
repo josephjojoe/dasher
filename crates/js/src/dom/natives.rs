@@ -104,7 +104,7 @@ fn valid_element_name(name: &str) -> bool {
 }
 
 /// Whether a name is acceptable to `setAttribute`.
-fn valid_attribute_name(name: &str) -> bool {
+pub(super) fn valid_attribute_name(name: &str) -> bool {
     !name.is_empty()
         && !name.chars().any(|c| {
             matches!(
@@ -572,7 +572,13 @@ fn attr_by_qualified_name<'d>(
     })
 }
 
-fn set_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str, value: &str) -> Result<()> {
+pub(super) fn set_attr(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    n: NodeId,
+    name: &str,
+    value: &str,
+) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         let name = html_lower(&doc, n, name);
@@ -588,7 +594,12 @@ fn set_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str, value: &st
     deliver(ctx, dom)
 }
 
-fn remove_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str) -> Result<bool> {
+pub(super) fn remove_attr(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    n: NodeId,
+    name: &str,
+) -> Result<bool> {
     let removed = {
         let mut doc = dom.doc_mut();
         let name = html_lower(&doc, n, name);
@@ -784,6 +795,8 @@ pub(super) fn install<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
     install_queries(obj, dom)?;
     super::shadow::install(obj, dom)?;
     super::custom::install(obj, dom)?;
+    super::host::install(obj)?;
+    layout::install(obj, dom)?;
     Ok(())
 }
 

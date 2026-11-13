@@ -50,6 +50,17 @@ const ACCESSORS: &str = r#"[
   ['Element', false, ['id', 'className'], true],
   ['CharacterData', false, ['data'], true],
   ['CharacterData', false, ['length']],
+  ['Element', false, ['classList'], true],
+  ['Element', false, ['clientWidth', 'clientHeight', 'scrollWidth', 'scrollHeight']],
+  ['HTMLElement', false, ['style'], true],
+  ['HTMLElement', false, ['dataset', 'offsetTop', 'offsetLeft', 'offsetWidth', 'offsetHeight']],
+  ['SVGElement', false, ['style'], true],
+  ['SVGElement', false, ['dataset']],
+  ['MathMLElement', false, ['style', 'dataset']],
+  ['CSSStyleDeclaration', false, ['cssText', 'cssFloat'], true],
+  ['CSSStyleDeclaration', false, ['length']],
+  ['DOMTokenList', false, ['length']],
+  ['DOMTokenList', false, ['value'], true],
 ]"#;
 
 #[test]
@@ -76,8 +87,25 @@ fn accessors_keep_their_descriptors_and_look_native() {
                 try { new d.get(); bad.push(where + ' constructs'); } catch (e) {}
               }
             }
-            for (const [name, length] of [['hasChildNodes', 0], ['contains', 1]]) {
-              const d = Object.getOwnPropertyDescriptor(Node.prototype, name);
+            for (const [iface, name] of [['CSSStyleDeclaration', 'cssText'], ['CSSStyleDeclaration', 'cssFloat'],
+                ['DOMTokenList', 'value']]) {
+              const set = Object.getOwnPropertyDescriptor(globalThis[iface].prototype, name).set;
+              if (set.name !== 'set ' + name || set.length !== 1) bad.push(iface + '.' + name + ' setter name/length');
+              if (Function.prototype.toString.call(set) !== 'function set ' + name + '() {\n    [native code]\n}') {
+                bad.push(iface + '.' + name + ' setter source');
+              }
+            }
+            if (typeof getComputedStyle !== 'function' || !String(getComputedStyle).includes('[native code]')) {
+              bad.push('getComputedStyle');
+            }
+            for (const [iface, name, length] of [['Node', 'hasChildNodes', 0], ['Node', 'contains', 1],
+                ['CSSStyleDeclaration', 'item', 1], ['CSSStyleDeclaration', 'getPropertyValue', 1],
+                ['CSSStyleDeclaration', 'getPropertyPriority', 1], ['CSSStyleDeclaration', 'setProperty', 2],
+                ['CSSStyleDeclaration', 'removeProperty', 1], ['DOMTokenList', 'item', 1],
+                ['DOMTokenList', 'contains', 1], ['DOMTokenList', 'add', 0], ['DOMTokenList', 'remove', 0],
+                ['DOMTokenList', 'toggle', 1], ['DOMTokenList', 'replace', 2], ['DOMTokenList', 'supports', 1],
+                ['DOMTokenList', 'toString', 0]]) {
+              const d = Object.getOwnPropertyDescriptor(globalThis[iface].prototype, name);
               if (d.enumerable || !d.writable || !d.configurable) bad.push(name + ' attributes');
               if (d.value.name !== name || d.value.length !== length) bad.push(name + ' name/length');
               if (!String(d.value).includes('[native code]')) bad.push(name + ' source');

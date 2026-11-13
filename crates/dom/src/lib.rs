@@ -48,6 +48,20 @@
 //! fills one from HTML and [`Document::parse_xml_into`] from XML, with a
 //! small non-validating parser of dasher's own.
 //!
+//! # Lookups by id
+//!
+//! [`Document::get_element_by_id`] does not walk the tree. The document
+//! keeps one index of every element in its arena that has an `id`, kept up
+//! to date when elements are created, cloned or released and when `id`
+//! attributes change; inserting and removing nodes never touches it. A
+//! lookup takes the elements with that id and keeps those under the root
+//! asked about, so the document, each shadow root, template contents,
+//! detached trees and extra documents each see only their own, and a
+//! repeated id gives the first in tree order. dasher-css uses the same
+//! index ([`Document::elements_with_id`]) for selectors with an `#id`. It
+//! costs about 12 bytes per element with an id; `tests/ids.rs` checks it
+//! against a tree walk over random edits.
+//!
 //! # Memory
 //!
 //! Footprint matters more than speed here, so the layout is deliberately
@@ -79,6 +93,7 @@
 
 mod document;
 mod error;
+mod ids;
 mod name;
 mod node;
 mod parse;

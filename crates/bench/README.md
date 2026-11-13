@@ -185,9 +185,38 @@ Set `DASHER_REPLAY_LOG` as well to have every request the replay answers
 (or refuses) printed to stderr as `replay: hit|miss <method> <url>`, to
 count a page's requests.
 
+With `DASHER_EAGER_JS` set, a `replay` build compiles every function with
+its script instead of on its first call (see
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)),
+so one build can be measured both ways.
+
 Compare CPU time (user plus system), not wall time: under the virtual clock
 a page's wall time is its CPU time plus fixed waits. Run each page three
-times and take the median. Runs of one build agree to about 1%.
+times and take the median. Runs of one build agree to about 1%. On a
+machine that is busy with other work they agree much less, so alternate
+the two builds page by page rather than running one after the other.
+
+Page output is not byte-for-byte the same from one run to the next, even
+on one build: pages put timestamps and random IDs into it, and some insert
+styles in an order that varies. Compare the element count, the count of
+each tag, the link count and the visible text with digits masked.
+
+### The parse-only corpus
+
+How fast the engine compiles scripts is measured on the scripts of the
+recorded pages, compiled without being run. Every response whose
+`content-type` is JavaScript is a script (`*.meta` holds the headers and
+`*.body` the bytes). Copy those bodies into one directory, drop
+duplicates, and run
+
+```sh
+cargo run --profile profiling -p dasher-js --example compile_corpus -- corpus/
+```
+
+It compiles each file as a classic script, or as a module if that fails
+(imports resolve to empty modules), in a page's runtime, and prints the
+bytes compiled, the CPU time it took, the rate in MB/s and how much of the
+JS heap the compiled scripts hold.
 
 ### What it showed
 
@@ -230,6 +259,7 @@ Each change was also measured on its own, against the build without it:
 | `stack` written when first read | −3% (−14% on one page) | none | macOS |
 | bracket lookahead answers remembered by the parser | −5% (−4% on Linux) | none | macOS and Linux |
 | closures and `arguments` made from a known shape, regexp searches run by dasher, `Map` hash mixed (together) | −4% (−8% on one page) | none | macOS |
+| functions compiled on their first call, not with their script (16 heavy pages) | +3% | −8% (−22% on one page) | Linux |
 
 Before the allocator change, a quarter to over a third of CPU time on
 the heavy pages was inside `malloc`, `free` and `malloc_usable_size`
@@ -437,16 +467,26 @@ mix of work. Lightpanda does real layout, which is why its
 | URL parsing | 2,948 | 1,482 | 2.0× | 0.62 | 0.23 | 2.7× |
 | new Function | 3,619 | 1,066 | 3.4× | 0.20 | 0.04 | 5.0× |
 
+Since the baseline, DAS-39 moved Intl formatting and URL parsing into Rust
+(`crates/js/src/intl/`, `crates/js/src/urls.rs`). The same machine, with
+both builds and Node measured side by side and 9 runs each (the machine
+was busy, so absolute figures run a little high):
+
+| benchmark | before ns/op | after ns/op | Node `--jitless` ns/op | after ÷ Node |
+| --- | ---: | ---: | ---: | ---: |
+| Date and Intl formatting | 48,317 | 3,033 | 2,633 | 1.2× |
+| URL parsing | 2,942 | 1,630 | 1,558 | 1.0× |
+
 | benchmark | dasher ns/op | audit: dasher ns | audit: Lightpanda ns | dasher ÷ Lightpanda |
 | --- | ---: | ---: | ---: | ---: |
 | getElementById | 69,377 | 61,465 | 270 | 227.6× |
-| getComputedStyle | 40,009 | 19,815 | 70 | 283.1× |
-| classList.contains | 5,878 | 3,505 | 130 | 27.0× |
-| style.setProperty | 5,671 | 3,432 | 303 | 11.3× |
+| getComputedStyle | 282 | 19,815 | 70 | 4.0× |
+| classList.contains | 190 | 3,505 | 130 | 1.5× |
+| style.setProperty | 753 | 3,432 | 303 | 2.5× |
 | add+removeEventListener | 3,480 | 2,165 | 220 | 9.8× |
-| clientWidth | 2,406 | 1,685 | 50 | 33.7× |
+| clientWidth | 107 | 1,685 | 50 | 2.1× |
 | append+removeChild | 1,934 | 1,315 | 220 | 6.0× |
-| dataset.x | 1,894 | 1,198 | 137 | 8.7× |
+| dataset.x | 276 | 1,198 | 137 | 2.0× |
 | setAttribute | 1,231 | 865 | 170 | 5.1× |
 | attributes.length | 1,319 | 798 | 70 | 11.4× |
 | getAttribute | 715 | 465 | 120 | 3.9× |
@@ -460,7 +500,7 @@ mix of work. Lightpanda does real layout, which is why its
 | innerText | 374 | 215 | 220 | 1.0× |
 | createElement | 1,607 | 915 | 470 | 1.9× |
 | document.cookie | 503 | 165 | 320 | 0.5× |
-| getBoundingClientRect | 2,236 | 1,615 | 24,770 | 0.1× |
+| getBoundingClientRect | 1,095 | 1,615 | 24,770 | 0.04× |
 | querySelectorAll(#id) | 116,395 | | | |
 | querySelectorAll(.class) | 171,475 | | | |
 | querySelectorAll(tag) | 269,684 | | | |
@@ -477,6 +517,105 @@ nothing costs about 78 ns in this loop: 51 ns for the loop and the lookup
 through four prototypes (an own data property is 40 ns), and 27 ns for
 QuickJS calling a C function as a getter. The members' own work is the
 rest, 0 to 20 ns.
+
+Inline style, `classList`, `dataset`, `getComputedStyle` and the layout
+getters are native since DAS-42 (see `crates/js/src/dom/host.rs`). Before,
+getComputedStyle was 40,009 ns here, classList.contains 5,878,
+style.setProperty 5,671, clientWidth 2,406, dataset.x 1,894 and
+getBoundingClientRect 2,236. Where the time goes now:
+
+- `getComputedStyle(el).display` is the native function returning the
+  element's cached computed style (88 ns), then the property read, which
+  QuickJS asks the object's exotic `get_own_property` for: converting the
+  key, checking the prototype chain, finding the inline declaration and
+  resolving the default (about 200 ns). Visibility (`:visible`, which walks
+  the ancestors) and boxes are cached until the document next changes.
+- `style.setProperty` includes building the value string in the loop
+  (about 90 ns) and `el.style` (about 90 ns). Of the rest, much is the
+  attribute write shared with `setAttribute` (mutation records, custom
+  element reactions).
+- clientWidth (107 ns) and dataset.x (276 ns, a property answered by the
+  exotic method: one attribute lookup) are near the floor of a native
+  getter described above.
+
+### DOM indexes and selector plans
+
+The id index in dasher-dom and the query plans in dasher-css (see their
+crate docs) changed these rows. Same machine and build settings as the
+baseline, `main` at `cfa9030` against the change, run back to back, median
+of 5 runs, on a machine under load from other builds:
+
+| benchmark | before ns/op | after ns/op | |
+| --- | ---: | ---: | ---: |
+| getElementById | 69,110 | 556 | 124× |
+| querySelectorAll(#id) | 118,503 | 1,170 | 101× |
+| querySelectorAll(.class) | 174,353 | 146,582 | 1.19× |
+| querySelectorAll(tag) | 272,475 | 233,384 | 1.17× |
+| matches(tag) | 672 | 625 | 1.08× |
+| querySelector(tag) | 728 | 683 | 1.07× |
+
+The other DOM rows did not change beyond noise; `setAttribute` and
+`append+removeChild` pay nothing for keeping the index. Most of what is
+left of these calls is the JS bindings: in Rust, without them,
+`getElementById` takes 54 ns and `querySelector("#id")` 86 ns, against
+57 µs and 108 µs before, and `matches("div")` 14 ns.
+[`../css/examples/query_timing.rs`](../css/examples/query_timing.rs) times
+queries at that level, on the same page:
+
+```sh
+cargo run --release -p dasher-css --example query_timing
+```
+
+It prints the best of 25 rounds per query, which stays steady on a busy
+machine where the median does not. Selectors with an `#id` further left
+(`main #c250 a`, `#target span`) went from 60 to 250 µs to 0.1 to 0.5 µs;
+single-compound selectors (`.text`, `li`, `[data-x='3']`) became 1.3 to
+1.5× faster; descendant and child selectors without an id (`div.a > p`,
+`section.card h2`) stayed where they were.
+
+The index costs 11.8 bytes per element with an id (`tests/memory.rs` in
+dasher-dom), 1.7 bytes per node on its listing page where every ninth
+node has an id. Peak RSS of the four fixture pages did not move beyond
+run-to-run noise (±0.5 MiB). There is no class or tag index and no
+ancestor filter: a tree walk costs about 10 ns per element, and an index
+would cost every page memory for the few that query that way.
+
+### Native events
+
+Events are native since DAS-44 (see `crates/js/src/events/`): listener
+storage, `Event` objects and dispatch are Rust, and the event path is
+walked on node ids. On this machine, median of 5 runs, against
+Lightpanda's nightly (1.1.0-nightly.12116) timed on the same loops with
+[`micro/lightpanda.py`](micro/lightpanda.py):
+
+| benchmark | before (main at `c13aea4`) | after | Lightpanda | after ÷ Lightpanda |
+| --- | ---: | ---: | ---: | ---: |
+| add+removeEventListener | 3,378 | 235 | 233 | 1.0× |
+| dispatchEvent, bubbling 3 levels | 19,073 | 1,369 | 1,734 | 0.8× |
+| tagName (for scale) | 97.3 | 95.3 | 72 | 1.3× |
+
+The other DOM rows did not move beyond noise.
+
+The dispatch loop makes a bubbling `Event` and dispatches it at a span
+whose listener is three levels up, on the body: seven targets on the path
+(span, `#target`, `main`, body, html, document, window), one of them with
+a listener. Firing an event no listener could hear, as the host does for
+`load`, `DOMContentLoaded`, script `load` and `error` or
+`readystatechange` on most pages, makes no event object and no wrappers
+and runs no JS: the path is checked for listeners, handlers and handler
+attributes first.
+
+`micro/lightpanda.py` serves the micro-benchmark page and loops to a
+Lightpanda binary and reports ns per op the way `dasher-bench micro` does,
+from the process CPU time of `lightpanda fetch` with and without a loop:
+
+```sh
+python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
+    "add+removeEventListener=500000" "dispatchEvent, bubbling 3 levels=200000"
+```
+
+Its tagName figure (72 ns here, 60 in the audit) puts this machine about
+1.2 times slower than the audit's for Lightpanda.
 
 ## Per-page limits
 
@@ -496,4 +635,8 @@ down a process that is serving other jobs.
   the default caps a runaway document at roughly 65 MiB. That is far beyond
   real pages, which rarely pass 100,000 nodes. Fragment parsing and deep
   clones stop early once over the limit, so a single
-  `innerHTML = hugeString` cannot overshoot it by much.
+  `innerHTML = hugeString` cannot overshoot it by much. The limit counts
+  live nodes, and removed nodes are freed as soon as script can no longer
+  reach them, also while the page is still parsing, so a page that keeps
+  rewriting the same few nodes (a ticker, a list re-rendered) stays flat
+  however long it runs (`crates/js/tests/churn.rs`).

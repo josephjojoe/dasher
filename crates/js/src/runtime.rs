@@ -23,6 +23,7 @@ use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::glue;
 use crate::heap::{self, HeapState};
+use crate::intl;
 use crate::limits::{DEFAULT_MAX_DOM_NODES, ResourceLimit};
 use crate::loader::{self, LoaderHooks, LoaderState};
 use crate::log::BoundedLog;
@@ -148,6 +149,11 @@ impl Shared {
             Document::parse(""),
             options.max_dom_nodes,
             Rc::clone(&event_loop.clock),
+            dom::Geometry {
+                width: i32::try_from(options.window.viewport.width).unwrap_or(i32::MAX),
+                height: i32::try_from(options.window.viewport.height).unwrap_or(i32::MAX),
+                visibility: options.window.visibility,
+            },
         );
         Self {
             deadline: Cell::new(None),
@@ -289,7 +295,19 @@ impl Shared {
                     (error, None)
                 } else {
                     let error = error_from_value(ctx, value.clone(), ErrorKind::Uncaught);
-                    (error, Some(value))
+                    // Or it allocates the InternalError but not its "out of
+                    // memory" message: where the heap fills up decides which.
+                    if error.kind == ErrorKind::Uncaught
+                        && error.message == "InternalError"
+                        && self.heap.take_refused()
+                    {
+                        (
+                            ScriptError::new(ErrorKind::OutOfMemory, "out of memory"),
+                            None,
+                        )
+                    } else {
+                        (error, Some(value))
+                    }
                 }
             }
             rquickjs::Error::Allocation => (
@@ -543,6 +561,10 @@ impl JsRuntime {
             runtime,
             shared,
         };
+        #[cfg(feature = "replay")]
+        if std::env::var_os("DASHER_EAGER_JS").is_some() {
+            js.with(|ctx| eager_functions(&ctx));
+        }
         js.with(|ctx| install(&ctx, &js.shared, &options).map_err(|e| js.shared.capture(&ctx, e)))?;
         Ok(js)
     }
@@ -799,6 +821,8 @@ impl Drop for JsRuntime {
         self.shared.event_loop.clear();
         self.shared.net.abort_all();
         self.shared.modules.abort_all();
+        // The DOM may outlive the engine (in a `HeldNode`).
+        self.shared.dom.set_runtime(std::ptr::null_mut());
     }
 }
 
@@ -808,7 +832,9 @@ fn install<'js>(
     shared: &Rc<Shared>,
     options: &RuntimeOptions,
 ) -> rquickjs::Result<()> {
+    crate::native_data::NativeData::install(ctx)?;
     let native = Object::new(ctx.clone())?;
+    crate::events::install(ctx, &native, shared)?;
 
     let s = Rc::clone(shared);
     native.set(
@@ -830,6 +856,7 @@ fn install<'js>(
     net::install(ctx, &native, shared)?;
     encoding::install(ctx, &native)?;
     urls::install(ctx, &native)?;
+    intl::install(ctx, &native)?;
     random::install(ctx, &native)?;
     window::install(ctx, &native, shared, &options.window)?;
     dom::install(ctx, &native, shared)?;
@@ -857,4 +884,18 @@ fn install<'js>(
         return Err(rquickjs::Error::Unknown);
     }
     Ok(())
+}
+
+/// For benchmarks (`DASHER_EAGER_JS`, with the `replay` feature): compile
+/// every function with its script, as the engine did before it learned to
+/// leave functions to their first call (see
+/// `vendor/rquickjs-sys/PATCHES.md`), so that one build can be measured
+/// both ways.
+#[cfg(feature = "replay")]
+fn eager_functions(ctx: &Ctx<'_>) {
+    unsafe extern "C" {
+        fn JS_SetLazyFunctions(rt: *mut qjs::JSRuntime, enable: bool);
+    }
+    // SAFETY: `ctx` is live and its runtime locked; the call sets a flag.
+    unsafe { JS_SetLazyFunctions(qjs::JS_GetRuntime(ctx.as_raw().as_ptr()), false) };
 }

@@ -11,7 +11,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
-use std::ffi::{CStr, CString, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -19,26 +19,47 @@ use dasher_dom::{Document, Name, NodeId, NodeKind, ShadowRootMode};
 use rquickjs::{Class, Ctx, Exception, Function, Object, Result, Value, qjs};
 
 use super::DomState;
-use super::natives::stale_node_error;
+use super::host::{self, Host, HostClass, Hosts};
+use super::layout;
+use super::natives::{stale_node_error, throw_dom};
 use super::wrapper::{Node, NodeWrapper, wrap};
+use crate::native_data::NativeData;
 
 /// What `this` has to be for a member: a node wrapper of a kind that has
-/// the member's interface. Anything else throws `TypeError: Illegal
-/// invocation`, as browsers do.
+/// the member's interface, or one of the host objects of the `host` module.
+/// Anything else throws `TypeError: Illegal invocation`, as browsers do.
 #[derive(Clone, Copy)]
-enum Receiver {
+pub(super) enum Receiver {
     Node,
     Element,
     /// A text or comment node.
     CharacterData,
+    /// A `CSSStyleDeclaration` (an inline or a computed style).
+    Style,
+    /// A `DOMTokenList`.
+    Tokens,
+    /// No `this` (a function such as `getComputedStyle`): the node is the
+    /// first argument, which must be an element, or the call throws a
+    /// `TypeError` with this message.
+    ElementArg(&'static CStr),
 }
 
 impl Receiver {
     fn accepts(self, doc: &Document, id: NodeId) -> bool {
         match self {
             Receiver::Node => true,
-            Receiver::Element => doc.is_element(id),
+            Receiver::Element | Receiver::Style | Receiver::Tokens | Receiver::ElementArg(_) => {
+                doc.is_element(id)
+            }
             Receiver::CharacterData => doc.text(id).is_some(),
+        }
+    }
+
+    fn host_class(self) -> Option<HostClass> {
+        match self {
+            Receiver::Style => Some(HostClass::Style),
+            Receiver::Tokens => Some(HostClass::Tokens),
+            _ => None,
         }
     }
 }
@@ -46,17 +67,50 @@ impl Receiver {
 #[derive(Clone, Copy)]
 enum Kind {
     /// The `get` of an accessor. Its setter, if it has one, stays as
-    /// `dom.js` defines it.
+    /// `dom.js` defines it unless a `Setter` entry replaces it.
     Getter,
+    /// The `set` of an accessor.
+    Setter,
     /// A method taking `length` arguments (its `length` property).
     Method { length: u8 },
+    /// A plain function, put on the `functions` object `dom.js` passes in
+    /// `interfaces` rather than on a prototype.
+    Function { length: u8 },
 }
 
 /// A member's body: given the call and the node behind `this`, and the
-/// arguments for a method, what to return or throw.
-type Impl = for<'c> fn(&'c Call<'_>, NodeId, &[qjs::JSValue]) -> Outcome<'c>;
+/// arguments for a method, what to return or throw. It runs with the
+/// document borrowed, so it must not change it or run JS.
+pub(super) type Impl = for<'c> fn(&'c Call<'_>, NodeId, &[qjs::JSValue]) -> Outcome<'c>;
 
-type Outcome<'c> = std::result::Result<Ret<'c>, Thrown>;
+/// The body of a member that changes the document or may run JS (converting
+/// arguments, delivering mutation records): it runs with nothing borrowed,
+/// and borrows the document itself as it needs to.
+pub(super) type WriteImpl = for<'w> fn(&Write<'w>) -> std::result::Result<Ret<'static>, Thrown>;
+
+pub(super) type Outcome<'c> = std::result::Result<Ret<'c>, Thrown>;
+
+#[derive(Clone, Copy)]
+pub(super) enum Body {
+    Read(Impl),
+    Write(WriteImpl),
+}
+
+/// How an argument of a `Read` member is converted before the document is
+/// borrowed, since converting an object can run JS. `Write` members convert
+/// their own arguments.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "shared with the members the other DOM tickets add"
+)]
+pub(super) enum Arg {
+    Any,
+    /// A string (`ToString`): objects and symbols are converted first.
+    Str,
+    /// An index (`ToUint32`): anything but an integer is converted first.
+    Uint32,
+}
 
 /// One native member, and the interfaces whose prototypes get it.
 struct Member {
@@ -65,7 +119,9 @@ struct Member {
     receiver: Receiver,
     /// Keys of the `interfaces` object `dom.js` registers.
     on: &'static [&'static str],
-    f: Impl,
+    /// How `Read` bodies' arguments are converted.
+    args: &'static [Arg],
+    body: Body,
 }
 
 const fn getter(
@@ -79,7 +135,24 @@ const fn getter(
         kind: Kind::Getter,
         receiver,
         on,
-        f,
+        args: &[],
+        body: Body::Read(f),
+    }
+}
+
+const fn setter(
+    name: &'static str,
+    receiver: Receiver,
+    on: &'static [&'static str],
+    f: WriteImpl,
+) -> Member {
+    Member {
+        name,
+        kind: Kind::Setter,
+        receiver,
+        on,
+        args: &[],
+        body: Body::Write(f),
     }
 }
 
@@ -90,12 +163,43 @@ const fn method(
     on: &'static [&'static str],
     f: Impl,
 ) -> Member {
+    reader(name, length, receiver, on, &[], f)
+}
+
+/// A method that reads, with its arguments converted as `args` says.
+const fn reader(
+    name: &'static str,
+    length: u8,
+    receiver: Receiver,
+    on: &'static [&'static str],
+    args: &'static [Arg],
+    f: Impl,
+) -> Member {
     Member {
         name,
         kind: Kind::Method { length },
         receiver,
         on,
-        f,
+        args,
+        body: Body::Read(f),
+    }
+}
+
+/// A method that changes the document or runs JS.
+const fn writer(
+    name: &'static str,
+    length: u8,
+    receiver: Receiver,
+    on: &'static [&'static str],
+    f: WriteImpl,
+) -> Member {
+    Member {
+        name,
+        kind: Kind::Method { length },
+        receiver,
+        on,
+        args: &[],
+        body: Body::Write(f),
     }
 }
 
@@ -106,6 +210,14 @@ const CHARACTER_DATA: &[&str] = &["CharacterData"];
 const PARENT_NODE: &[&str] = &["Element", "Document", "DocumentFragment"];
 /// The `NonDocumentTypeChildNode` mixin's interfaces.
 const CHILD_NODE: &[&str] = &["Element", "CharacterData"];
+const HTML_ELEMENT: &[&str] = &["HTMLElement"];
+/// The `ElementCSSInlineStyle` and `HTMLOrSVGElement` mixins' interfaces.
+const STYLED: &[&str] = &["HTMLElement", "SVGElement", "MathMLElement"];
+const STYLE: &[&str] = &["CSSStyleDeclaration"];
+const TOKENS: &[&str] = &["DOMTokenList"];
+const FUNCTIONS: &[&str] = &["functions"];
+const STR: &[Arg] = &[Arg::Str];
+const INDEX: &[Arg] = &[Arg::Uint32];
 
 /// Every native member. A member's index here is its C function's magic
 /// number.
@@ -165,6 +277,52 @@ static MEMBERS: &[Member] = &[
     // CharacterData.
     getter("data", Receiver::CharacterData, CHARACTER_DATA, data),
     getter("length", Receiver::CharacterData, CHARACTER_DATA, length),
+    // Inline style, classList and dataset (see the `host` module).
+    getter("style", Receiver::Element, STYLED, host::style),
+    getter("dataset", Receiver::Element, STYLED, host::dataset),
+    getter("classList", Receiver::Element, ELEMENT, host::class_list),
+    Member {
+        name: "getComputedStyle",
+        kind: Kind::Function { length: 1 },
+        receiver: Receiver::ElementArg(
+            c"Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.",
+        ),
+        on: FUNCTIONS,
+        args: &[],
+        body: Body::Read(host::computed_style),
+    },
+    // CSSStyleDeclaration.
+    getter("cssText", Receiver::Style, STYLE, host::css_text),
+    setter("cssText", Receiver::Style, STYLE, host::set_css_text),
+    getter("length", Receiver::Style, STYLE, host::style_length),
+    reader("item", 1, Receiver::Style, STYLE, INDEX, host::style_item),
+    reader("getPropertyValue", 1, Receiver::Style, STYLE, STR, host::get_property_value),
+    reader("getPropertyPriority", 1, Receiver::Style, STYLE, STR, host::get_property_priority),
+    writer("setProperty", 2, Receiver::Style, STYLE, host::set_property),
+    writer("removeProperty", 1, Receiver::Style, STYLE, host::remove_property),
+    getter("cssFloat", Receiver::Style, STYLE, host::css_float),
+    setter("cssFloat", Receiver::Style, STYLE, host::set_css_float),
+    // DOMTokenList.
+    getter("length", Receiver::Tokens, TOKENS, host::tokens_length),
+    reader("item", 1, Receiver::Tokens, TOKENS, INDEX, host::tokens_item),
+    reader("contains", 1, Receiver::Tokens, TOKENS, STR, host::tokens_contains),
+    writer("add", 0, Receiver::Tokens, TOKENS, host::tokens_add),
+    writer("remove", 0, Receiver::Tokens, TOKENS, host::tokens_remove),
+    writer("toggle", 1, Receiver::Tokens, TOKENS, host::tokens_toggle),
+    writer("replace", 2, Receiver::Tokens, TOKENS, host::tokens_replace),
+    reader("supports", 1, Receiver::Tokens, TOKENS, STR, host::tokens_supports),
+    getter("value", Receiver::Tokens, TOKENS, host::tokens_value),
+    setter("value", Receiver::Tokens, TOKENS, host::set_tokens_value),
+    method("toString", 0, Receiver::Tokens, TOKENS, host::tokens_value),
+    // The synthetic layout (see the `layout` module).
+    getter("clientWidth", Receiver::Element, ELEMENT, layout::client_width),
+    getter("clientHeight", Receiver::Element, ELEMENT, layout::client_height),
+    getter("scrollWidth", Receiver::Element, ELEMENT, layout::box_width),
+    getter("scrollHeight", Receiver::Element, ELEMENT, layout::box_height),
+    getter("offsetTop", Receiver::Element, HTML_ELEMENT, layout::box_top),
+    getter("offsetLeft", Receiver::Element, HTML_ELEMENT, layout::box_left),
+    getter("offsetWidth", Receiver::Element, HTML_ELEMENT, layout::box_width),
+    getter("offsetHeight", Receiver::Element, HTML_ELEMENT, layout::box_height),
 ];
 
 // -------------------------------------------------------------------------
@@ -383,10 +541,16 @@ fn utf16_len(s: &str) -> usize {
 // Calls.
 
 /// What a member returns, turned into a JS value by [`Call::value`].
-enum Ret<'c> {
+#[allow(
+    dead_code,
+    reason = "shared with the members the other DOM tickets add"
+)]
+pub(super) enum Ret<'c> {
     Null,
+    Undefined,
     Bool(bool),
     Int(i32),
+    Float(f64),
     /// A node's wrapper, or `null`.
     Node(Option<NodeId>),
     /// A name from the document's name table, as a cached string.
@@ -397,24 +561,55 @@ enum Ret<'c> {
     Static(&'static str),
     /// Any other string, made for this call.
     Str(Cow<'c, str>),
+    /// A value made for this call, whose reference goes to the caller.
+    Value(qjs::JSValue),
 }
 
 /// What a member throws.
-enum Thrown {
+pub(super) enum Thrown {
     /// `TypeError: Illegal invocation`, for the wrong `this`.
     Illegal,
     /// A `TypeError` with this message.
     Type(&'static CStr),
     /// The `InvalidStateError` for a node of a replaced document.
     Stale,
+    /// A `DOMException` with this name and message.
+    Dom(&'static str, String),
+    /// An rquickjs error (an exception may be pending).
+    Error(rquickjs::Error),
+    /// An exception is already pending.
+    Pending,
 }
 
-/// One call of a member: what it can look at.
-struct Call<'a> {
-    ctx: *mut qjs::JSContext,
-    members: &'a Members,
-    dom: &'a Rc<DomState>,
-    doc: Ref<'a, Document>,
+/// One call of a `Read` member: what it can look at.
+pub(super) struct Call<'a> {
+    pub(super) ctx: *mut qjs::JSContext,
+    pub(super) members: &'a Members,
+    pub(super) dom: &'a Rc<DomState>,
+    pub(super) doc: Ref<'a, Document>,
+    /// The node's wrapper, and its JS value (`this`, the first argument
+    /// of a function, or the owner of a host object).
+    pub(super) wrapper: &'a NodeWrapper<'a>,
+    pub(super) node: qjs::JSValue,
+    /// The host object behind `this`, for host receivers.
+    pub(super) host: Option<&'a Host>,
+    pub(super) args: &'a [qjs::JSValue],
+}
+
+/// One call of a `Write` member: the same, without the document borrowed.
+#[allow(
+    dead_code,
+    reason = "shared with the members the other DOM tickets add"
+)]
+pub(super) struct Write<'a> {
+    pub(super) ctx: *mut qjs::JSContext,
+    pub(super) members: &'a Members,
+    pub(super) dom: &'a Rc<DomState>,
+    pub(super) id: NodeId,
+    pub(super) wrapper: &'a NodeWrapper<'a>,
+    pub(super) node: qjs::JSValue,
+    pub(super) host: Option<&'a Host>,
+    pub(super) args: &'a [qjs::JSValue],
 }
 
 impl Call<'_> {
@@ -430,41 +625,268 @@ impl Call<'_> {
         wrapper.id().ok_or(Thrown::Stale)
     }
 
-    /// `ret` as a new JS value, or `JS_EXCEPTION` with an exception thrown.
-    fn value(&self, ret: Ret<'_>) -> qjs::JSValue {
-        match ret {
-            Ret::Null | Ret::Node(None) => qjs::JS_NULL,
-            Ret::Bool(true) => qjs::JS_TRUE,
-            Ret::Bool(false) => qjs::JS_FALSE,
-            Ret::Int(i) => qjs::JS_MKVAL(qjs::JS_TAG_INT, i),
-            Ret::Node(Some(id)) => self.node(id),
-            Ret::Name(name) => self.members.name(self.ctx, &self.doc, name, false),
-            Ret::UpperName(name) => self.members.name(self.ctx, &self.doc, name, true),
-            Ret::Static(s) => self.members.fixed(self.ctx, s),
-            // SAFETY: the pointer and length are those of a live `str`.
-            Ret::Str(s) => unsafe {
-                qjs::JS_NewStringLen(self.ctx, s.as_ptr().cast(), s.len() as qjs::size_t)
-            },
+    /// Argument `i` as a string. `Read` members get it from an argument
+    /// converted before the call (see [`Arg`]), so this runs no JS. A
+    /// missing argument is `"undefined"`, as `String(undefined)`.
+    pub(super) fn str_arg(&self, i: usize) -> std::result::Result<JsStr, Thrown> {
+        // SAFETY: `self.ctx` is the running call's, the arguments alive.
+        unsafe { JsStr::arg(self.ctx, self.args, i) }
+    }
+
+    /// Argument `i` as `ToUint32` (converted before the call).
+    pub(super) fn u32_arg(&self, i: usize) -> u32 {
+        match self.args.get(i) {
+            // SAFETY: a tag check and the integer of an int value.
+            Some(&v) if unsafe { qjs::JS_VALUE_GET_TAG(v) } == qjs::JS_TAG_INT => {
+                // SAFETY: as above.
+                (unsafe { qjs::JS_VALUE_GET_INT(v) }) as u32
+            }
+            _ => 0,
         }
     }
 
-    /// The wrapper of `id`, made if there is none.
-    fn node(&self, id: NodeId) -> qjs::JSValue {
-        if let Some(raw) = self.dom.wrappers.get(id) {
-            // SAFETY: the cache only holds live wrappers, and nothing has
-            // run since it was read. The duplicate is the caller's.
-            return unsafe { qjs::JS_DupValue(self.ctx, raw) };
-        }
+    /// `ret` as a new JS value, or `JS_EXCEPTION` with an exception thrown.
+    pub(super) fn value(&self, ret: Ret<'_>) -> qjs::JSValue {
+        value_of(self.ctx, self.members, self.dom, &self.doc, ret)
+    }
+}
+
+impl<'a> Write<'a> {
+    /// Argument `i` as a string (`ToString`, which may run JS). A missing
+    /// argument is `"undefined"`.
+    pub(super) fn str_arg(&self, i: usize) -> std::result::Result<JsStr, Thrown> {
+        // SAFETY: `self.ctx` is the running call's, the arguments alive.
+        unsafe { JsStr::arg(self.ctx, self.args, i) }
+    }
+
+    /// Argument `i`, or `undefined`.
+    pub(super) fn arg(&self, i: usize) -> qjs::JSValue {
+        self.args.get(i).copied().unwrap_or(qjs::JS_UNDEFINED)
+    }
+
+    /// An rquickjs context, for calling the natives in `natives`.
+    pub(super) fn rctx(&self) -> Ctx<'a> {
         // SAFETY: `self.ctx` is the context of the running call.
-        let ctx = unsafe { ctx_of(self.ctx) };
-        // A new wrapper's prototype comes from the document, which `wrap`
-        // borrows again (shared, as here); finalizers the GC runs while it
-        // allocates never touch the document.
-        match wrap(&ctx, self.dom, id) {
-            Ok(node) => into_raw(&ctx, node.into_value()),
-            Err(e) => throw_error(&ctx, e),
+        unsafe { ctx_of(self.ctx) }
+    }
+}
+
+/// `ret` as a new JS value, or `JS_EXCEPTION` with an exception thrown.
+fn value_of(
+    ctx: *mut qjs::JSContext,
+    members: &Members,
+    dom: &Rc<DomState>,
+    doc: &Document,
+    ret: Ret<'_>,
+) -> qjs::JSValue {
+    match ret {
+        Ret::Null | Ret::Node(None) => qjs::JS_NULL,
+        Ret::Undefined => qjs::JS_UNDEFINED,
+        Ret::Bool(true) => qjs::JS_TRUE,
+        Ret::Bool(false) => qjs::JS_FALSE,
+        Ret::Int(i) => qjs::JS_MKVAL(qjs::JS_TAG_INT, i),
+        Ret::Float(f) => qjs::JS_NewFloat64(f),
+        Ret::Node(Some(id)) => wrapper_value(ctx, dom, id),
+        Ret::Name(name) => members.name(ctx, doc, name, false),
+        Ret::UpperName(name) => members.name(ctx, doc, name, true),
+        Ret::Static(s) => members.fixed(ctx, s),
+        Ret::Str(s) => new_string(ctx, &s),
+        Ret::Value(v) => v,
+    }
+}
+
+/// A new JS string.
+pub(super) fn new_string(ctx: *mut qjs::JSContext, s: &str) -> qjs::JSValue {
+    // SAFETY: the pointer and length are those of a live `str`.
+    unsafe { qjs::JS_NewStringLen(ctx, s.as_ptr().cast(), s.len() as qjs::size_t) }
+}
+
+/// The wrapper of `id`, made if there is none.
+fn wrapper_value(ctx: *mut qjs::JSContext, dom: &Rc<DomState>, id: NodeId) -> qjs::JSValue {
+    if let Some(raw) = dom.wrappers.get(id) {
+        // SAFETY: the cache only holds live wrappers, and nothing has
+        // run since it was read. The duplicate is the caller's.
+        return unsafe { qjs::JS_DupValue(ctx, raw) };
+    }
+    // SAFETY: `ctx` is the context of the running call.
+    let ctx = unsafe { ctx_of(ctx) };
+    // A new wrapper's prototype comes from the document, which `wrap`
+    // borrows again (shared, as here); finalizers the GC runs while it
+    // allocates never touch the document.
+    match wrap(&ctx, dom, id) {
+        Ok(node) => into_raw(&ctx, node.into_value()),
+        Err(e) => throw_error(&ctx, e),
+    }
+}
+
+/// A string argument, as UTF-8 from QuickJS (`JS_ToCStringLen2`), freed on
+/// drop.
+pub(super) enum JsStr {
+    Js {
+        ctx: *mut qjs::JSContext,
+        ptr: *const c_char,
+        len: usize,
+    },
+    Static(&'static str),
+}
+
+impl JsStr {
+    /// Argument `i` converted to a string, which runs JS for an object.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must be the running call's, and `args` alive.
+    unsafe fn arg(
+        ctx: *mut qjs::JSContext,
+        args: &[qjs::JSValue],
+        i: usize,
+    ) -> std::result::Result<JsStr, Thrown> {
+        match args.get(i) {
+            // SAFETY: as for the function.
+            Some(&v) => unsafe { JsStr::new(ctx, v) },
+            None => Ok(JsStr::Static("undefined")),
         }
     }
+
+    /// `value` converted to a string, which runs JS for an object.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must be the running call's, and `value` alive.
+    pub(super) unsafe fn new(
+        ctx: *mut qjs::JSContext,
+        value: qjs::JSValue,
+    ) -> std::result::Result<JsStr, Thrown> {
+        let mut len: qjs::size_t = 0;
+        // SAFETY: as for the function.
+        let ptr = unsafe { qjs::JS_ToCStringLen2(ctx, &mut len, value, false) };
+        if ptr.is_null() {
+            return Err(Thrown::Pending);
+        }
+        Ok(JsStr::Js {
+            ctx,
+            ptr,
+            len: len as usize,
+        })
+    }
+
+    /// The text, with lone surrogates (which QuickJS writes as WTF-8)
+    /// replaced by U+FFFD, as `internals.usv` does.
+    pub(super) fn as_str(&self) -> Cow<'_, str> {
+        let bytes = match *self {
+            JsStr::Static(s) => return Cow::Borrowed(s),
+            // SAFETY: QuickJS gave `len` bytes at `ptr`, alive until freed.
+            JsStr::Js { ptr, len, .. } => unsafe {
+                std::slice::from_raw_parts(ptr.cast::<u8>(), len)
+            },
+        };
+        match std::str::from_utf8(bytes) {
+            Ok(s) => Cow::Borrowed(s),
+            Err(_) => Cow::Owned(well_formed(bytes)),
+        }
+    }
+}
+
+impl Drop for JsStr {
+    fn drop(&mut self) {
+        if let JsStr::Js { ctx, ptr, .. } = *self {
+            // SAFETY: `ptr` came from `JS_ToCStringLen2` in `ctx`.
+            unsafe { qjs::JS_FreeCString(ctx, ptr) };
+        }
+    }
+}
+
+/// WTF-8 (UTF-8 that may encode lone surrogates) as UTF-8, each surrogate
+/// replaced by U+FFFD.
+fn well_formed(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                break;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                // SAFETY: `from_utf8` checked the first `good` bytes.
+                out.push_str(unsafe { std::str::from_utf8_unchecked(&rest[..good]) });
+                out.push('\u{FFFD}');
+                // A surrogate is three bytes (ED A0..BF xx); anything else
+                // QuickJS never writes, so skip what `from_utf8` rejects.
+                let skip = if rest[good] == 0xED && rest.len() >= good + 3 {
+                    3
+                } else {
+                    e.error_len().unwrap_or(rest.len() - good)
+                };
+                rest = &rest[good + skip..];
+            }
+        }
+    }
+    out
+}
+
+/// The arguments of a `Read` member after converting what [`Arg`] asks
+/// for; the converted values are owned here and freed on drop.
+struct Converted {
+    ctx: *mut qjs::JSContext,
+    values: Vec<qjs::JSValue>,
+    owned: Vec<usize>,
+}
+
+impl Drop for Converted {
+    fn drop(&mut self) {
+        for &i in &self.owned {
+            // SAFETY: the value at `i` was made for this call.
+            unsafe { qjs::JS_FreeValue(self.ctx, self.values[i]) };
+        }
+    }
+}
+
+/// Converts the arguments `kinds` asks for, if any needs it. Can run JS.
+///
+/// # Safety
+///
+/// `ctx` must be the running call's, and `args` alive.
+unsafe fn convert_args(
+    ctx: *mut qjs::JSContext,
+    kinds: &[Arg],
+    args: &[qjs::JSValue],
+) -> std::result::Result<Option<Converted>, ()> {
+    let mut out: Option<Converted> = None;
+    for (i, (&kind, &v)) in kinds.iter().zip(args).enumerate() {
+        // SAFETY: a tag check.
+        let tag = unsafe { qjs::JS_VALUE_GET_TAG(v) };
+        let new = match kind {
+            Arg::Any => continue,
+            Arg::Str if tag == qjs::JS_TAG_OBJECT || tag == qjs::JS_TAG_SYMBOL => {
+                // SAFETY: as for the function.
+                unsafe { qjs::JS_ToString(ctx, v) }
+            }
+            Arg::Uint32 if tag != qjs::JS_TAG_INT => {
+                let mut n = 0i32;
+                // SAFETY: as for the function.
+                if unsafe { qjs::JS_ToInt32(ctx, &mut n, v) } < 0 {
+                    qjs::JS_EXCEPTION
+                } else {
+                    qjs::JS_MKVAL(qjs::JS_TAG_INT, n)
+                }
+            }
+            _ => continue,
+        };
+        // SAFETY: a tag check.
+        if unsafe { qjs::JS_IsException(new) } {
+            return Err(());
+        }
+        let c = out.get_or_insert_with(|| Converted {
+            ctx,
+            values: args.to_vec(),
+            owned: Vec::new(),
+        });
+        c.values[i] = new;
+        c.owned.push(i);
+    }
+    Ok(out)
 }
 
 impl Thrown {
@@ -473,18 +895,35 @@ impl Thrown {
     /// # Safety
     ///
     /// `ctx` must be the context of the running call.
-    unsafe fn throw(self, ctx: *mut qjs::JSContext) -> qjs::JSValue {
+    pub(super) unsafe fn throw(self, ctx: *mut qjs::JSContext) -> qjs::JSValue {
         match self {
             // SAFETY: as for the function.
             Thrown::Illegal => unsafe { throw_type(ctx, c"Illegal invocation") },
             // SAFETY: as for the function.
             Thrown::Type(message) => unsafe { throw_type(ctx, message) },
+            Thrown::Pending => qjs::JS_EXCEPTION,
+            Thrown::Error(e) => {
+                // SAFETY: as for the function.
+                let ctx = unsafe { ctx_of(ctx) };
+                throw_error(&ctx, e)
+            }
             Thrown::Stale => {
                 // SAFETY: as for the function.
                 let ctx = unsafe { ctx_of(ctx) };
                 throw_error(&ctx, stale_node_error(&ctx))
             }
+            Thrown::Dom(name, message) => {
+                // SAFETY: as for the function.
+                let ctx = unsafe { ctx_of(ctx) };
+                throw_error(&ctx, throw_dom(&ctx, name, &message))
+            }
         }
+    }
+}
+
+impl From<rquickjs::Error> for Thrown {
+    fn from(e: rquickjs::Error) -> Self {
+        Thrown::Error(e)
     }
 }
 
@@ -493,7 +932,7 @@ impl Thrown {
 /// # Safety
 ///
 /// `ctx` must be a live context.
-unsafe fn throw_type(ctx: *mut qjs::JSContext, message: &CStr) -> qjs::JSValue {
+pub(super) unsafe fn throw_type(ctx: *mut qjs::JSContext, message: &CStr) -> qjs::JSValue {
     // SAFETY: `%s` formats the one C string passed.
     unsafe { qjs::JS_ThrowTypeError(ctx, c"%s".as_ptr(), message.as_ptr()) }
 }
@@ -519,7 +958,7 @@ fn throw_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> qjs::JSValue {
 /// # Safety
 ///
 /// `ctx` must be the context of the running call.
-unsafe fn ctx_of<'js>(ctx: *mut qjs::JSContext) -> Ctx<'js> {
+pub(super) unsafe fn ctx_of<'js>(ctx: *mut qjs::JSContext) -> Ctx<'js> {
     // SAFETY: as for the function; the runtime is locked while JS runs.
     unsafe { Ctx::from_raw(NonNull::new_unchecked(ctx)) }
 }
@@ -540,45 +979,108 @@ unsafe extern "C" fn call_member(
     magic: c_int,
 ) -> qjs::JSValue {
     let member = &MEMBERS[magic as usize];
-    // SAFETY: the context's opaque is null or the `Members` that `DomData`
-    // owns, which lives as long as JS can run.
-    let members = unsafe { qjs::JS_GetContextOpaque(ctx).cast::<Members>().as_ref() };
+    // SAFETY: QuickJS passes the live context of the call.
+    let members = unsafe { NativeData::of(ctx) }.and_then(NativeData::members);
     let Some(members) = members else {
         // SAFETY: QuickJS passes the live context of the call.
         return unsafe { throw_type(ctx, c"Illegal invocation") };
     };
-    // SAFETY: `this` is alive for the call.
-    let Some(wrapper) = (unsafe { members.wrapper(ctx, this) }) else {
-        // SAFETY: as above.
-        return unsafe { Thrown::Illegal.throw(ctx) };
+    let args = match usize::try_from(argc) {
+        // SAFETY: QuickJS passes `argc` live values at `argv`.
+        Ok(n) if n > 0 && !argv.is_null() => unsafe { std::slice::from_raw_parts(argv, n) },
+        _ => &[],
+    };
+    // Find the node: `this`, the owner of the host object `this` is, or
+    // the first argument.
+    let mut host = None;
+    let (wrapper, node) = match member.receiver {
+        Receiver::ElementArg(message) => {
+            let arg = args.first().copied().unwrap_or(qjs::JS_UNDEFINED);
+            // SAFETY: the argument is alive for the call.
+            match unsafe { members.wrapper(ctx, arg) } {
+                Some(w) => (w, arg),
+                // SAFETY: as above.
+                None => return unsafe { throw_type(ctx, message) },
+            }
+        }
+        receiver => match receiver.host_class() {
+            Some(class) => {
+                // SAFETY: `this` is alive for the call.
+                let Some(h) = (unsafe { members.hosts.get(this, class) }) else {
+                    // SAFETY: as above.
+                    return unsafe { Thrown::Illegal.throw(ctx) };
+                };
+                host = Some(h);
+                (h.wrapper(), h.owner())
+            }
+            // SAFETY: `this` is alive for the call.
+            None => match unsafe { members.wrapper(ctx, this) } {
+                Some(w) => (w, this),
+                // SAFETY: as above.
+                None => return unsafe { Thrown::Illegal.throw(ctx) },
+            },
+        },
     };
     let Some(id) = wrapper.id() else {
         // SAFETY: as above.
         return unsafe { Thrown::Stale.throw(ctx) };
     };
     let dom = wrapper.dom();
-    let call = Call {
-        ctx,
-        members,
-        dom,
-        doc: dom.doc(),
-    };
-    if !member.receiver.accepts(&call.doc, id) {
-        drop(call);
+    let rejected = |ctx| match member.receiver {
         // SAFETY: as above.
-        return unsafe { Thrown::Illegal.throw(ctx) };
-    }
-    let args = match usize::try_from(argc) {
-        // SAFETY: QuickJS passes `argc` live values at `argv`.
-        Ok(n) if n > 0 && !argv.is_null() => unsafe { std::slice::from_raw_parts(argv, n) },
-        _ => &[],
+        Receiver::ElementArg(message) => unsafe { throw_type(ctx, message) },
+        // SAFETY: as above.
+        _ => unsafe { Thrown::Illegal.throw(ctx) },
     };
-    let thrown = match (member.f)(&call, id, args) {
-        Ok(ret) => return call.value(ret),
-        Err(thrown) => thrown,
+    let thrown = match member.body {
+        Body::Read(f) => {
+            // SAFETY: as above; nothing is borrowed yet.
+            let converted = match unsafe { convert_args(ctx, member.args, args) } {
+                Ok(c) => c,
+                Err(()) => return qjs::JS_EXCEPTION,
+            };
+            let args = converted.as_ref().map_or(args, |c| &c.values[..]);
+            let call = Call {
+                ctx,
+                members,
+                dom,
+                doc: dom.doc(),
+                wrapper,
+                node,
+                host,
+                args,
+            };
+            if !member.receiver.accepts(&call.doc, id) {
+                drop(call);
+                return rejected(ctx);
+            }
+            match f(&call, id, args) {
+                Ok(ret) => return call.value(ret),
+                Err(thrown) => thrown,
+            }
+            // `call`, then `converted`, are dropped here, before throwing.
+        }
+        Body::Write(f) => {
+            if !member.receiver.accepts(&dom.doc(), id) {
+                return rejected(ctx);
+            }
+            let write = Write {
+                ctx,
+                members,
+                dom,
+                id,
+                wrapper,
+                node,
+                host,
+                args,
+            };
+            match f(&write) {
+                Ok(ret) => return value_of(ctx, members, dom, &dom.doc(), ret),
+                Err(thrown) => thrown,
+            }
+        }
     };
-    // Throwing a `DOMException` runs JS: let go of the document first.
-    drop(call);
+    // Throwing a `DOMException` runs JS: the document is let go by now.
     // SAFETY: as above.
     unsafe { thrown.throw(ctx) }
 }
@@ -587,9 +1089,8 @@ unsafe extern "C" fn call_member(
 // The per-context data.
 
 /// What [`call_member`] needs besides the wrapper: how to recognise a node
-/// wrapper, and the cached strings. Owned by `DomData`, and found through
-/// the context's opaque pointer, which nothing else in dasher or rquickjs
-/// uses.
+/// wrapper, the host object classes, and the cached strings. Owned by `DomData`, and found through
+/// the context's opaque pointer (see the `native_data` module).
 pub(crate) struct Members {
     /// The class id rquickjs gives all its (non-callable) class objects.
     class_id: qjs::JSClassID,
@@ -599,6 +1100,8 @@ pub(crate) struct Members {
     offset: usize,
     rt: *mut qjs::JSRuntime,
     atoms: RefCell<Atoms>,
+    /// The classes of style, token list and dataset objects.
+    pub(super) hosts: Hosts,
 }
 
 /// Strings the members return over and over, as atoms (interned strings
@@ -623,7 +1126,7 @@ impl Members {
     /// value; the object's opaque pointer points at it. So a node wrapper is
     /// an object of rquickjs's class id whose cell starts with the vtable
     /// pointer `document`'s does.
-    pub(crate) fn attach(ctx: &Ctx<'_>, document: &Node<'_>) -> Box<Members> {
+    pub(crate) fn attach(ctx: &Ctx<'_>, document: &Node<'_>, hosts: Hosts) -> Box<Members> {
         let raw = document.as_raw();
         // SAFETY: `raw` is a live class object, so its opaque is its cell,
         // which starts with the vtable pointer.
@@ -645,11 +1148,13 @@ impl Members {
             // SAFETY: `ctx` is live.
             rt: unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) },
             atoms: RefCell::default(),
+            hosts,
         });
-        let ptr: *const Members = &*members;
-        // SAFETY: the box is kept in `DomData` for as long as the context
-        // runs JS, and does not move.
-        unsafe { qjs::JS_SetContextOpaque(ctx.as_raw().as_ptr(), ptr.cast_mut().cast()) };
+        // The box is kept in `DomData` for as long as the context runs JS,
+        // and does not move.
+        if let Some(data) = NativeData::of_ctx(ctx) {
+            data.set_members(&*members);
+        }
         members
     }
 
@@ -658,7 +1163,7 @@ impl Members {
     /// # Safety
     ///
     /// `value` must be alive, and stays borrowed for the result's life.
-    unsafe fn wrapper<'v>(
+    pub(crate) unsafe fn wrapper<'v>(
         &self,
         ctx: *mut qjs::JSContext,
         value: qjs::JSValue,
@@ -782,7 +1287,8 @@ impl Drop for Members {
 
 /// Puts every member on the prototypes in `interfaces` (interface name ->
 /// prototype), in place of the stand-in `dom.js` defines there: the getter
-/// of an accessor (its setter stays), or a method's value. The property
+/// or setter of an accessor (the other stays), or a method's value; a
+/// `Function` is put on the `functions` object instead. The property
 /// keeps its place and attributes. Fails if a stand-in is missing, so
 /// `dom.js` and [`MEMBERS`] cannot drift apart.
 pub(super) fn install<'js>(ctx: &Ctx<'js>, interfaces: &Object<'js>) -> Result<()> {
@@ -793,7 +1299,15 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, interfaces: &Object<'js>) -> Result<(
         let f = new_function(ctx, member, magic)?;
         let key = match member.kind {
             Kind::Getter => "get",
+            Kind::Setter => "set",
             Kind::Method { .. } => "value",
+            Kind::Function { .. } => {
+                for &interface in member.on {
+                    let target: Object<'js> = interfaces.get(interface)?;
+                    target.set(member.name, f.clone())?;
+                }
+                continue;
+            }
         };
         for &interface in member.on {
             let proto: Object<'js> = interfaces.get(interface)?;
@@ -820,7 +1334,10 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, interfaces: &Object<'js>) -> Result<(
 fn new_function<'js>(ctx: &Ctx<'js>, member: &Member, magic: usize) -> Result<Value<'js>> {
     let (name, length) = match member.kind {
         Kind::Getter => (format!("get {}", member.name), 0),
-        Kind::Method { length } => (member.name.to_owned(), c_int::from(length)),
+        Kind::Setter => (format!("set {}", member.name), 1),
+        Kind::Method { length } | Kind::Function { length } => {
+            (member.name.to_owned(), c_int::from(length))
+        }
     };
     let name = CString::new(name).expect("member names have no NUL");
     let magic = c_int::try_from(magic).expect("few members");
