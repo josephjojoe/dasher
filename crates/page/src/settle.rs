@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use dasher_css::SelectorList;
-use dasher_js::{Budget, ClockMode, ResourceLimit, RunLimits, RunOutcome};
+use dasher_js::{Budget, ClockMode, ResourceLimit, RunLimits, RunOutcome, thread_cpu_time};
 
 use crate::budget::DEFAULT_PAGE_TIME_BUDGET;
 use crate::page::{Page, Stop, Until, Wait};
@@ -77,9 +77,11 @@ pub struct SettleOptions {
     /// skip the clock ahead only so far past where it started (the `load`
     /// event, in [`Page::load`] then settle).
     ///
-    /// Skipped time counts, and so does page time that passes for real,
-    /// with the page running scripts or waiting on timers, except while
-    /// requests are in flight: waiting for the network does not count.
+    /// Skipped time counts, and so does page time that passes for real
+    /// while the page is idle, waiting on its timers. Time it spends
+    /// running scripts does not (the [CPU budget](crate::WorkBudget::cpu)
+    /// bounds that), nor does time with requests in flight: waiting for
+    /// the network does not count.
     ///
     /// Once it is spent the clock stops skipping, and the quiet
     /// conditions are given up: with no selector or predicate, settling
@@ -201,7 +203,7 @@ impl Page {
         let explicit = selector.is_some() || options.predicate.is_some();
         let mut budget = options
             .page_time_budget
-            .map(|b| PageTimeBudget::new(b, start, self.js.skipped()));
+            .map(|b| PageTimeBudget::new(b, start, self.js.skipped(), thread_cpu_time()));
 
         loop {
             match self.check_navigation() {
@@ -218,7 +220,12 @@ impl Page {
             // asked for explicitly is still waited for, in real time.
             let spent = match &mut budget {
                 Some(budget) => {
-                    let left = budget.left(now, self.js.skipped(), activity.in_flight());
+                    let left = budget.left(
+                        now,
+                        self.js.skipped(),
+                        activity.in_flight(),
+                        thread_cpu_time(),
+                    );
                     // The clock may skip no further than the budget goes.
                     self.js.set_skip_limit(Some(self.js.skipped() + left));
                     left.is_zero()
@@ -337,34 +344,46 @@ impl Page {
 struct PageTimeBudget {
     budget: Duration,
     used: Duration,
-    /// Page time and time skipped at the last look.
+    /// Page time, time skipped and the thread's CPU time at the last look.
     now: Duration,
     skipped: Duration,
+    cpu: Duration,
 }
 
 impl PageTimeBudget {
-    fn new(budget: Duration, now: Duration, skipped: Duration) -> Self {
+    fn new(budget: Duration, now: Duration, skipped: Duration, cpu: Duration) -> Self {
         Self {
             budget,
             used: Duration::ZERO,
             now,
             skipped,
+            cpu,
         }
     }
 
     /// Charges the page time since the last look, and returns what is
-    /// left. Skipped time always counts; time that passed for real counts
-    /// unless requests are in flight, which is waiting for the network.
-    fn left(&mut self, now: Duration, skipped: Duration, in_flight: usize) -> Duration {
+    /// left. Skipped time always counts. Time that passed for real counts
+    /// while the page was idle: not while it was running (the CPU time
+    /// used meanwhile, which the CPU budget bounds), and not while
+    /// requests are in flight, which is waiting for the network.
+    fn left(
+        &mut self,
+        now: Duration,
+        skipped: Duration,
+        in_flight: usize,
+        cpu: Duration,
+    ) -> Duration {
         let passed = now.saturating_sub(self.now);
         let skip = skipped.saturating_sub(self.skipped);
         let real = passed.saturating_sub(skip);
+        let working = cpu.saturating_sub(self.cpu);
         self.used += skip;
         if in_flight == 0 {
-            self.used += real;
+            self.used += real.saturating_sub(working);
         }
         self.now = now;
         self.skipped = skipped;
+        self.cpu = cpu;
         self.budget.saturating_sub(self.used)
     }
 }

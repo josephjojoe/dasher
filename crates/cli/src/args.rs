@@ -29,10 +29,10 @@ Waiting:
 
 Budgets (when one runs out, the page is output as it stands; 0 for none):
       --page-time-budget <secs>
-                            most page time to skip ahead while waiting for
-                            the page to go quiet [default: 5]. Pages that
-                            update on a timer forever never do; past this
-                            the quiet periods are given up
+                            most page time to skip ahead or sit idle while
+                            waiting for the page to go quiet [default: 5].
+                            Pages that update on a timer forever never do;
+                            past this the quiet periods are given up
       --cpu-budget <secs>   most CPU time for loading, waiting and
                             scrolling [default: 10]
       --request-budget <n>  most requests the page may make [default: 1000]

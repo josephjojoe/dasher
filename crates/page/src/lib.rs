@@ -120,9 +120,10 @@
 //! the [`Budget`] that ran out.
 //!
 //! - **Page time** ([`SettleOptions::page_time_budget`], 5 s by default):
-//!   how much page time one settle may use, skipped or passing for real,
-//!   leaving out time spent with requests in flight. Once it is used up
-//!   the clock stops skipping and the quiet conditions are given up.
+//!   how much page time one settle may use, skipped or passing for real
+//!   while the page is idle (not running scripts, no requests in flight).
+//!   Once it is used up the clock stops skipping and the quiet conditions
+//!   are given up.
 //! - **CPU** ([`WorkBudget::cpu`], 10 s by default): CPU time of the
 //!   page's thread, from the start of [`Page::load`] through settling and
 //!   scrolling.

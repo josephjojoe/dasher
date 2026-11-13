@@ -53,10 +53,11 @@ pub struct Job {
     /// 30 000; the service may cap it. When loading runs out of time the
     /// page is used as far as it got.
     pub timeout_ms: Option<u64>,
-    /// The most page time, in milliseconds, the virtual clock may skip
-    /// ahead while waiting for the page to go quiet. Pages that update
-    /// themselves on a timer forever never do; once this is spent the
-    /// quiet periods are given up and the page is used as it stands.
+    /// The most page time, in milliseconds, to spend waiting for the page
+    /// to go quiet: skipped ahead by the virtual clock, or idle (not
+    /// running scripts, no requests in flight). Pages that update
+    /// themselves on a timer forever never go quiet; once this is spent
+    /// the quiet periods are given up and the page is used as it stands.
     /// Defaults to 5000; 0 for no limit.
     pub page_time_budget_ms: Option<u64>,
     /// The most CPU time, in milliseconds, loading, waiting and scrolling
