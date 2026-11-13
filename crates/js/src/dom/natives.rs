@@ -816,6 +816,8 @@ pub(super) fn install<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
     install_queries(obj, dom)?;
     super::shadow::install(obj, dom)?;
     super::custom::install(obj, dom)?;
+    super::host::install(obj)?;
+    layout::install(obj, dom)?;
     Ok(())
 }
 
