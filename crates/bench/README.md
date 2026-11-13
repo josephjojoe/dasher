@@ -454,7 +454,7 @@ was busy, so absolute figures run a little high):
 | classList.contains | 5,878 | 3,505 | 130 | 27.0× |
 | style.setProperty | 5,671 | 3,432 | 303 | 11.3× |
 | add+removeEventListener | 3,480 | 2,165 | 220 | 9.8× |
-| dispatchEvent, bubbling 3 levels | 18,940 | | | |
+| dispatchEvent, bubbling 3 levels | 19,073 | | | |
 | clientWidth | 2,406 | 1,685 | 50 | 33.7× |
 | append+removeChild | 1,934 | 1,315 | 220 | 6.0× |
 | dataset.x | 1,894 | 1,198 | 137 | 8.7× |
@@ -539,11 +539,13 @@ walked on node ids. On this machine, median of 5 runs, against
 Lightpanda's nightly (1.1.0-nightly.12116) timed on the same loops with
 [`micro/lightpanda.py`](micro/lightpanda.py):
 
-| benchmark | before (main at `281c8bd`) | after | Lightpanda | after ÷ Lightpanda |
+| benchmark | before (main at `c13aea4`) | after | Lightpanda | after ÷ Lightpanda |
 | --- | ---: | ---: | ---: | ---: |
-| add+removeEventListener | 3,378 | 300 | 233 | 1.3× |
-| dispatchEvent, bubbling 3 levels | 18,940 | 1,656 | 1,734 | 1.0× |
-| tagName (for scale) | | | 72 | |
+| add+removeEventListener | 3,378 | 235 | 233 | 1.0× |
+| dispatchEvent, bubbling 3 levels | 19,073 | 1,369 | 1,734 | 0.8× |
+| tagName (for scale) | 97.3 | 95.3 | 72 | 1.3× |
+
+The other DOM rows did not move beyond noise.
 
 The dispatch loop makes a bubbling `Event` and dispatches it at a span
 whose listener is three levels up, on the body: seven targets on the path
