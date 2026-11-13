@@ -4486,7 +4486,12 @@ static JSValue js_concat_string_int(JSContext *ctx, JSValue str, int32_t n,
     uint32_t len, dlen, i;
 
     p1 = JS_VALUE_GET_STRING(str);
-    dlen = i32toa(buf, n);
+    if ((uint32_t)n < 10) {
+        buf[0] = '0' + n;
+        dlen = 1;
+    } else {
+        dlen = i32toa(buf, n);
+    }
     len = p1->len + dlen;
     if (len > JS_STRING_LEN_MAX) {
         JS_FreeValue(ctx, str);
@@ -4539,23 +4544,28 @@ static JSValue js_concat_string_int(JSContext *ctx, JSValue str, int32_t n,
 }
 
 /* dasher: `x = x + y` and `x += y` for a local or closure variable `x`
-   holding a string. `sp[-2]` and `sp[-1]` are the operands of an OP_add
-   and `pc` points after it. When the sum is stored straight back into the
-   variable the operand came from, and the variable and the stack hold the
-   only two references to the string, the old string can never be seen
-   again: `y` is appended to it in place, growing it if needed, instead of
-   copying it into a new string on every iteration of a loop.
-   Return 1 if done (the sum is in sp[-2] and sp[-1] is consumed), 0 to
-   take the general path, -1 on exception. */
-static int js_add_string_in_place(JSContext *ctx, JSValue *sp,
-                                  const uint8_t *pc, JSValue *var_buf,
-                                  JSVarRef **var_refs)
+   holding a string. `*target` (on the stack) is the left operand of an
+   OP_add, and `pieces[0..n)` are what is added to it: the right operand,
+   or for `x += a + b` (an OP_add directly followed by another) the two
+   operands of the inner one, `a` a string. `pc` points after the last
+   OP_add. When the sum is stored straight back into the variable the
+   left operand came from, and the variable and the stack hold the only
+   two references to the string, the old string can never be seen again:
+   the pieces are appended to it in place, growing it if needed, instead
+   of copying it into a new string on every iteration of a loop (and, for
+   `x += a + b`, without making `a + b` first; concatenation of strings
+   is associative). Return 1 if done (the sum is in *target and the pieces
+   are consumed), 0 to take the general path, -1 on exception. */
+static int js_add_string_in_place(JSContext *ctx, JSValue *target,
+                                  JSValue *pieces, int n, const uint8_t *pc,
+                                  JSValue *var_buf, JSVarRef **var_refs)
 {
-    JSValue *pv, op2;
-    JSString *p1, *p2, *p;
-    char buf[16];
-    const uint8_t *src;
-    uint32_t len, len2, i;
+    JSValue *pv;
+    JSString *p1, *p;
+    char buf[2][16];
+    const uint8_t *src[2];
+    uint32_t len2[2], len, i, k;
+    bool wide2[2];
     size_t size, cap;
     int op;
 
@@ -4590,27 +4600,37 @@ static int js_add_string_in_place(JSContext *ctx, JSValue *sp,
         return 0;
     }
     if (JS_VALUE_GET_TAG(*pv) != JS_TAG_STRING ||
-        JS_VALUE_GET_PTR(*pv) != JS_VALUE_GET_PTR(sp[-2]))
+        JS_VALUE_GET_PTR(*pv) != JS_VALUE_GET_PTR(*target))
         return 0;
-    p1 = JS_VALUE_GET_STRING(sp[-2]);
+    p1 = JS_VALUE_GET_STRING(*target);
     if (p1->header.ref_count != 2 || p1->atom_type != 0 ||
         p1->kind != JS_STRING_KIND_NORMAL)
         return 0;
-    op2 = sp[-1];
-    if (JS_VALUE_GET_TAG(op2) == JS_TAG_STRING) {
-        p2 = JS_VALUE_GET_STRING(op2);
-        if (p2->is_wide_char > p1->is_wide_char)
+    len = p1->len;
+    for (k = 0; k < n; k++) {
+        JSValue v = pieces[k];
+        if (JS_VALUE_GET_TAG(v) == JS_TAG_STRING) {
+            JSString *p2 = JS_VALUE_GET_STRING(v);
+            if (p2->is_wide_char > p1->is_wide_char)
+                return 0;
+            len2[k] = p2->len;
+            wide2[k] = p2->is_wide_char;
+            src[k] = str8(p2);
+        } else if (JS_VALUE_GET_TAG(v) == JS_TAG_INT) {
+            int32_t d = JS_VALUE_GET_INT(v);
+            if ((uint32_t)d < 10) {
+                buf[k][0] = '0' + d;
+                len2[k] = 1;
+            } else {
+                len2[k] = i32toa(buf[k], d);
+            }
+            wide2[k] = false;
+            src[k] = (const uint8_t *)buf[k];
+        } else {
             return 0;
-        len2 = p2->len;
-        src = str8(p2);
-    } else if (JS_VALUE_GET_TAG(op2) == JS_TAG_INT) {
-        p2 = NULL;
-        len2 = i32toa(buf, JS_VALUE_GET_INT(op2));
-        src = (const uint8_t *)buf;
-    } else {
-        return 0;
+        }
+        len += len2[k];
     }
-    len = p1->len + len2;
     if (len > JS_STRING_LEN_MAX)
         return 0;
     size = sizeof(*p1) + (len << p1->is_wide_char) + 1 - p1->is_wide_char;
@@ -4630,27 +4650,36 @@ static int js_add_string_in_place(JSContext *ctx, JSValue *sp,
         p = js_realloc(ctx, p1, cap);
         if (!p) {
             p1->header.ref_count++;
-            *pv = sp[-2];
+            *pv = *target;
             return -1;
         }
         p1 = p;
-        sp[-2] = JS_MKPTR(JS_TAG_STRING, p1);
+        *target = JS_MKPTR(JS_TAG_STRING, p1);
 #endif
     }
-    if (p1->is_wide_char) {
-        uint16_t *d = str16(p1) + p1->len;
-        if (p2 && p2->is_wide_char) {
-            memcpy(d, str16(p2), len2 << 1);
+    for (k = 0; k < n; k++) {
+        if (p1->is_wide_char) {
+            uint16_t *d = str16(p1) + p1->len;
+            if (wide2[k]) {
+                memcpy(d, src[k], len2[k] << 1);
+            } else {
+                for (i = 0; i < len2[k]; i++)
+                    d[i] = src[k][i];
+            }
         } else {
-            for (i = 0; i < len2; i++)
-                d[i] = src[i];
+            uint8_t *d = str8(p1) + p1->len;
+            if (len2[k] <= 16) {
+                for (i = 0; i < len2[k]; i++)
+                    d[i] = src[k][i];
+            } else {
+                memcpy(d, src[k], len2[k]);
+            }
         }
-    } else {
-        memcpy(str8(p1) + p1->len, src, len2);
-        str8(p1)[len] = '\0';
+        p1->len += len2[k];
+        JS_FreeValue(ctx, pieces[k]);
     }
-    p1->len = len;
-    JS_FreeValue(ctx, op2);
+    if (!p1->is_wide_char)
+        str8(p1)[p1->len] = '\0';
     return 1;
 }
 
@@ -18651,8 +18680,23 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                     sf->cur_pc = pc;
                     /* dasher: see js_add_string_in_place */
                     if (JS_VALUE_GET_TAG(op1) == JS_TAG_STRING) {
-                        int r = js_add_string_in_place(ctx, sp, pc, var_buf,
+                        int r;
+                        if (*pc == OP_add &&
+                            JS_VALUE_GET_TAG(sp[-3]) == JS_TAG_STRING) {
+                            /* x += a + b */
+                            r = js_add_string_in_place(ctx, sp - 3, sp - 2, 2,
+                                                       pc + 1, var_buf,
                                                        var_refs);
+                            if (r < 0)
+                                goto exception;
+                            if (r) {
+                                sp -= 2;
+                                pc++;
+                                BREAK;
+                            }
+                        }
+                        r = js_add_string_in_place(ctx, sp - 2, sp - 1, 1, pc,
+                                                   var_buf, var_refs);
                         if (r < 0)
                             goto exception;
                         if (r) {

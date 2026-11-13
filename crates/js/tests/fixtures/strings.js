@@ -31,6 +31,29 @@
   for (let i = 0; i < 3000; i++) big = big + "0123456789";
   out.push(alias, t, s, u.length, u.slice(-20), keep.join(","), big.length, big.slice(29990));
 
+  // `s += a + b` appends both without making `a + b`.
+  let f = "";
+  for (let i = 0; i < 200; i++) f += "ab" + (i & 7);
+  let g = "g";
+  g += g + "x";
+  g += "\u0100" + 1;
+  g += "y" + g;
+  let w = "\u0100";
+  for (let i = 0; i < 20; i++) w += "c" + i;
+  let n2 = "";
+  for (let i = 0; i < 5; i++) n2 += i + "z";
+  let o2 = "";
+  o2 += "a" + { toString() { return "T"; } };
+  o2 += "b" + 1.5;
+  function fused() {
+    let acc = "";
+    return (x) => (acc += "<" + x);
+  }
+  const fz = fused();
+  fz(1);
+  fz("q");
+  out.push(f.length, f.slice(0, 12), f.slice(-9), g, w, n2, o2, fz(2));
+
   // A closure variable, and a string that is a property key (an atom).
   function counter() {
     let acc = "";
