@@ -195,3 +195,25 @@ summed over the pages (20.3 to 19.6 s), 8% less on the page that gains
 most, and no change in memory. The search hook on its own is under 1%,
 and so is the `Map` hash: the patterns and keys they help are rarer on
 these pages than in the loops above.
+
+## `quickjs/quickjs.c`: `i++` on a `let` stays an int add
+
+`for (let i = 0; i < n; i++)` compiles `i++` as `get_loc_check i;
+post_inc; put_loc_check i; drop`. The optimizer turns `post_inc put_loc
+drop` into `inc put_loc`, but not the `_check` form a `let` gets, and
+`OP_post_inc` had no fast path: every `i++` converted its operand with
+`JS_ToNumericFree` and added through `js_unary_arith_slow`. An assignment
+statement to a `let` likewise kept its `dup put_loc_check drop`.
+
+Here `OP_post_inc` and `OP_post_dec` add or subtract an int in place
+(the general path keeps the int limits, which become doubles), and
+`resolve_labels` rewrites `post_inc put_loc_check(n) drop` to `inc
+put_loc_check(n)` and `dup put_loc_check(n) drop` to `put_loc_check(n)`.
+The TDZ check stays.
+
+Measured in the micro-benchmarks (standalone `qjs` built from this
+source, Graviton4): the function-call loop 48.5 to 39.0 ns per
+iteration, the integer loop 31.5 to 21.8 ns, a method call 75 to 65 ns.
+`crates/js/tests/fixtures/increments.js` applies `++` and `--` to 22
+kinds of value, at the int limits and in the TDZ, and gives the same
+answers with and without the change and under V8.

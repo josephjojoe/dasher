@@ -18692,6 +18692,26 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             BREAK;
         CASE(OP_post_inc):
         CASE(OP_post_dec):
+            /* dasher: an int that stays an int needs no conversion. This
+               is the `i++` of a `for (let i ...)` loop, which the
+               optimizer cannot turn into inc_loc because `i` is read
+               with get_loc_check. */
+            if (likely(JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_INT)) {
+                int val = JS_VALUE_GET_INT(sp[-1]);
+                if (opcode == OP_post_inc) {
+                    if (likely(val != INT32_MAX)) {
+                        sp[0] = js_int32(val + 1);
+                        sp++;
+                        BREAK;
+                    }
+                } else {
+                    if (likely(val != INT32_MIN)) {
+                        sp[0] = js_int32(val - 1);
+                        sp++;
+                        BREAK;
+                    }
+                }
+            }
             sf->cur_pc = pc;
             if (js_post_inc_slow(ctx, sp, opcode))
                 goto exception;
@@ -33712,6 +33732,17 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                     if (line2 >= 0) line_num = line2;
                     break;
                 }
+                /* dasher: dup put_loc_check(n) drop -> put_loc_check(n),
+                   the assignment statement to a `let` variable */
+                if (code_match(&cc, pos_next, OP_put_loc_check, -1, OP_drop, -1)) {
+                    if (cc.line_num >= 0) line_num = cc.line_num;
+                    if (cc.col_num >= 0) col_num = cc.col_num;
+                    add_pc2line_info(s, bc_out.size, line_num, col_num);
+                    dbuf_putc(&bc_out, OP_put_loc_check);
+                    dbuf_put_u16(&bc_out, cc.idx);
+                    pos_next = cc.pos;
+                    break;
+                }
             }
             goto no_change;
 
@@ -33846,6 +33877,18 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                    post_inc perm4 put_array_el drop -> inc put_array_el
                  */
                 int op1, idx;
+                /* dasher: post_inc put_loc_check(n) drop -> inc put_loc_check(n),
+                   the `i++` of a `for (let i ...)` loop */
+                if (code_match(&cc, pos_next, OP_put_loc_check, -1, OP_drop, -1)) {
+                    if (cc.line_num >= 0) line_num = cc.line_num;
+                    if (cc.col_num >= 0) col_num = cc.col_num;
+                    add_pc2line_info(s, bc_out.size, line_num, col_num);
+                    dbuf_putc(&bc_out, OP_dec + (op - OP_post_dec));
+                    dbuf_putc(&bc_out, OP_put_loc_check);
+                    dbuf_put_u16(&bc_out, cc.idx);
+                    pos_next = cc.pos;
+                    break;
+                }
                 if (code_match(&cc, pos_next, M3(OP_put_loc, OP_put_arg, OP_put_var_ref), -1, OP_drop, -1)) {
                     if (cc.line_num >= 0) line_num = cc.line_num;
                     if (cc.col_num >= 0) col_num = cc.col_num;

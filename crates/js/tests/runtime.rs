@@ -449,3 +449,20 @@ fn map_and_set_keys_keep_their_order_and_identity() {
     );
     assert!(js.errors().is_empty());
 }
+
+/// Postfix `++` and `--` have an int fast path, and the compiler rewrites
+/// `i++;` and `x = e;` on a `let` (see `PATCHES.md`). Every value gives
+/// what it gave before.
+#[test]
+fn increments_give_the_same_values_on_every_path() {
+    let js = runtime();
+    assert_eq!(
+        js.eval_json(include_str!("fixtures/increments.js"))
+            .unwrap()
+            .as_deref(),
+        Some(
+            r#"["number 0 1 number 0 -1","1 -1","0 1","number -1 0 number -1 -2","0 -2","-1 0","number 1 2 number 1 0","2 0","1 2","number 2147483646 2147483647 number 2147483646 2147483645","2147483647 2147483645","2147483646 2147483647","number 2147483647 2147483648 number 2147483647 2147483646","2147483648 2147483646","2147483647 2147483648","number -2147483647 -2147483646 number -2147483647 -2147483648","-2147483646 -2147483648","-2147483647 -2147483646","number -2147483648 -2147483647 number -2147483648 -2147483649","-2147483647 -2147483649","-2147483648 -2147483647","number 1.5 2.5 number 1.5 0.5","2.5 0.5","1.5 2.5","number -0 1 number -0 -1","1 -1","-0 1","number NaN NaN number NaN NaN","NaN NaN","NaN NaN","number Infinity Infinity number Infinity Infinity","Infinity Infinity","Infinity Infinity","number 5 6 number 5 4","6 4","5 6","number NaN NaN number NaN NaN","NaN NaN","NaN NaN","number 0 1 number 0 -1","1 -1","0 1","number 0 1 number 0 -1","1 -1","0 1","number NaN NaN number NaN NaN","NaN NaN","NaN NaN","number 1 2 number 1 0","2 0","1 2","bigint 10n 11n bigint 10n 9n","11n 9n","10n 11n","number 0 1 number 0 -1","1 -1","0 1","number 3 4 number 3 2","4 2","3 4","number NaN NaN number NaN NaN","NaN NaN","NaN NaN","number 41 42 number 41 40","42 40","41 42","21474836445","36507221981","ReferenceError","ReferenceError","ReferenceError","2","0,1,2","valueOf","7 8","2","10"]"#
+        )
+    );
+    assert!(js.errors().is_empty());
+}
