@@ -20,12 +20,9 @@ use super::members::{Call, Outcome, Ret, Thrown};
 fn selector(c: &Call<'_>) -> Result<Rc<SelectorList>, Thrown> {
     let text = c.str_arg(0)?;
     let text = text.as_str();
-    c.dom.selector(&text).map_err(|_| {
-        Thrown::Dom(
-            "SyntaxError",
-            format!("'{text}' is not a valid selector."),
-        )
-    })
+    c.dom
+        .selector(&text)
+        .map_err(|_| Thrown::Dom("SyntaxError", format!("'{text}' is not a valid selector.")))
 }
 
 pub(super) fn get_element_by_id<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {

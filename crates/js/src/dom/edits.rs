@@ -286,10 +286,7 @@ pub(super) fn replace_with(w: &Write<'_>) -> Done {
 
 /// A setter's value as a string, with `null` (and, if `undefined_empty`,
 /// `undefined`) as the empty string.
-fn text_value(
-    w: &Write<'_>,
-    undefined_empty: bool,
-) -> Result<super::members::JsStr, Thrown> {
+fn text_value(w: &Write<'_>, undefined_empty: bool) -> Result<super::members::JsStr, Thrown> {
     let v = w.arg(0);
     // SAFETY: tag checks of a live value.
     let empty = unsafe { qjs::JS_IsNull(v) || (undefined_empty && qjs::JS_IsUndefined(v)) };

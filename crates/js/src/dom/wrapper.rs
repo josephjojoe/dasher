@@ -425,28 +425,12 @@ fn find_anchor<'js>(
 // The links are `Option<Node>`s, `None` in both directions for a wrapper
 // alone. Every clone or drop of a `Node` is two reference counts (the
 // object's and the context's), so the operations below move links where
-// they can rather than copy them. A link is only taken or replaced while
-// its cell is borrowed, and the old values are dropped with no cell
-// borrowed, since dropping the last reference to a wrapper runs its
+// they can rather than copy them. Old links are dropped once the cells
+// are let go, since dropping the last reference to a wrapper runs its
 // finalizer.
 
-fn take_next<'js>(node: &Node<'js>) -> Option<Node<'js>> {
-    node.borrow().next.borrow_mut().take()
-}
-
-fn take_prev<'js>(node: &Node<'js>) -> Option<Node<'js>> {
-    node.borrow().prev.borrow_mut().take()
-}
-
-#[must_use = "the old link must be dropped once no cell is borrowed"]
-fn replace_next<'js>(node: &Node<'js>, next: Option<Node<'js>>) -> Option<Node<'js>> {
-    node.borrow().next.replace(next)
-}
-
-#[must_use = "the old link must be dropped once no cell is borrowed"]
-fn replace_prev<'js>(node: &Node<'js>, prev: Option<Node<'js>>) -> Option<Node<'js>> {
-    node.borrow().prev.replace(prev)
-}
+// Borrowing a wrapper's cell costs a few calls into QuickJS, so each
+// operation borrows each wrapper once.
 
 #[cfg(test)]
 fn next<'js>(node: &Node<'js>) -> Node<'js> {
@@ -466,48 +450,56 @@ fn prev<'js>(node: &Node<'js>) -> Node<'js> {
         .unwrap_or_else(|| node.clone())
 }
 
-fn is_alone(node: &Node<'_>) -> bool {
-    node.borrow().next.borrow().is_none()
-}
-
 /// Takes `node` out of its ring.
 pub(crate) fn unlink(node: &Node<'_>) {
-    let (Some(p), Some(n)) = (take_prev(node), take_next(node)) else {
+    let w = node.borrow();
+    let (p, n) = (w.prev.take(), w.next.take());
+    drop(w);
+    let (Some(p), Some(n)) = (p, n) else {
         return;
     };
     if p == n {
         // A ring of two: the other one is left alone. Its links are both
         // `node`.
-        let old = (take_next(&p), take_prev(&p));
+        let pw = p.borrow();
+        let old = (pw.next.take(), pw.prev.take());
+        drop(pw);
         drop((p, n, old));
         return;
     }
     // `p.next` and `n.prev` were `node`.
-    let old_prev = replace_prev(&n, Some(p.clone()));
-    let old_next = replace_next(&p, Some(n));
+    let old_prev = n.borrow().prev.replace(Some(p.clone()));
+    let old_next = p.borrow().next.replace(Some(n));
     drop((p, old_prev, old_next));
 }
 
 /// Merges the rings of `a` and `b`, which must be different rings.
 pub(crate) fn splice<'js>(a: &Node<'js>, b: &Node<'js>) {
-    let (a_alone, b_alone) = (is_alone(a), is_alone(b));
+    let (aw, bw) = (a.borrow(), b.borrow());
     // The ring a -> an ... and the ring b -> bn ... become
     // a -> bn ... b -> an ..., where a lone wrapper is its own next.
-    let an = take_next(a).unwrap_or_else(|| a.clone());
-    let bn = take_next(b).unwrap_or_else(|| b.clone());
-    let old = if a_alone || b_alone {
-        (
-            replace_prev(&bn, Some(a.clone())),
-            replace_prev(&an, Some(b.clone())),
-        )
-    } else {
-        // `bn.prev` is `b` and `an.prev` is `a`: swap them.
-        let bp = take_prev(&bn);
-        let ap = replace_prev(&an, bp);
-        (replace_prev(&bn, ap), None)
+    let (an, bn) = (aw.next.take(), bw.next.take());
+    let alone = an.is_none() || bn.is_none();
+    let an = an.unwrap_or_else(|| a.clone());
+    let bn = bn.unwrap_or_else(|| b.clone());
+    let old = {
+        let (anw, bnw) = (an.borrow(), bn.borrow());
+        if alone {
+            (
+                bnw.prev.replace(Some(a.clone())),
+                anw.prev.replace(Some(b.clone())),
+            )
+        } else {
+            // `bn.prev` is `b` and `an.prev` is `a`: swap them.
+            let bp = bnw.prev.take();
+            let ap = anw.prev.replace(bp);
+            (bnw.prev.replace(ap), None)
+        }
     };
-    let old_next = (replace_next(a, Some(bn)), replace_next(b, Some(an)));
-    drop((old, old_next));
+    aw.next.replace(Some(bn));
+    bw.next.replace(Some(an));
+    drop((aw, bw));
+    drop(old);
 }
 
 // -------------------------------------------------------------------------
@@ -519,7 +511,7 @@ fn wrapped_under<'js>(
     dom: &DomState,
     doc: &Document,
     roots: &[NodeId],
-) -> Vec<Node<'js>> {
+) -> Wrapped<'js> {
     if let [root] = *roots {
         let leaf = doc.first_child(root).is_none()
             && doc.template_contents(root).is_none()
@@ -537,8 +529,11 @@ fn wrapped_under<'js>(
             false
         });
     }
-    dom.cached_all(ctx, &ids)
+    dom.cached_all(ctx, &ids).into()
 }
+
+/// The wrappers `wrapped_under` finds: often none or one.
+type Wrapped<'js> = smallvec::SmallVec<[Node<'js>; 1]>;
 
 /// How a pending insertion moves wrappers between trees.
 pub(crate) enum Move {

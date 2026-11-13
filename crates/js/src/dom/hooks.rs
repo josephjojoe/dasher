@@ -135,7 +135,10 @@ impl Hooks {
         // SAFETY: `self.connected` is a live function of ours; the `Value`
         // takes a new reference.
         let hook = unsafe {
-            Value::from_raw(ctx.clone(), qjs::JS_DupValue(ctx.as_raw().as_ptr(), self.connected))
+            Value::from_raw(
+                ctx.clone(),
+                qjs::JS_DupValue(ctx.as_raw().as_ptr(), self.connected),
+            )
         };
         let hook = Function::from_value(hook)?;
         hook.call::<_, ()>((array,))
@@ -215,7 +218,15 @@ impl Hooks {
     /// `JS_EXCEPTION`. Runs JS: the glue's `baseURL()`.
     pub(crate) fn resolve_url(&self, ctx: *mut qjs::JSContext, value: &str) -> qjs::JSValue {
         // SAFETY: the hook is a live function of ours.
-        let base = unsafe { qjs::JS_Call(ctx, self.base_url, qjs::JS_UNDEFINED, 0, std::ptr::null_mut()) };
+        let base = unsafe {
+            qjs::JS_Call(
+                ctx,
+                self.base_url,
+                qjs::JS_UNDEFINED,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
         // SAFETY: a tag check.
         if unsafe { qjs::JS_IsException(base) } {
             return base;

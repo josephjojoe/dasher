@@ -281,11 +281,7 @@ pub(super) fn node_list_length<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue
     Ok(Ret::Int(len(&list.ids(c.dom, &c.doc, n))))
 }
 
-pub(super) fn collection_length<'c>(
-    c: &'c Call<'_>,
-    n: NodeId,
-    _: &[qjs::JSValue],
-) -> Outcome<'c> {
+pub(super) fn collection_length<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {
     let list = list_of(c, ListClass::HtmlCollection)?;
     Ok(Ret::Int(len(&list.ids(c.dom, &c.doc, n))))
 }
@@ -300,22 +296,14 @@ pub(super) fn collection_item<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue]
     Ok(Ret::Node(list.ids(c.dom, &c.doc, n).get(i).copied()))
 }
 
-pub(super) fn named_item_member<'c>(
-    c: &'c Call<'_>,
-    n: NodeId,
-    _: &[qjs::JSValue],
-) -> Outcome<'c> {
+pub(super) fn named_item_member<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {
     let list = list_of(c, ListClass::HtmlCollection)?;
     let name = c.str_arg(0)?;
     let ids = list.ids(c.dom, &c.doc, n);
     Ok(Ret::Node(named_item(&c.doc, &ids, &name.as_str())))
 }
 
-pub(super) fn attributes_length<'c>(
-    c: &'c Call<'_>,
-    n: NodeId,
-    _: &[qjs::JSValue],
-) -> Outcome<'c> {
+pub(super) fn attributes_length<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {
     list_of(c, ListClass::NamedNodeMap)?;
     Ok(Ret::Int(len_of(c.doc.attrs(n).len())))
 }
@@ -354,12 +342,24 @@ fn kept<'c>(
 
 pub(super) fn child_nodes<'c>(c: &'c Call<'_>, _: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {
     let proto = c.members.proto(Proto::NodeList);
-    kept(c, Extra::ChildNodes, ListClass::NodeList, proto, Some(Filter::ChildNodes))
+    kept(
+        c,
+        Extra::ChildNodes,
+        ListClass::NodeList,
+        proto,
+        Some(Filter::ChildNodes),
+    )
 }
 
 pub(super) fn children<'c>(c: &'c Call<'_>, _: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {
     let proto = c.members.proto(Proto::HtmlCollection);
-    kept(c, Extra::Children, ListClass::HtmlCollection, proto, Some(Filter::Children))
+    kept(
+        c,
+        Extra::Children,
+        ListClass::HtmlCollection,
+        proto,
+        Some(Filter::Children),
+    )
 }
 
 pub(super) fn attributes<'c>(c: &'c Call<'_>, _: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {
@@ -492,7 +492,9 @@ unsafe extern "C" fn nodes_get_own(
     let Some(found) = (unsafe { list_in(ctx, obj, ListClass::NodeList) }) else {
         return 0;
     };
-    let Ok((_, list, root)) = found else { return -1 };
+    let Ok((_, list, root)) = found else {
+        return -1;
+    };
     // SAFETY: as above.
     unsafe { item_property(ctx, desc, list, root, (atom & !ATOM_TAG_INT) as usize) }
 }
@@ -507,7 +509,9 @@ unsafe extern "C" fn collection_get_own(
     let Some(found) = (unsafe { list_in(ctx, obj, ListClass::HtmlCollection) }) else {
         return 0;
     };
-    let Ok((members, list, root)) = found else { return -1 };
+    let Ok((members, list, root)) = found else {
+        return -1;
+    };
     if atom & ATOM_TAG_INT != 0 {
         // SAFETY: as above.
         return unsafe { item_property(ctx, desc, list, root, (atom & !ATOM_TAG_INT) as usize) };
@@ -553,7 +557,9 @@ unsafe extern "C" fn attributes_get_own(
     let Some(found) = (unsafe { list_in(ctx, obj, ListClass::NamedNodeMap) }) else {
         return 0;
     };
-    let Ok((members, list, root)) = found else { return -1 };
+    let Ok((members, list, root)) = found else {
+        return -1;
+    };
     let key = if atom & ATOM_TAG_INT != 0 {
         let i = (atom & !ATOM_TAG_INT) as usize;
         if i >= list.wrapper().dom().doc().attrs(root).len() {

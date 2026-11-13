@@ -944,7 +944,10 @@ pub(super) enum Key {
 /// # Safety
 ///
 /// `ctx` must be live and `atom` one of its atoms.
-pub(super) unsafe fn key_of(ctx: *mut qjs::JSContext, atom: qjs::JSAtom) -> std::result::Result<Key, ()> {
+pub(super) unsafe fn key_of(
+    ctx: *mut qjs::JSContext,
+    atom: qjs::JSAtom,
+) -> std::result::Result<Key, ()> {
     if atom & ATOM_TAG_INT != 0 {
         return Ok(Key::Index(atom & !ATOM_TAG_INT));
     }
@@ -1024,7 +1027,11 @@ pub(super) unsafe fn fill(
 /// # Safety
 ///
 /// `ctx` must be live and `obj` alive. May run JS (a `Proxy` prototype).
-pub(super) unsafe fn proto_has(ctx: *mut qjs::JSContext, obj: qjs::JSValue, atom: qjs::JSAtom) -> c_int {
+pub(super) unsafe fn proto_has(
+    ctx: *mut qjs::JSContext,
+    obj: qjs::JSValue,
+    atom: qjs::JSAtom,
+) -> c_int {
     // SAFETY: as for the function.
     unsafe {
         let proto = qjs::JS_GetPrototype(ctx, obj);

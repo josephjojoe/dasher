@@ -20,13 +20,13 @@ use rquickjs::{Class, Ctx, Exception, Function, Object, Result, Value, qjs};
 
 use super::DomState;
 use super::attrs::{self, Reflected};
-use super::{edits, queries};
 use super::hooks::Hooks;
-use super::lists::{self, ListClass};
 use super::host::{self, Host, HostClass, Hosts};
 use super::layout;
+use super::lists::{self, ListClass};
 use super::natives::{stale_node_error, throw_dom};
 use super::wrapper::{Node, NodeWrapper, wrap};
+use super::{edits, queries};
 
 /// What `this` has to be for a member: a node wrapper of a kind that has
 /// the member's interface, or one of the host objects of the `host` module.
@@ -1191,6 +1191,9 @@ unsafe extern "C" fn call_member(
                 args,
             };
             match f(&write) {
+                // Only names need the document.
+                Ok(Ret::Value(v)) => return v,
+                Ok(Ret::Undefined) => return qjs::JS_UNDEFINED,
                 Ok(ret) => return value_of(ctx, members, dom, &dom.doc(), ret),
                 Err(thrown) => thrown,
             }

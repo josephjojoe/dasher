@@ -15,9 +15,9 @@ use rquickjs::{Array, Class, Ctx, Function, IntoJs, Object, Result, Value, qjs};
 
 use super::DomState;
 use super::collection::Filter;
-use super::lists;
 use super::inner_text::inner_text;
 use super::layout;
+use super::lists;
 use super::mutation::deliver;
 use super::wrapper::{self, DomData, Move, Node, after_insert, after_remove, plan_insert, wrap};
 
@@ -407,7 +407,12 @@ pub(super) fn replace_all(
     result.map_err(|e| dom_error(ctx, e))
 }
 
-pub(super) fn set_text_content(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, text: &str) -> Result<()> {
+pub(super) fn set_text_content(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    node: NodeId,
+    text: &str,
+) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         match doc.kind(node) {
@@ -442,7 +447,12 @@ fn set_data(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, data: &str) -> Resu
     deliver(ctx, dom)
 }
 
-pub(super) fn set_inner_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -> Result<()> {
+pub(super) fn set_inner_html(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    node: NodeId,
+    html: &str,
+) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         let target = doc.template_contents(node).unwrap_or(node);
@@ -510,7 +520,12 @@ fn insert_adjacent_html(
 
 /// A copy of `n` (with its descendants if `deep`), which belongs to `n`'s
 /// node document.
-pub(super) fn clone_into_owner(dom: &DomState, doc: &mut Document, n: NodeId, deep: bool) -> NodeId {
+pub(super) fn clone_into_owner(
+    dom: &DomState,
+    doc: &mut Document,
+    n: NodeId,
+    deep: bool,
+) -> NodeId {
     let copy = doc.clone_node(n, deep);
     dom.set_owner(doc, copy, dom.owner_document(doc, n));
     copy
@@ -788,7 +803,6 @@ fn unproxy<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Value<'js> {
         }
     }
 }
-
 
 fn selector_error(ctx: &Ctx<'_>, selector: &str) -> rquickjs::Error {
     throw_dom(
@@ -1660,19 +1674,23 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         },
     )?;
     // The element whose attributes a `NamedNodeMap` is.
-    def(obj, "mapOwner", |ctx: Ctx<'js>, map: Value<'js>| -> Result<Value<'js>> {
-        let (list, _) = lists::list_value(&ctx, &map)?;
-        if !list.is_attributes() {
-            return Err(rquickjs::Exception::throw_type(&ctx, "Illegal invocation"));
-        }
-        // SAFETY: `list` lives in `map`, which is alive; the `Value` takes a
-        // new reference to its owner.
-        Ok(unsafe {
-            Value::from_raw(
-                ctx.clone(),
-                qjs::JS_DupValue(ctx.as_raw().as_ptr(), list.owner()),
-            )
-        })
-    })?;
+    def(
+        obj,
+        "mapOwner",
+        |ctx: Ctx<'js>, map: Value<'js>| -> Result<Value<'js>> {
+            let (list, _) = lists::list_value(&ctx, &map)?;
+            if !list.is_attributes() {
+                return Err(rquickjs::Exception::throw_type(&ctx, "Illegal invocation"));
+            }
+            // SAFETY: `list` lives in `map`, which is alive; the `Value` takes a
+            // new reference to its owner.
+            Ok(unsafe {
+                Value::from_raw(
+                    ctx.clone(),
+                    qjs::JS_DupValue(ctx.as_raw().as_ptr(), list.owner()),
+                )
+            })
+        },
+    )?;
     Ok(())
 }

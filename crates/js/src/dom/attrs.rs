@@ -95,10 +95,12 @@ pub(super) fn get_attribute_names<'c>(
     }
     for (i, attr) in c.doc.attrs(n).iter().enumerate() {
         let name = qualified_name(c.ctx, c.members, &c.doc, attr);
-        // SAFETY: `array` is ours; the call takes `name`'s reference.
-        if unsafe { qjs::JS_IsException(name) }
-            || unsafe { qjs::JS_SetPropertyUint32(c.ctx, array, i as u32, name) } < 0
-        {
+        // SAFETY: a tag check; `array` is ours, and the call takes `name`'s
+        // reference.
+        let failed = unsafe {
+            qjs::JS_IsException(name) || qjs::JS_SetPropertyUint32(c.ctx, array, i as u32, name) < 0
+        };
+        if failed {
             // SAFETY: `array` is ours.
             unsafe { qjs::JS_FreeValue(c.ctx, array) };
             return Err(Thrown::Pending);
@@ -123,10 +125,8 @@ pub(super) fn get_attribute_ns(w: &Write<'_>) -> Done {
     let ns = namespace_arg(w, 0)?;
     let local = w.str_arg(1)?;
     let doc = w.dom.doc();
-    Ok(
-        attribute_ns(&doc, w.id, ns.as_deref(), &local.as_str())
-            .map_or(Ret::Null, |v| Ret::Str(Cow::Owned(v.to_owned()))),
-    )
+    Ok(attribute_ns(&doc, w.id, ns.as_deref(), &local.as_str())
+        .map_or(Ret::Null, |v| Ret::Str(Cow::Owned(v.to_owned()))))
 }
 
 pub(super) fn has_attribute_ns(w: &Write<'_>) -> Done {
@@ -311,10 +311,18 @@ pub(super) fn install_reflected<'js>(
 ) -> Result<()> {
     let object: Object<'js> = ctx.globals().get("Object")?;
     let define: rquickjs::Function<'js> = object.get("defineProperty")?;
+    let describe: rquickjs::Function<'js> = object.get("getOwnPropertyDescriptor")?;
     for entry in list.iter::<rquickjs::Array<'js>>() {
         let entry = entry?;
         let proto: Object<'js> = entry.get(0)?;
         let prop: String = entry.get(1)?;
+        // `dom.js` may have redefined the property since (`draggable`).
+        let get: Value<'js> = entry.get(5)?;
+        let current: Option<Object<'js>> = describe.call((proto.clone(), prop.as_str()))?;
+        let current = current.map(|d| d.get::<_, Value<'js>>("get")).transpose()?;
+        if current.as_ref() != Some(&get) {
+            continue;
+        }
         let kind: String = entry.get(2)?;
         let attr: String = entry.get(3)?;
         let extra: Value<'js> = entry.get(4)?;
@@ -396,7 +404,8 @@ fn reflect_function<'js>(
     magic: usize,
 ) -> Result<Value<'js>> {
     let name = CString::new(name).expect("property names have no NUL");
-    let magic = c_int::try_from(magic).map_err(|_| Exception::throw_internal(ctx, "too many reflected attributes"))?;
+    let magic = c_int::try_from(magic)
+        .map_err(|_| Exception::throw_internal(ctx, "too many reflected attributes"))?;
     super::members::new_magic_function(ctx, call_reflected, &name, length, magic)
 }
 
@@ -486,7 +495,9 @@ fn get_reflected(
             }
         }
         Reflect::Long { unsigned, fallback } => {
-            let n = value.and_then(parse_int).filter(|&n| !*unsigned || n >= 0.0);
+            let n = value
+                .and_then(parse_int)
+                .filter(|&n| !*unsigned || n >= 0.0);
             number(n.unwrap_or(*fallback))
         }
         Reflect::Number { fallback } => {
@@ -514,7 +525,11 @@ fn get_reflected(
 
 /// A JS number: an int when it is one.
 fn number(n: f64) -> qjs::JSValue {
-    if n.fract() == 0.0 && n >= f64::from(i32::MIN) && n <= f64::from(i32::MAX) && !(n == 0.0 && n.is_sign_negative()) {
+    if n.fract() == 0.0
+        && n >= f64::from(i32::MIN)
+        && n <= f64::from(i32::MAX)
+        && !(n == 0.0 && n.is_sign_negative())
+    {
         qjs::JS_MKVAL(qjs::JS_TAG_INT, n as i32)
     } else {
         qjs::JS_NewFloat64(n)
@@ -605,7 +620,11 @@ fn parse_float(s: &str) -> Option<f64> {
         i = 1;
     }
     if s[i..].starts_with("Infinity") {
-        return Some(if b[0] == b'-' { f64::NEG_INFINITY } else { f64::INFINITY });
+        return Some(if b[0] == b'-' {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        });
     }
     let digits = |i: &mut usize| {
         let start = *i;
@@ -643,7 +662,13 @@ fn is_js_space(c: char) -> bool {
     matches!(
         c,
         '\t' | '\n' | '\u{B}' | '\u{C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}' | '\u{2028}' | '\u{2029}' | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
     )
 }
 
