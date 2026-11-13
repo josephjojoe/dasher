@@ -587,7 +587,13 @@ struct JSString {
     uint32_t kind : 1;
     uint32_t atom_type : 2; /* != 0 if atom, JS_ATOM_TYPE_x */
     uint32_t hash_next; /* atom_index for JS_ATOM_TYPE_SYMBOL */
-    JSWeakRefRecord *first_weak_ref;
+    /* dasher: a symbol can be the target of a weak reference; any other
+       atom keeps its own index here, so that finding the index of an atom
+       string does not walk its hash chain */
+    union {
+        JSWeakRefRecord *first_weak_ref; /* JS_ATOM_TYPE_SYMBOL */
+        uint32_t atom_index; /* JS_ATOM_TYPE_STRING, JS_ATOM_TYPE_GLOBAL_SYMBOL */
+    };
 #ifdef ENABLE_DUMPS // JS_DUMP_LEAKS
     struct list_head link; /* string list */
 #endif
@@ -2935,19 +2941,10 @@ static JSAtomKindEnum JS_AtomGetKind(JSContext *ctx, JSAtom v)
 
 static JSAtom js_get_atom_index(JSRuntime *rt, JSAtomStruct *p)
 {
-    uint32_t i = p->hash_next;  /* atom_index */
-    if (p->atom_type != JS_ATOM_TYPE_SYMBOL) {
-        JSAtomStruct *p1;
-
-        i = rt->atom_hash[p->hash & (rt->atom_hash_size - 1)];
-        p1 = rt->atom_array[i];
-        while (p1 != p) {
-            assert(i != 0);
-            i = p1->hash_next;
-            p1 = rt->atom_array[i];
-        }
-    }
-    return i;
+    /* dasher: the index is kept in the string (see JSString) */
+    if (p->atom_type != JS_ATOM_TYPE_SYMBOL)
+        return p->atom_index;
+    return p->hash_next;  /* atom_index */
 }
 
 /* string case (internal). Return JS_ATOM_NULL if error. 'str' is
@@ -3090,6 +3087,7 @@ static JSAtom __JS_NewAtom(JSRuntime *rt, JSString *str, int atom_type)
     rt->atom_count++;
 
     if (atom_type != JS_ATOM_TYPE_SYMBOL) {
+        p->atom_index = i;
         p->hash_next = rt->atom_hash[h1];
         rt->atom_hash[h1] = i;
         if (unlikely(rt->atom_count >= rt->atom_count_resize))
@@ -3176,7 +3174,7 @@ static void JS_FreeAtomStruct(JSRuntime *rt, JSAtomStruct *p)
     /* insert in free atom list */
     rt->atom_array[i] = atom_set_free(rt->atom_free_index);
     rt->atom_free_index = i;
-    if (unlikely(p->first_weak_ref)) {
+    if (p->atom_type == JS_ATOM_TYPE_SYMBOL && unlikely(p->first_weak_ref)) {
         reset_weak_ref(rt, &p->first_weak_ref);
     }
     /* free the string structure */
