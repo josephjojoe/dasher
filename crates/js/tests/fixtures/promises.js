@@ -63,6 +63,23 @@ var promiseLog = [];
   chain.then((x) => log('chain ' + x));
   const withResolvers = Promise.withResolvers ? Promise.withResolvers() : null;
   if (withResolvers) { withResolvers.promise.then((v) => log('withResolvers ' + v)); withResolvers.resolve('ok'); }
+  async function returnsBadThenable() { return { get then() { throw new Error('then getter'); } }; }
+  returnsBadThenable().catch((e) => log('bad thenable ' + e.message));
+  async function returnsThrowingThenable() { return { then() { throw new Error('then throws'); } }; }
+  returnsThrowingThenable().catch((e) => log('throwing thenable ' + e.message));
+  async function withFinally() { try { await 1; return 'try'; } finally { log('finally block'); await 2; log('after await in finally'); } }
+  withFinally().then((v) => log('withFinally ' + v));
+  async function outer() { log('outer start'); const v = await inner(); log('outer got ' + v); return v * 2; }
+  async function inner() { log('inner start'); await null; log('inner after await'); return 21; }
+  outer().then((v) => log('outer result ' + v));
+  async function manyAwaits() { let t = 0; for (const v of [1, 2, 3]) t += await v; return t; }
+  manyAwaits().then((v) => log('manyAwaits ' + v));
+  const asyncArrow = async () => 'arrow value';
+  asyncArrow().then((v) => log(v));
+  class WithAsync { async m() { return this.constructor.name; } }
+  new WithAsync().m().then((v) => log('method ' + v));
+  const ap = asyncArrow();
+  log('async promise ' + (ap instanceof Promise) + ' ' + Object.getPrototypeOf(ap === ap ? ap : 0).constructor.name);
   res('resolved late');
   log('sync end');
 })();
