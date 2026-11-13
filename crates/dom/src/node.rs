@@ -169,6 +169,9 @@ pub(crate) struct Node {
     pub(crate) next_sibling: Option<NodeId>,
     /// See [`flags`].
     pub(crate) flags: u8,
+    /// The [insertion epoch](crate::Document::insertion_epoch) the node
+    /// was last inserted in. Fits in the padding after `flags`.
+    pub(crate) epoch: u16,
     pub(crate) data: NodeData,
 }
 
@@ -181,6 +184,7 @@ impl Node {
             prev_sibling: None,
             next_sibling: None,
             flags: 0,
+            epoch: 0,
             data,
         }
     }

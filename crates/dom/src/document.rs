@@ -54,6 +54,10 @@ pub struct Document {
     node_limit: usize,
     /// Whether the document has held more than `node_limit` nodes.
     over_node_limit: bool,
+    /// See [`insertion_epoch`](Self::insertion_epoch).
+    epoch: u16,
+    /// Whether a node has been inserted since the current epoch began.
+    inserted_in_epoch: bool,
     /// Every element with an `id`, by value. See the `ids` module.
     pub(crate) ids: IdIndex,
 }
@@ -91,8 +95,40 @@ impl Document {
             attr_namespaces: vec![(Name::EMPTY, Name::EMPTY)],
             node_limit: usize::MAX,
             over_node_limit: false,
+            epoch: 0,
+            inserted_in_epoch: false,
             ids: IdIndex::default(),
         }
+    }
+
+    /// The current insertion epoch: 0 for a new document, one more after
+    /// each [`begin_insertion_epoch`](Self::begin_insertion_epoch).
+    ///
+    /// Every node is stamped with the epoch it was last inserted in (moving
+    /// a node counts), so the page can tell what was added since a point in
+    /// time: dasher's synthetic layout uses it to keep content appended
+    /// after load out of view. Nodes the parser builds are stamped as they
+    /// are inserted too.
+    pub fn insertion_epoch(&self) -> u16 {
+        self.epoch
+    }
+
+    /// Starts a new [insertion epoch](Self::insertion_epoch). After
+    /// `u16::MAX` epochs the epoch stops advancing.
+    pub fn begin_insertion_epoch(&mut self) {
+        self.epoch = self.epoch.saturating_add(1);
+        self.inserted_in_epoch = false;
+    }
+
+    /// Whether any node has been inserted since the current
+    /// [insertion epoch](Self::insertion_epoch) began.
+    pub fn inserted_in_epoch(&self) -> bool {
+        self.inserted_in_epoch
+    }
+
+    /// The epoch `node` was last inserted in (0 if it never was).
+    pub fn node_epoch(&self, node: NodeId) -> u16 {
+        self.node(node).epoch
     }
 
     /// The document node.
@@ -982,11 +1018,14 @@ impl Document {
             }
             None => self.last_child(parent),
         };
+        let epoch = self.epoch;
+        self.inserted_in_epoch = true;
         {
             let node = self.node_mut(child);
             node.parent = Some(parent);
             node.prev_sibling = prev;
             node.next_sibling = before;
+            node.epoch = epoch;
         }
         match prev {
             Some(p) => self.node_mut(p).next_sibling = Some(child),
@@ -1766,6 +1805,32 @@ mod tests {
         doc.set_script_already_started(script);
         let copy = doc.clone_node(script, false);
         assert!(doc.script_already_started(copy));
+    }
+
+    #[test]
+    fn insertions_are_stamped_with_their_epoch() {
+        let (mut doc, _, _, body) = skeleton();
+        let a = doc.create_element("a");
+        doc.append_child(body, a).unwrap();
+        assert_eq!(doc.insertion_epoch(), 0);
+        assert_eq!(doc.node_epoch(a), 0);
+
+        doc.begin_insertion_epoch();
+        assert_eq!(doc.insertion_epoch(), 1);
+        assert!(!doc.inserted_in_epoch());
+        let b = doc.create_element("b");
+        let frag = doc.create_fragment();
+        doc.append_child(frag, b).unwrap();
+        doc.append_child(body, frag).unwrap();
+        assert!(doc.inserted_in_epoch());
+        assert_eq!(doc.node_epoch(b), 1);
+        assert_eq!(doc.node_epoch(a), 0);
+
+        // Moving a node stamps it again.
+        doc.begin_insertion_epoch();
+        doc.append_child(body, a).unwrap();
+        assert_eq!(doc.node_epoch(a), 2);
+        assert_eq!(doc.node_epoch(b), 1);
     }
 
     #[test]

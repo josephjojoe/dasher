@@ -1,14 +1,14 @@
 //! Synthetic layout: element boxes, scrolling, scrollIntoView,
-//! IntersectionObserver and ResizeObserver, in both layout modes.
+//! IntersectionObserver and ResizeObserver, under each visibility policy.
 
 use dasher_dom::Document;
-use dasher_js::{ClockMode, JsRuntime, LayoutMode, RuntimeOptions, Viewport, WindowOptions};
+use dasher_js::{ClockMode, JsRuntime, RuntimeOptions, Viewport, Visibility, WindowOptions};
 
 const LIST: &str = "<!doctype html><body><main id=main>\
     <p id=a>a</p><p id=b>b</p><p id=c>c</p><p id=hidden hidden>h</p>\
     <div id=filler></div><p id=last>z</p></main></body>";
 
-fn page(layout: LayoutMode, html: &str) -> JsRuntime {
+fn page(layout: Visibility, html: &str) -> JsRuntime {
     let js = JsRuntime::new(RuntimeOptions {
         clock: ClockMode::Manual,
         window: WindowOptions {
@@ -18,7 +18,7 @@ fn page(layout: LayoutMode, html: &str) -> JsRuntime {
                 height: 100,
                 ..Viewport::default()
             },
-            layout,
+            visibility: layout,
             ..WindowOptions::default()
         },
         ..RuntimeOptions::default()
@@ -56,7 +56,7 @@ const RECT: &str = "(id) => { const r = document.getElementById(id).getBoundingC
 
 #[test]
 fn in_view_boxes_stay_at_the_top() {
-    let js = page(LayoutMode::InView, LIST);
+    let js = page(Visibility::All, LIST);
     fill(&js, 20);
     run(&js, &format!("globalThis.rect = {RECT}; scrollTo(0, 300);"));
     assert_eq!(
@@ -74,8 +74,82 @@ fn in_view_boxes_stay_at_the_top() {
 }
 
 #[test]
+fn loaded_keeps_what_was_there_in_view_and_appended_content_below() {
+    let js = page(Visibility::Loaded, LIST);
+    // Before the first reveal it is `All`.
+    fill(&js, 20);
+    run(&js, &format!("globalThis.rect = {RECT};"));
+    assert_eq!(
+        eval(
+            &js,
+            "[rect('a'), rect('last'), document.documentElement.scrollHeight]"
+        ),
+        "[[0,20],[0,20],200]"
+    );
+    // After it, twenty more divs in #filler take a line each and push
+    // what follows them down; what came before stays in view.
+    js.reveal();
+    fill(&js, 20);
+    assert_eq!(
+        eval(
+            &js,
+            "[rect('a'), rect('filler'), rect('last'), document.getElementById('last').offsetTop,
+              rect('hidden'), document.documentElement.scrollHeight]"
+        ),
+        // Two viewports of 100px, plus the 400px of new divs.
+        "[[0,20],[0,400],[400,20],400,[0,0],600]"
+    );
+    // Boxes stay put when the page scrolls itself, which stops at the
+    // bottom.
+    run(&js, "scrollTo(0, 99999)");
+    assert_eq!(eval(&js, "[scrollY, rect('last')[0]]"), "[500,400]");
+    // The next reveal brings it all back to the top.
+    js.reveal();
+    assert_eq!(
+        eval(&js, "[rect('last'), document.documentElement.scrollHeight]"),
+        "[[0,20],200]"
+    );
+}
+
+#[test]
+fn loaded_intersection_follows_what_was_appended() {
+    let js = page(Visibility::Loaded, LIST);
+    run(
+        &js,
+        "globalThis.seen = [];
+         new IntersectionObserver((entries) => {
+           for (const e of entries) seen.push(e.target.id + ':' + e.isIntersecting);
+         }).observe(document.getElementById('last'));",
+    );
+    assert_eq!(eval(&js, "seen"), r#"["last:true"]"#);
+    js.reveal();
+    // Four lines of new content still leave it in the 100px viewport; six
+    // push it out.
+    fill(&js, 4);
+    assert_eq!(eval(&js, "seen"), r#"["last:true"]"#);
+    fill(&js, 2);
+    assert_eq!(eval(&js, "seen"), r#"["last:true","last:false"]"#);
+    // An element appended after the reveal is out of view too.
+    run(
+        &js,
+        "{ const late = document.createElement('p'); late.id = 'late';
+           document.body.append(late);
+           new IntersectionObserver((entries) => seen.push('late:' + entries[0].isIntersecting))
+             .observe(late); }",
+    );
+    assert_eq!(eval(&js, "seen.at(-1)"), r#""late:false""#);
+    // Revealing counts all of it as seen.
+    js.reveal();
+    js.run_ready().unwrap();
+    assert_eq!(
+        eval(&js, "seen.slice(-2).sort()"),
+        r#"["last:true","late:true"]"#
+    );
+}
+
+#[test]
 fn scrolled_layout_stacks_elements_and_moves_them_with_the_scroll() {
-    let js = page(LayoutMode::Scrolled, LIST);
+    let js = page(Visibility::Viewport, LIST);
     fill(&js, 20);
     run(&js, &format!("globalThis.rect = {RECT};"));
     // body is line 0, main line 1 spanning everything inside it.
@@ -96,7 +170,7 @@ fn scrolled_layout_stacks_elements_and_moves_them_with_the_scroll() {
 
 #[test]
 fn scroll_into_view_moves_the_window_and_fires_scroll() {
-    for layout in [LayoutMode::InView, LayoutMode::Scrolled] {
+    for layout in [Visibility::All, Visibility::Viewport] {
         let js = page(layout, LIST);
         fill(&js, 20);
         run(
@@ -105,7 +179,7 @@ fn scroll_into_view_moves_the_window_and_fires_scroll() {
              document.getElementById('last').scrollIntoView();",
         );
         // The scrolled layout stops at the bottom: 560 tall, 100 in view.
-        let bottom = if layout == LayoutMode::Scrolled {
+        let bottom = if layout == Visibility::Viewport {
             460
         } else {
             540
@@ -129,7 +203,7 @@ fn scroll_into_view_moves_the_window_and_fires_scroll() {
 
 #[test]
 fn scroll_into_view_if_needed() {
-    let js = page(LayoutMode::Scrolled, LIST);
+    let js = page(Visibility::Viewport, LIST);
     fill(&js, 20);
     run(&js, "document.getElementById('b').scrollIntoViewIfNeeded()");
     assert_eq!(eval(&js, "scrollY"), "0");
@@ -165,7 +239,7 @@ const OBSERVE: &str = "globalThis.seen = [];
 
 #[test]
 fn in_view_targets_intersect_at_once() {
-    let js = page(LayoutMode::InView, LIST);
+    let js = page(Visibility::All, LIST);
     fill(&js, 50);
     run(
         &js,
@@ -201,7 +275,7 @@ fn in_view_targets_intersect_at_once() {
 
 #[test]
 fn in_view_target_pushed_down_leaves_until_the_next_scroll() {
-    let js = page(LayoutMode::InView, LIST);
+    let js = page(Visibility::All, LIST);
     run(
         &js,
         &format!("{OBSERVE} observe(['last']); observe(['a']);"),
@@ -219,7 +293,7 @@ fn in_view_target_pushed_down_leaves_until_the_next_scroll() {
 
 #[test]
 fn scrolled_targets_intersect_once_scrolled_to() {
-    let js = page(LayoutMode::Scrolled, LIST);
+    let js = page(Visibility::Viewport, LIST);
     fill(&js, 20);
     // The viewport is 100px: a (40..60) is in view, last (540..560) is not.
     run(
@@ -239,7 +313,7 @@ fn scrolled_targets_intersect_once_scrolled_to() {
 
 #[test]
 fn root_margin_grows_the_viewport() {
-    let js = page(LayoutMode::Scrolled, LIST);
+    let js = page(Visibility::Viewport, LIST);
     fill(&js, 20);
     run(
         &js,
@@ -256,7 +330,7 @@ fn root_margin_grows_the_viewport() {
 
 #[test]
 fn entries_describe_the_geometry() {
-    let js = page(LayoutMode::Scrolled, LIST);
+    let js = page(Visibility::Viewport, LIST);
     run(
         &js,
         "new IntersectionObserver(([e]) => {
@@ -275,7 +349,7 @@ fn entries_describe_the_geometry() {
 
 #[test]
 fn element_roots_contain_their_descendants() {
-    let js = page(LayoutMode::Scrolled, LIST);
+    let js = page(Visibility::Viewport, LIST);
     fill(&js, 20);
     run(
         &js,
@@ -292,7 +366,7 @@ fn element_roots_contain_their_descendants() {
 
 #[test]
 fn bad_options_throw() {
-    let js = page(LayoutMode::InView, LIST);
+    let js = page(Visibility::All, LIST);
     assert_eq!(
         eval(
             &js,
@@ -319,7 +393,7 @@ fn bad_options_throw() {
 
 #[test]
 fn observing_keeps_the_loop_busy_only_while_something_changes() {
-    let js = page(LayoutMode::InView, LIST);
+    let js = page(Visibility::All, LIST);
     run(
         &js,
         "globalThis.calls = 0;
@@ -333,7 +407,7 @@ fn observing_keeps_the_loop_busy_only_while_something_changes() {
 
 #[test]
 fn resize_observer_reports_the_synthetic_size_once() {
-    let js = page(LayoutMode::Scrolled, LIST);
+    let js = page(Visibility::Viewport, LIST);
     run(
         &js,
         "globalThis.sizes = [];

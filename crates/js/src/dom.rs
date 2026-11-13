@@ -6,7 +6,10 @@
 //! A node gets a JS wrapper the first time script sees it, and keeps the
 //! same wrapper for as long as that wrapper is alive, so `a.firstChild ===
 //! a.firstChild` and expando properties stick. The cache from node to
-//! wrapper is weak: the wrapper's finalizer removes its entry.
+//! wrapper is weak: the wrapper's finalizer removes its entry. It is a table
+//! of object pointers indexed by the node's arena slot (`wrapper::Wrappers`),
+//! so finding a node's wrapper is an index and a null check. A slot is only
+//! reused once its node is released, which needs it to have no wrapper.
 //!
 //! What keeps a wrapper alive is its *group*: all the wrappers of one tree
 //! (a document, or a detached subtree) are linked in a ring of strong,
@@ -34,11 +37,59 @@
 //! and bump the version that live collections use to notice changes. They
 //! also report each change for `MutationObserver` (see the `mutation`
 //! module) and count it as [`DomActivity`].
+//!
+//! # Native members
+//!
+//! Most of the DOM API is JS classes in `dom.js` whose members call the
+//! natives in `native.dom` (the `natives` module): two calls through the
+//! interpreter and rquickjs for every DOM call. The members pages call most
+//! are instead native functions sitting directly on the prototypes, as in a
+//! browser: reading `el.tagName` calls Rust straight from the property
+//! lookup. They are listed in `MEMBERS` in the `members` module; these are
+//! the steps for adding one.
+//!
+//! 1. In `dom.js`, keep (or write) the member where it belongs, a class
+//!    getter or method or a mixin member, with `return nativeMember();` as
+//!    its body. The stand-in gives the property its place on the prototype
+//!    and its attributes (class members are not enumerable, mixin members
+//!    are), which the native keeps. An accessor's setter stays in JS.
+//! 2. In `members.rs`, write the body: a plain `fn(&Call, NodeId, &[JSValue])
+//!    -> Outcome` that reads the document through `Call::doc` and says what
+//!    to return as a `Ret` (a node, a cached name, a string, a number...)
+//!    or what to throw as a `Thrown`. Add a `getter(...)` or `method(...)`
+//!    entry to `MEMBERS` with the property name, the `Receiver` the
+//!    interface needs (`this` must be a node of that kind, or the call
+//!    throws `TypeError: Illegal invocation` as browsers do) and the keys of
+//!    the prototypes it goes on, from the `interfaces` object `dom.js`
+//!    passes to `N.init` (add a prototype there if needed).
+//! 3. `N.init` replaces each stand-in with the native and fails if one is
+//!    missing; the `dom_members` tests check that no stand-in is left, and
+//!    the descriptors, names, lengths and `toString` of the natives.
+//!
+//! What a call costs: QuickJS calls `members::call_member`, the one C
+//! function behind every member (the entry's index is its magic number). It
+//! finds the `NodeWrapper` behind `this` from the object's opaque pointer
+//! and rquickjs's class id and vtable, which it learns from the document
+//! wrapper (`Members`, reached through the context's opaque pointer), so
+//! there is no conversion, closure, `Rc` clone or hash lookup. Nodes come
+//! back through the wrapper table, and names (tag names, local names,
+//! namespaces) as atoms cached by name id, so the same string is never
+//! converted from UTF-8 twice. Only a node without a wrapper yet, a
+//! one-off string or an error goes through rquickjs.
+//!
+//! The document stays borrowed (shared) for the whole call, which is right
+//! for reading. The first member that changes the tree (or runs JS: a
+//! `DOMException` is thrown only after the borrow is let go) needs `Call`
+//! to borrow the document lazily instead; members taking strings need a
+//! conversion of `JSValue` arguments like `Call::node_arg` for nodes. The
+//! natives `dom.js` calls internally (`N.nav` and friends) stay, since glue
+//! code must not see page script's overrides of the public members.
 
 mod collection;
 mod custom;
 mod inner_text;
 mod layout;
+mod members;
 mod mutation;
 mod natives;
 mod shadow;
@@ -51,7 +102,7 @@ use std::time::Duration;
 
 use dasher_css::SelectorList;
 use dasher_dom::{Document, DocumentParser, NodeId, NodeKind};
-use rquickjs::{Ctx, Function, Object, qjs};
+use rquickjs::{Ctx, Function, Object};
 
 use crate::clock::Clock;
 use crate::runtime::{JsRuntime, Shared};
@@ -123,9 +174,8 @@ pub struct DomActivity {
 pub(crate) struct DomState {
     doc: RefCell<Document>,
     /// Node -> its live wrapper object. Weak: entries are removed by the
-    /// wrapper's finalizer. Never borrowed across anything that can run JS
-    /// or the GC.
-    wrappers: RefCell<HashMap<NodeId, qjs::JSValue>>,
+    /// wrapper's finalizer.
+    wrappers: wrapper::Wrappers,
     /// Nodes whose tree may have become garbage: roots of subtrees detached
     /// without wrappers, and nodes whose wrapper was collected.
     candidates: RefCell<Vec<NodeId>>,
@@ -171,7 +221,7 @@ impl DomState {
         Self {
             node_limit,
             doc: RefCell::new(doc),
-            wrappers: RefCell::default(),
+            wrappers: wrapper::Wrappers::default(),
             candidates: RefCell::default(),
             version: Cell::new(0),
             selectors: RefCell::default(),
@@ -319,10 +369,10 @@ impl DomState {
         roots.sort_unstable();
         roots.dedup();
         let garbage: Vec<NodeId> = {
-            let wrappers = self.wrappers.borrow();
+            let wrappers = &self.wrappers;
             roots
                 .into_iter()
-                .filter(|&r| !any_in_tree(doc, r, |n| wrappers.contains_key(&n)))
+                .filter(|&r| !any_in_tree(doc, r, |n| wrappers.contains(n)))
                 .collect()
         };
         if !garbage.is_empty() && !self.owners.borrow().is_empty() {
@@ -516,7 +566,13 @@ impl JsRuntime {
     pub fn set_document(&self, mut document: Document) {
         let dom = &self.shared().dom;
         document.set_node_limit(dom.node_limit);
-        self.with(|ctx| wrapper::detach_all(&ctx, dom));
+        self.with(|ctx| {
+            wrapper::detach_all(&ctx, dom);
+            // Name ids are the old document's.
+            if let Some(data) = ctx.userdata::<wrapper::DomData<'_>>() {
+                data.members.forget_names();
+            }
+        });
         let old = std::mem::replace(&mut *dom.doc.borrow_mut(), document);
         dom.candidates.borrow_mut().clear();
         dom.selectors.borrow_mut().clear();
