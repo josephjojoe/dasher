@@ -52,7 +52,7 @@ pub struct GotoOptions {
     /// is left as it is and [`Navigation::budget_exhausted`] says which.
     /// The budget is lifted when `goto` returns, so the page can still be
     /// evaluated. Defaults to [`WorkBudget::default`]: 20 CPU seconds and
-    /// 2000 requests.
+    /// 1000 requests.
     pub budget: WorkBudget,
 }
 

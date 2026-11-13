@@ -35,7 +35,7 @@ Budgets (when one runs out, the page is output as it stands; 0 for none):
                             the quiet periods are given up
       --cpu-budget <secs>   most CPU time for loading, waiting and
                             scrolling [default: 20]
-      --request-budget <n>  most requests the page may make [default: 2000]
+      --request-budget <n>  most requests the page may make [default: 1000]
 
 Browser:
   -A, --user-agent <ua>     User-Agent header and navigator.userAgent

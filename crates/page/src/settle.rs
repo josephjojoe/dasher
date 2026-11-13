@@ -69,21 +69,24 @@ pub struct SettleOptions {
     /// The longest to wait, in real time. When it runs out the page is
     /// left as it is.
     pub timeout: Duration,
-    /// How much page time the virtual clock may skip while settling. A
-    /// page that changes its document or polls the network on a timer
-    /// forever never goes quiet, and skipping from one tick to the next
-    /// would run it flat out until the timeout; this bounds it, as
-    /// Chrome's `--virtual-time-budget` does. Time spent waiting for the
-    /// network does not count, only the idle time skipped.
+    /// How much page time settling may use waiting for the page to go
+    /// quiet. A page that changes its document or polls on a timer
+    /// forever never goes quiet; under the virtual clock, skipping from
+    /// one tick to the next would run it flat out until the timeout. This
+    /// bounds it, as Chrome's `--virtual-time-budget` does: settling may
+    /// skip the clock ahead only so far past where it started (the `load`
+    /// event, in [`Page::load`] then settle).
+    ///
+    /// Skipped time counts, and so does page time that passes for real,
+    /// with the page running scripts or waiting on timers, except while
+    /// requests are in flight: waiting for the network does not count.
     ///
     /// Once it is spent the clock stops skipping, and the quiet
     /// conditions are given up: with no selector or predicate, settling
     /// ends at once with [`SettleOutcome::BudgetExhausted`]; with one, it
     /// waits on in real time for it to hold, then ends the same way.
-    /// `None` lets the clock skip as far as it takes. Defaults to
-    /// [`DEFAULT_PAGE_TIME_BUDGET`]. Has no effect under
-    /// [`ClockMode::Realtime`](dasher_js::ClockMode::Realtime), which never
-    /// skips.
+    /// `None` waits as long as it takes. Defaults to
+    /// [`DEFAULT_PAGE_TIME_BUDGET`].
     pub page_time_budget: Option<Duration>,
 }
 
@@ -174,8 +177,6 @@ impl Page {
         let deadline = Instant::now() + options.timeout;
         self.deadline = Some(deadline);
         self.js.set_deadline(Some(deadline));
-        let skip_limit = options.page_time_budget.map(|b| self.js.skipped() + b);
-        self.js.set_skip_limit(skip_limit);
         let outcome = self
             .wait_settled(options, selector.as_ref(), deadline)
             .await;
@@ -198,6 +199,9 @@ impl Page {
         let mut network_quiet_since = Some(start);
 
         let explicit = selector.is_some() || options.predicate.is_some();
+        let mut budget = options
+            .page_time_budget
+            .map(|b| PageTimeBudget::new(b, start, self.js.skipped()));
 
         loop {
             match self.check_navigation() {
@@ -210,9 +214,17 @@ impl Page {
             // When a quiet period ends, if that is all that is missing.
             let mut wake: Option<Duration> = None;
             let mut met = true;
-            // Out of page time to skip: quiet is given up on, and only what
-            // was asked for explicitly is still waited for, in real time.
-            let spent = self.js.skip_left() == Some(Duration::ZERO);
+            // Out of page time: quiet is given up on, and only what was
+            // asked for explicitly is still waited for, in real time.
+            let spent = match &mut budget {
+                Some(budget) => {
+                    let left = budget.left(now, self.js.skipped(), activity.in_flight());
+                    // The clock may skip no further than the budget goes.
+                    self.js.set_skip_limit(Some(self.js.skipped() + left));
+                    left.is_zero()
+                }
+                None => false,
+            };
             let quiet = !spent;
             if spent && !explicit {
                 return SettleOutcome::BudgetExhausted(Budget::PageTime);
@@ -310,5 +322,42 @@ impl Page {
                 _ => {}
             }
         }
+    }
+}
+
+/// Page time used up from a [`SettleOptions::page_time_budget`].
+#[derive(Debug)]
+struct PageTimeBudget {
+    budget: Duration,
+    used: Duration,
+    /// Page time and time skipped at the last look.
+    now: Duration,
+    skipped: Duration,
+}
+
+impl PageTimeBudget {
+    fn new(budget: Duration, now: Duration, skipped: Duration) -> Self {
+        Self {
+            budget,
+            used: Duration::ZERO,
+            now,
+            skipped,
+        }
+    }
+
+    /// Charges the page time since the last look, and returns what is
+    /// left. Skipped time always counts; time that passed for real counts
+    /// unless requests are in flight, which is waiting for the network.
+    fn left(&mut self, now: Duration, skipped: Duration, in_flight: usize) -> Duration {
+        let passed = now.saturating_sub(self.now);
+        let skip = skipped.saturating_sub(self.skipped);
+        let real = passed.saturating_sub(skip);
+        self.used += skip;
+        if in_flight == 0 {
+            self.used += real;
+        }
+        self.now = now;
+        self.skipped = skipped;
+        self.budget.saturating_sub(self.used)
     }
 }

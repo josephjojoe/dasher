@@ -63,7 +63,7 @@ pub struct Job {
     /// may use. Defaults to 20 000; 0 for no limit.
     pub cpu_budget_ms: Option<u64>,
     /// The most requests the page may make: the document, scripts,
-    /// `fetch()` and XHR. Defaults to 2000; 0 for no limit.
+    /// `fetch()` and XHR. Defaults to 1000; 0 for no limit.
     pub request_budget: Option<u64>,
     /// Scrolls the page after it has loaded to bring in infinite feeds
     /// and lazy content: `true`, or `{"max_scrolls": n}`.

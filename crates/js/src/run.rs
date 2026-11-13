@@ -114,6 +114,11 @@ impl JsRuntime {
                     Err(stopped) => return stopped.into(),
                 }
                 ran += 1;
+                // A page that always has work due must still give the
+                // caller its turn once page time is past `until`.
+                if limits.until.is_some_and(|until| clock.now() > until) {
+                    return RunOutcome::ReachedTime;
+                }
                 if ran % TASKS_PER_YIELD == 0 {
                     tokio::task::yield_now().await;
                 }

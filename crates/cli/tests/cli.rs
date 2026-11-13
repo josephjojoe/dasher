@@ -300,3 +300,34 @@ fn help_and_version() {
     let version = stdout(&dasher(&["--version"]));
     assert_eq!(version, format!("dasher {}\n", env!("CARGO_PKG_VERSION")));
 }
+
+#[test]
+fn budgets_end_pages_that_never_finish_and_say_so() {
+    let server = server();
+    let out = json(&dasher(&[&server.url("/ticker.html"), "--json"]));
+    assert_eq!(out["timed_out"], false);
+    assert_eq!(out["settle"], "budget_exhausted");
+    assert_eq!(out["budget_exhausted"], "page_time");
+    assert!(out["html"].as_str().unwrap().contains("Headline"));
+
+    let out = json(&dasher(&[
+        &server.url("/more.html"),
+        "--json",
+        "--request-budget",
+        "20",
+    ]));
+    assert_eq!(out["budget_exhausted"], "requests");
+    assert!(out["requests"].as_u64().unwrap() <= 22, "{out}");
+
+    // With the budgets off, the page runs until the timeout.
+    let out = json(&dasher(&[
+        &server.url("/ticker.html"),
+        "--json",
+        "--page-time-budget",
+        "0",
+        "-t",
+        "0.5",
+    ]));
+    assert_eq!(out["timed_out"], true);
+    assert_eq!(out["budget_exhausted"], Value::Null);
+}

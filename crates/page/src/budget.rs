@@ -9,7 +9,7 @@ pub const DEFAULT_PAGE_TIME_BUDGET: Duration = Duration::from_secs(5);
 pub const DEFAULT_CPU_BUDGET: Duration = Duration::from_secs(20);
 
 /// Default for [`WorkBudget::requests`].
-pub const DEFAULT_REQUEST_BUDGET: u64 = 2000;
+pub const DEFAULT_REQUEST_BUDGET: u64 = 1000;
 
 /// How much work a page may do, from when the budget is set (at the start
 /// of [`Page::load`](crate::Page::load), or by

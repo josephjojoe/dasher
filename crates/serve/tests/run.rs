@@ -291,3 +291,36 @@ async fn the_time_limit_is_capped_by_the_service_and_the_deadline() {
             .contains("no time left")
     );
 }
+
+#[tokio::test]
+async fn budgets_end_pages_that_never_finish_as_successes() {
+    let site = common::site();
+    let outcome = run_json(json!({ "url": site.url("/ticker.html") })).await;
+    assert_eq!(outcome.status, 200, "{}", outcome.body);
+    assert_eq!(outcome.body["settle"], "budget_exhausted");
+    assert_eq!(outcome.body["budget_exhausted"], "page_time");
+    assert_eq!(outcome.body["timed_out"], false);
+
+    let outcome = run_json(json!({
+        "url": site.url("/more.html"),
+        "request_budget": 15,
+        "extract": { "items": { "selector": "li", "count": true } },
+    }))
+    .await;
+    assert_eq!(outcome.status, 200, "{}", outcome.body);
+    assert_eq!(outcome.body["budget_exhausted"], "requests");
+    assert!(outcome.body["requests"].as_u64().unwrap() <= 17);
+    assert!(outcome.body["extracted"]["items"].as_u64().unwrap() >= 10);
+
+    // A page-time budget of 0 turns it off; the timeout ends the job.
+    let outcome = run_json(json!({
+        "url": site.url("/ticker.html"),
+        "page_time_budget_ms": 0,
+        "cpu_budget_ms": 0,
+        "timeout_ms": 500,
+    }))
+    .await;
+    assert_eq!(outcome.status, 200, "{}", outcome.body);
+    assert_eq!(outcome.body["timed_out"], true);
+    assert_eq!(outcome.body["budget_exhausted"], Value::Null);
+}

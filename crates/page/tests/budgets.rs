@@ -20,15 +20,19 @@ fn server() -> FixtureServer {
             FixtureResponse::json(r#"["one","two","three"]"#)
         })
         .route("/api/more", |_| FixtureResponse::json(r#"["a","b"]"#))
+        .route("/api/slow", |_| {
+            FixtureResponse::json(r#"["slow","but","sure"]"#)
+        })
         .path_latency("/api/items", MS(100))
+        .path_latency("/api/slow", MS(800))
         .start()
         .unwrap()
 }
 
-fn options(budget: WorkBudget) -> PageOptions {
+fn options(budget: WorkBudget, clock: ClockMode) -> PageOptions {
     PageOptions {
         runtime: RuntimeOptions {
-            clock: ClockMode::Virtual,
+            clock,
             ..RuntimeOptions::default()
         },
         timeout: Some(Duration::from_secs(20)),
@@ -37,11 +41,15 @@ fn options(budget: WorkBudget) -> PageOptions {
     }
 }
 
-async fn load_with(server: &FixtureServer, path: &str, budget: WorkBudget) -> Page {
+async fn load_on(server: &FixtureServer, path: &str, budget: WorkBudget, clock: ClockMode) -> Page {
     let session: Session = Client::builder().build().unwrap().session();
-    Page::load(&session, &server.url(path), options(budget))
+    Page::load(&session, &server.url(path), options(budget, clock))
         .await
         .unwrap()
+}
+
+async fn load_with(server: &FixtureServer, path: &str, budget: WorkBudget) -> Page {
+    load_on(server, path, budget, ClockMode::Virtual).await
 }
 
 async fn load(server: &FixtureServer, path: &str) -> Page {
@@ -123,6 +131,48 @@ async fn past_the_budget_an_explicit_wait_goes_on_in_real_time() {
     assert!(thread_cpu_time() - cpu < MS(500));
     let ticks = number(&page, "ticks");
     assert!((13..=18).contains(&ticks), "{ticks}");
+}
+
+#[tokio::test]
+async fn page_time_passing_for_real_counts_too() {
+    // Under the real-time clock nothing is skipped, but a page that never
+    // goes quiet still ends on the budget rather than the timeout.
+    let server = server();
+    let mut page = load_on(
+        &server,
+        "/budget/interval.html",
+        WorkBudget::default(),
+        ClockMode::Realtime,
+    )
+    .await;
+    let options = SettleOptions {
+        page_time_budget: Some(MS(600)),
+        ..SettleOptions::default()
+    };
+    let started = Instant::now();
+    assert_eq!(
+        page.settle(&options).await.unwrap(),
+        SettleOutcome::BudgetExhausted(Budget::PageTime)
+    );
+    let took = started.elapsed();
+    assert!(took >= MS(500) && took < Duration::from_secs(3), "{took:?}");
+}
+
+#[tokio::test]
+async fn waiting_for_the_network_does_not_count() {
+    let server = server();
+    let mut page = load(&server, "/budget/slow-api.html").await;
+    // Less than the response takes and the quiet periods after it, which
+    // are skipped and do count.
+    let options = SettleOptions {
+        page_time_budget: Some(MS(700)),
+        ..SettleOptions::default()
+    };
+    assert_eq!(page.settle(&options).await.unwrap(), SettleOutcome::Settled);
+    assert_eq!(
+        json(&page, "document.getElementById('status').textContent"),
+        r#""slow,but,sure""#
+    );
 }
 
 #[tokio::test]
