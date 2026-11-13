@@ -459,6 +459,10 @@ struct JSContext {
        for a normal function that has a `prototype`. */
     JSShape *closure_shape[JS_CLOSURE_SHAPE_COUNT];
     JSShape *arguments_shape[2]; /* strict, sloppy */
+    /* dasher: `length` then `name`, both only configurable, on
+       Function.prototype: what js_function_set_properties() gives the
+       functions the engine makes in C (see there) */
+    JSShape *c_function_shape;
 
     JSValue *class_proto;
     JSValue function_proto;
@@ -2540,6 +2544,8 @@ static void JS_MarkContext(JSRuntime *rt, JSContext *ctx,
         if (ctx->closure_shape[i])
             mark_func(rt, &ctx->closure_shape[i]->header);
     }
+    if (ctx->c_function_shape)
+        mark_func(rt, &ctx->c_function_shape->header);
     for(i = 0; i < 2; i++) {
         if (ctx->arguments_shape[i])
             mark_func(rt, &ctx->arguments_shape[i]->header);
@@ -2617,6 +2623,7 @@ void JS_FreeContext(JSContext *ctx)
     /* dasher */
     for(i = 0; i < JS_CLOSURE_SHAPE_COUNT; i++)
         js_free_shape_null(ctx->rt, ctx->closure_shape[i]);
+    js_free_shape_null(ctx->rt, ctx->c_function_shape);
     for(i = 0; i < 2; i++)
         js_free_shape_null(ctx->rt, ctx->arguments_shape[i]);
 
@@ -5333,11 +5340,48 @@ JSValue JS_NewObject(JSContext *ctx)
 static void js_function_set_properties(JSContext *ctx, JSValue func_obj,
                                        JSAtom name, int len)
 {
+    JSObject *p = JS_VALUE_GET_OBJ(func_obj);
+    JSShape *sh = ctx->c_function_shape;
+
+    /* dasher: a function made in C with Function.prototype and no
+       properties yet takes the shape the first such function was given
+       here, and the two values are stored in place. */
+    if (sh && p->shape->prop_count == 0 && p->shape->proto == sh->proto &&
+        p->extensible) {
+        JSValue name_val = JS_AtomToString(ctx, name);
+        if (JS_IsException(name_val))
+            return;
+        if (p->shape->prop_size != sh->prop_size) {
+            JSProperty *new_prop = js_realloc(ctx, p->prop,
+                                              sizeof(new_prop[0]) * sh->prop_size);
+            if (!new_prop) {
+                JS_FreeValue(ctx, name_val);
+                return;
+            }
+            p->prop = new_prop;
+        }
+        js_free_shape(ctx->rt, p->shape);
+        p->shape = js_dup_shape(sh);
+        p->prop[0].u.value = js_int32(len);
+        p->prop[1].u.value = name_val;
+        return;
+    }
     /* ES6 feature non compatible with ES5.1: length is configurable */
     JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_length, js_int32(len),
                            JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_name,
                            JS_AtomToString(ctx, name), JS_PROP_CONFIGURABLE);
+    /* dasher: note the shape for next time, if both went in */
+    sh = p->shape;
+    if (!ctx->c_function_shape && sh->is_hashed && sh->prop_count == 2 &&
+        sh->deleted_prop_count == 0 &&
+        JS_VALUE_GET_TAG(ctx->function_proto) == JS_TAG_OBJECT &&
+        sh->proto == JS_VALUE_GET_OBJ(ctx->function_proto) &&
+        sh->prop[0].atom == JS_ATOM_length &&
+        sh->prop[0].flags == JS_PROP_CONFIGURABLE &&
+        sh->prop[1].atom == JS_ATOM_name &&
+        sh->prop[1].flags == JS_PROP_CONFIGURABLE)
+        ctx->c_function_shape = js_dup_shape(sh);
 }
 
 static bool js_class_has_bytecode(JSClassID class_id)
@@ -18521,6 +18565,26 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 JSAtom atom;
                 atom = get_u32(pc);
                 pc += 4;
+
+                /* dasher: a function just made has its `name` already, an
+                   empty string that is only configurable; naming it sets
+                   that value, as the definition would. */
+                if (likely(JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_OBJECT &&
+                           atom != JS_ATOM_NULL)) {
+                    JSShapeProperty *prs;
+                    JSProperty *pr;
+                    prs = find_own_property(&pr, JS_VALUE_GET_OBJ(sp[-1]),
+                                            JS_ATOM_name);
+                    if (prs && prs->flags == JS_PROP_CONFIGURABLE &&
+                        JS_VALUE_GET_TAG(pr->u.value) == JS_TAG_STRING &&
+                        JS_VALUE_GET_STRING(pr->u.value)->len == 0) {
+                        JSValue name = JS_AtomToString(ctx, atom);
+                        if (unlikely(JS_IsException(name)))
+                            goto exception;
+                        set_value(ctx, &pr->u.value, name);
+                        BREAK;
+                    }
+                }
 
                 ret = JS_DefineObjectName(ctx, sp[-1], atom, JS_PROP_CONFIGURABLE);
                 if (unlikely(ret < 0))
@@ -52099,6 +52163,44 @@ static JSValue js_promise_executor_new(JSContext *ctx)
                                0, 2, func_data);
 }
 
+/* dasher: what `new Promise(executor)` gives for the realm's own Promise,
+   with the resolving functions it would pass to the executor returned in
+   'resolving_funcs' instead. See js_new_promise_capability(). */
+static JSValue js_promise_new_capability_direct(JSContext *ctx,
+                                                JSValue *resolving_funcs)
+{
+    JSValue obj;
+    JSPromiseData *s;
+    JSRuntime *rt = ctx->rt;
+    int i;
+
+    obj = js_create_from_ctor(ctx, JS_UNDEFINED, JS_CLASS_PROMISE);
+    if (JS_IsException(obj))
+        return JS_EXCEPTION;
+    s = js_mallocz(ctx, sizeof(*s));
+    if (!s)
+        goto fail;
+    s->promise_state = JS_PROMISE_PENDING;
+    s->is_handled = false;
+    for(i = 0; i < 2; i++)
+        init_list_head(&s->promise_reactions[i]);
+    s->promise_result = JS_UNDEFINED;
+    JS_SetOpaqueInternal(obj, s);
+    if (js_create_resolving_functions(ctx, resolving_funcs, obj))
+        goto fail;
+    if (rt->promise_hook) {
+        JSValueConst parent_promise = JS_UNDEFINED;
+        if (rt->parent_promise)
+            parent_promise = rt->parent_promise->value;
+        rt->promise_hook(ctx, JS_PROMISE_HOOK_INIT, obj, parent_promise,
+                         rt->promise_hook_opaque);
+    }
+    return obj;
+ fail:
+    JS_FreeValue(ctx, obj);
+    return JS_EXCEPTION;
+}
+
 static JSValue js_new_promise_capability(JSContext *ctx,
                                          JSValue *resolving_funcs,
                                          JSValueConst ctor)
@@ -52106,6 +52208,16 @@ static JSValue js_new_promise_capability(JSContext *ctx,
     JSValue executor, result_promise;
     JSCFunctionDataRecord *s;
     int i;
+
+    /* dasher: for the realm's own Promise the executor is the engine's,
+       and all it does is keep the two functions it is given. Its
+       `prototype` cannot change, so constructing it with that executor
+       makes the same promise as making it here. */
+    if (JS_IsUndefined(ctor) ||
+        (JS_VALUE_GET_TAG(ctor) == JS_TAG_OBJECT &&
+         JS_VALUE_GET_TAG(ctx->promise_ctor) == JS_TAG_OBJECT &&
+         JS_VALUE_GET_OBJ(ctor) == JS_VALUE_GET_OBJ(ctx->promise_ctor)))
+        return js_promise_new_capability_direct(ctx, resolving_funcs);
 
     executor = js_promise_executor_new(ctx);
     if (JS_IsException(executor))

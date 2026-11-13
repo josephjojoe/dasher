@@ -518,3 +518,21 @@ fn array_iteration_behaves_the_same_on_every_path() {
     );
     assert!(js.errors().is_empty());
 }
+
+/// A capability for the realm's own `Promise` is made without an executor,
+/// functions made in C take `length` and `name` from a remembered shape,
+/// and naming a new function stores its `name` in place (see `PATCHES.md`).
+/// Reactions run in the same order and functions look the same.
+#[test]
+fn promises_and_functions_behave_the_same_on_every_path() {
+    let js = runtime();
+    js.run_script(include_str!("fixtures/promises.js"), "promises.js")
+        .unwrap();
+    assert_eq!(
+        js.eval_json("promiseLog").unwrap().as_deref(),
+        Some(
+            r#"["resolving functions length:1:001 name::001 | length:1:001 name::001 true","builtins length:2:001 name:max:001 | length:1:001 name:resolve:001 | length:1:001 name:map:001 | length:0:001 name:bound :001","names arrow,fexpr,inner,m,n,f,g,C,function,late,destr,fixed","arrow length:0:001 name:arrow:001 | length:0:001 name:fexpr:001 prototype:obj:100","fresh length:0:001 name:fresh:001","fresh length:0:001 name:fresh:001","fresh length:0:001 name:fresh:001","same true","MyPromise constructed","MyPromise constructed","subclass true true","fake ctor","af start 10","af start [object Promise]","sync end","a 1","b 2","caught r","thenable then called","fake 5","af after await 10","af after await 20","thenable then called","thenable then called","withResolvers ok","p0 then resolved late","a2","finally","t from thenable","af result 11","af2 result 21","thrower async throw","recovered no","allSettled rejected,fulfilled","race","any","awaitsThenable from thenable","returned promise","all 1,2,from thenable","b2 inner","loop 5","chain 5"]"#
+        )
+    );
+    assert!(js.errors().is_empty());
+}
