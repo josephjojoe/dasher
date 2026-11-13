@@ -374,10 +374,10 @@ mix of work. Lightpanda does real layout, which is why its
 | getAttribute | 715 | 465 | 120 | 3.9× |
 | matches(tag) | 642 | 365 | 90 | 4.1× |
 | querySelector(tag) | 710 | 432 | 103 | 4.2× |
-| tagName | 329 | 175 | 60 | 2.9× |
-| nextSibling | 251 | 165 | 50 | 3.3× |
-| nodeType | 197 | 115 | 40 | 2.9× |
-| shadowRoot | 209 | 115 | 40 | 2.9× |
+| tagName | 97.0 | 175 | 60 | 1.6× |
+| nextSibling | 90.7 | 165 | 50 | 1.8× |
+| nodeType | 90.5 | 115 | 40 | 2.3× |
+| shadowRoot | 79.5 | 115 | 40 | 2.0× |
 | children | 357 | 215 | 350 | 0.6× |
 | innerText | 374 | 215 | 220 | 1.0× |
 | createElement | 1,607 | 915 | 470 | 1.9× |
@@ -391,6 +391,14 @@ Most DOM calls here cost 1.5 to 2 times the audit's figures, ranging from
 1.1 times for getElementById to 3 times for `document.cookie`. That fits a
 slower machine and loops that differ in detail. The ratios to Lightpanda
 are what to aim at.
+
+tagName, nextSibling, nodeType and shadowRoot are native members (see
+"Native members" in `crates/js/src/dom.rs`) since DAS-41; they were 329,
+251, 197 and 209 ns here before. On this machine a native getter that does
+nothing costs about 78 ns in this loop: 51 ns for the loop and the lookup
+through four prototypes (an own data property is 40 ns), and 27 ns for
+QuickJS calling a C function as a getter. The members' own work is the
+rest, 0 to 20 ns.
 
 ## Per-page limits
 

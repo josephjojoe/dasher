@@ -50,13 +50,16 @@ impl<'js, T: IntoJs<'js>> IntoJs<'js> for Nullable<T> {
 
 /// The node behind a wrapper.
 pub(super) fn id(ctx: &Ctx<'_>, node: &Node<'_>) -> Result<NodeId> {
-    node.borrow().id().ok_or_else(|| {
-        throw_dom(
-            ctx,
-            "InvalidStateError",
-            "The node belongs to a document that has been replaced.",
-        )
-    })
+    node.borrow().id().ok_or_else(|| stale_node_error(ctx))
+}
+
+/// Throws the error for using a node of a replaced document.
+pub(super) fn stale_node_error(ctx: &Ctx<'_>) -> rquickjs::Error {
+    throw_dom(
+        ctx,
+        "InvalidStateError",
+        "The node belongs to a document that has been replaced.",
+    )
 }
 
 /// The element behind a wrapper; a `TypeError` for other nodes, which page
@@ -852,10 +855,6 @@ fn install_core<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
     def(obj, "nodeType", move |ctx: Ctx<'js>, n: Node<'js>| {
         Ok::<_, rquickjs::Error>(d.doc().kind(id(&ctx, &n)?).node_type())
     })?;
-    let d = Rc::clone(dom);
-    def(obj, "nodeName", move |ctx: Ctx<'js>, n: Node<'js>| {
-        Ok::<_, rquickjs::Error>(d.doc().node_name(id(&ctx, &n)?).into_owned())
-    })?;
     Ok(())
 }
 
@@ -949,20 +948,6 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "isEqual",
         move |ctx: Ctx<'js>, a: Node<'js>, b: Node<'js>| -> Result<bool> {
             Ok(is_equal_node(&d.doc(), id(&ctx, &a)?, id(&ctx, &b)?))
-        },
-    )?;
-    let d = Rc::clone(dom);
-    def(
-        obj,
-        "childCount",
-        move |ctx: Ctx<'js>, n: Node<'js>, elements: bool| -> Result<usize> {
-            let n = id(&ctx, &n)?;
-            let doc = d.doc();
-            Ok(if elements {
-                doc.element_children(n).count()
-            } else {
-                doc.children(n).count()
-            })
         },
     )?;
     let d = Rc::clone(dom);
@@ -1335,17 +1320,6 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
 }
 
 fn install_attributes<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
-    let d = Rc::clone(dom);
-    def(
-        obj,
-        "tagName",
-        move |ctx: Ctx<'js>, n: Node<'js>| -> Result<String> {
-            Ok(d.doc()
-                .tag_name(id(&ctx, &n)?)
-                .map(|s| s.into_owned())
-                .unwrap_or_default())
-        },
-    )?;
     let d = Rc::clone(dom);
     def(
         obj,
