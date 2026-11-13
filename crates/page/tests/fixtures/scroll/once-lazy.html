@@ -1,0 +1,59 @@
+<!doctype html>
+<title>Content that loads lazily, once</title>
+<article id="story">
+  <h1>A long story</h1>
+  <img class="lazyload" data-src="/img/hero.png" alt="the hero image">
+</article>
+<section class="lazy" id="related" data-src="/api/section?n=related"><h2>Related</h2><div class="body"></div></section>
+<section class="lazy" id="comments" data-src="/api/section?n=comments"><h2>Comments</h2><div class="body"></div></section>
+<div id="reviews"></div>
+<script>
+  // Below-the-fold parts of a page that is all there at load, each loaded
+  // the first time it is in view and never again:
+  // - the story's text, as many paragraphs (enough to fill a viewport);
+  // - two sections fetched through an IntersectionObserver, each filling
+  //   in several elements of its own;
+  // - an image swapped in by a lazysizes-style check of its position on a
+  //   timer after load;
+  // - a reviews component observed only once the load event has run.
+  const story = document.getElementById('story');
+  for (let i = 1; i <= 40; i++) {
+    const p = document.createElement('p');
+    p.textContent = 'Paragraph ' + i + ' of the story.';
+    story.append(p);
+  }
+
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const el = entry.target;
+      observer.unobserve(el);
+      fetch(el.dataset.src).then((r) => r.text()).then((text) => {
+        el.querySelector('.body').innerHTML =
+          '<p>' + text + '</p><ul><li>one</li><li>two</li><li>three</li></ul>';
+        el.dataset.loaded = '';
+      });
+    }
+  });
+  document.querySelectorAll('section.lazy').forEach((el) => observer.observe(el));
+
+  addEventListener('load', () => {
+    setTimeout(() => {
+      for (const img of document.querySelectorAll('img.lazyload')) {
+        if (img.getBoundingClientRect().top < window.innerHeight + 100) {
+          img.src = img.dataset.src;
+          img.classList.remove('lazyload');
+        }
+      }
+    }, 50);
+    const reviews = document.getElementById('reviews');
+    const late = new IntersectionObserver((entries) => {
+      if (!entries[0].isIntersecting) return;
+      late.disconnect();
+      fetch('/api/section?n=reviews').then((r) => r.text()).then((text) => {
+        reviews.textContent = text;
+      });
+    });
+    late.observe(reviews);
+  });
+</script>

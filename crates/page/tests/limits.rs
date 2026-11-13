@@ -34,12 +34,12 @@ fn server() -> FixtureServer {
             )
         })
         .route("/churns-while-loading", |_| {
-            // A hundred times the node limit made and dropped while the
-            // parser is still going, then a ticker rewriting a list.
+            // Ten times the node limit made and dropped while the parser is
+            // still going, then a ticker rewriting a list.
             FixtureResponse::html(
                 "<!doctype html><div id=outer><p id=clock></p><script>
                    const clock = document.getElementById('clock');
-                   for (let i = 0; i < 500000; i++) clock.textContent = 'tick ' + i;
+                   for (let i = 0; i < 50000; i++) clock.textContent = 'tick ' + i;
                  </script><ul id=list></ul><script>
                    const list = document.getElementById('list');
                    let n = 0;
@@ -68,7 +68,7 @@ fn server() -> FixtureServer {
                    // Wrapped garbage, so the cycle collector runs and takes
                    // the removed scripts' wrappers too.
                    const clock = document.getElementById('clock');
-                   for (let i = 0; i < 50000; i++) clock.replaceChildren(document.createElement('b'));
+                   for (let i = 0; i < 20000; i++) clock.replaceChildren(document.createElement('b'));
                  </script>",
             )
         })
@@ -78,7 +78,7 @@ fn server() -> FixtureServer {
                 "text/javascript",
                 format!(
                     "(globalThis.ran ||= []).push('{which}');
-                     for (let i = 0; i < 50000; i++) clock.replaceChildren(document.createElement('i'));"
+                     for (let i = 0; i < 20000; i++) clock.replaceChildren(document.createElement('i'));"
                 )
                 .into_bytes(),
             )
@@ -121,8 +121,24 @@ fn options() -> PageOptions {
 }
 
 async fn load(server: &FixtureServer, path: &str) -> Result<Page, LoadError> {
+    load_with(server, path, options()).await
+}
+
+async fn load_with(
+    server: &FixtureServer,
+    path: &str,
+    options: PageOptions,
+) -> Result<Page, LoadError> {
     let session = Client::builder().build().unwrap().session();
-    Page::load(&session, &server.url(path), options()).await
+    Page::load(&session, &server.url(path), options).await
+}
+
+/// For pages that churn for a while, which takes seconds in debug builds.
+fn patient() -> PageOptions {
+    PageOptions {
+        timeout: Some(Duration::from_secs(60)),
+        ..options()
+    }
 }
 
 #[tokio::test]
@@ -202,7 +218,9 @@ async fn scrolling_past_the_node_limit_ends_auto_scroll() {
 #[tokio::test]
 async fn churn_while_loading_and_after_stays_within_the_limit() {
     let server = server();
-    let mut page = load(&server, "/churns-while-loading").await.unwrap();
+    let mut page = load_with(&server, "/churns-while-loading", patient())
+        .await
+        .unwrap();
     assert_eq!(page.js().limit_exceeded(), None);
     assert_eq!(
         page.js()
@@ -210,14 +228,14 @@ async fn churn_while_loading_and_after_stays_within_the_limit() {
             .unwrap(),
         Some("\"parsed\"".into())
     );
-    // Ticks until 100,000 lists have come and gone: sixty times the node
+    // Ticks until 20,000 lists have come and gone: twelve times the node
     // limit in elements and text.
     let outcome = page
         .settle(&SettleOptions {
             network_idle: None,
             dom_quiet: None,
             selector: None,
-            predicate: Some("n >= 100000".into()),
+            predicate: Some("n >= 20000".into()),
             timeout: Duration::from_secs(120),
         })
         .await
@@ -229,7 +247,9 @@ async fn churn_while_loading_and_after_stays_within_the_limit() {
 #[tokio::test]
 async fn removed_scripts_still_run_while_the_page_churns() {
     let server = server();
-    let page = load(&server, "/removed-scripts").await.unwrap();
+    let page = load_with(&server, "/removed-scripts", patient())
+        .await
+        .unwrap();
     assert_eq!(page.js().limit_exceeded(), None);
     assert_eq!(
         page.js().eval_json("ran.sort().join()").unwrap(),

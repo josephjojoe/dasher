@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::rc::Rc;
 
 use dasher_dom::{Document, Name, NodeId, NodeKind};
@@ -10,6 +11,7 @@ use rquickjs::class::{JsClass, Readable, Trace, Tracer};
 use rquickjs::function::Constructor;
 use rquickjs::{Class, Ctx, Function, JsLifetime, Object, Result, Value, qjs};
 
+use super::members::{self, Members};
 use super::{DomState, any_in_tree_except, group_root, owner};
 
 /// A node wrapper object.
@@ -33,6 +35,11 @@ impl NodeWrapper<'_> {
     pub(crate) fn id(&self) -> Option<NodeId> {
         (!self.stale.get()).then_some(self.id)
     }
+
+    /// The DOM state the node belongs to.
+    pub(crate) fn dom(&self) -> &Rc<DomState> {
+        &self.dom
+    }
 }
 
 impl Drop for NodeWrapper<'_> {
@@ -42,7 +49,7 @@ impl Drop for NodeWrapper<'_> {
         }
         // Runs in the GC finalizer, which never runs while these cells are
         // borrowed: they are only borrowed briefly, without running JS.
-        self.dom.wrappers.borrow_mut().remove(&self.id);
+        self.dom.wrappers.remove(self.id);
         self.dom.set_observed(self.id, false);
         self.dom.set_custom(self.id, false);
         self.dom.add_candidate(self.id);
@@ -96,6 +103,8 @@ pub(crate) struct DomData<'js> {
     pub(crate) ce_held: RefCell<Vec<Node<'js>>>,
     /// Told when the document changed (see the `layout` module).
     pub(crate) layout_hook: RefCell<Option<Function<'js>>>,
+    /// What the native members need (see the `members` module).
+    pub(crate) members: Box<Members>,
     element: Object<'js>,
     html_element: Object<'js>,
     html_unknown: Object<'js>,
@@ -120,7 +129,8 @@ fn tag_table<'js>(table: Object<'js>) -> Result<HashMap<String, Object<'js>>> {
     table.props::<String, Object<'js>>().collect()
 }
 
-/// Stores the prototypes from `protos` and creates the document wrapper.
+/// Stores the prototypes from `protos`, creates the document wrapper and
+/// installs the native members on the prototypes in `protos.interfaces`.
 pub(crate) fn init<'js>(
     ctx: &Ctx<'js>,
     dom: &Rc<DomState>,
@@ -128,8 +138,10 @@ pub(crate) fn init<'js>(
     exception: Function<'js>,
 ) -> Result<()> {
     let document = create(dom, dom.doc().root(), protos.get("Document")?)?;
+    members::install(ctx, &protos.get("interfaces")?)?;
     let data = DomData {
         exception,
+        members: Members::attach(ctx, &document),
         document,
         mutation_hook: RefCell::new(None),
         ce_hook: RefCell::new(None),
@@ -201,25 +213,87 @@ fn create<'js>(dom: &Rc<DomState>, id: NodeId, proto: Object<'js>) -> Result<Nod
         prev: RefCell::new(None),
     };
     let node = Class::instance_proto(wrapper, proto)?;
-    dom.wrappers.borrow_mut().insert(id, node.as_raw());
+    dom.wrappers.insert(id, node.as_raw());
     Ok(node)
+}
+
+/// The cache from node to live wrapper: the wrapper's object pointer in a
+/// slot indexed by the node's arena index, null where there is none.
+///
+/// Weak: a slot is cleared by its wrapper's finalizer, so it never keeps
+/// the wrapper alive. The slots are only borrowed briefly, never across
+/// anything that can run JS or the GC (finalizers write to them).
+#[derive(Default)]
+pub(crate) struct Wrappers {
+    slots: RefCell<Vec<*mut c_void>>,
+}
+
+impl Wrappers {
+    /// The wrapper object of `id`, borrowed from the cache: it stays valid
+    /// only until JS or the GC next runs.
+    #[inline]
+    pub(crate) fn get(&self, id: NodeId) -> Option<qjs::JSValue> {
+        let ptr = *self.slots.borrow().get(index(id))?;
+        (!ptr.is_null()).then(|| qjs::JS_MKPTR(qjs::JS_TAG_OBJECT, ptr))
+    }
+
+    pub(crate) fn contains(&self, id: NodeId) -> bool {
+        self.get(id).is_some()
+    }
+
+    fn insert(&self, id: NodeId, wrapper: qjs::JSValue) {
+        let mut slots = self.slots.borrow_mut();
+        let i = index(id);
+        if slots.len() <= i {
+            slots.resize(i + 1, std::ptr::null_mut());
+        }
+        // SAFETY: `wrapper` is an object value, so it holds a pointer.
+        slots[i] = unsafe { qjs::JS_VALUE_GET_PTR(wrapper) };
+    }
+
+    fn remove(&self, id: NodeId) {
+        if let Some(slot) = self.slots.borrow_mut().get_mut(index(id)) {
+            *slot = std::ptr::null_mut();
+        }
+    }
+
+    /// The nodes that have a live wrapper, in arena order.
+    pub(crate) fn ids(&self) -> Vec<NodeId> {
+        let slots = self.slots.borrow();
+        let wrapped = slots.iter().enumerate().filter(|(_, p)| !p.is_null());
+        wrapped.map(|(i, _)| node_at(i)).collect()
+    }
+
+    /// Empties every slot but `keep`'s.
+    fn clear_except(&self, keep: NodeId) {
+        let mut slots = self.slots.borrow_mut();
+        for (i, slot) in slots.iter_mut().enumerate() {
+            if i != index(keep) {
+                *slot = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+fn index(id: NodeId) -> usize {
+    id.to_raw() as usize - 1
+}
+
+fn node_at(index: usize) -> NodeId {
+    let raw = u32::try_from(index + 1).expect("arena indexes fit in u32");
+    NodeId::from_raw(raw).expect("index + 1 is non-zero")
 }
 
 impl DomState {
     /// The live wrapper of `id`, if there is one.
     pub(crate) fn cached<'js>(&self, ctx: &Ctx<'js>, id: NodeId) -> Option<Node<'js>> {
-        let raw = self.wrappers.borrow().get(&id).copied()?;
+        let raw = self.wrappers.get(id)?;
         Some(from_raw(ctx, raw))
     }
 
     /// The wrappers of `ids` that are alive.
     pub(crate) fn cached_all<'js>(&self, ctx: &Ctx<'js>, ids: &[NodeId]) -> Vec<Node<'js>> {
-        let raws: Vec<qjs::JSValue> = {
-            let wrappers = self.wrappers.borrow();
-            ids.iter()
-                .filter_map(|id| wrappers.get(id).copied())
-                .collect()
-        };
+        let raws: Vec<qjs::JSValue> = ids.iter().filter_map(|&id| self.wrappers.get(id)).collect();
         raws.into_iter().map(|raw| from_raw(ctx, raw)).collect()
     }
 }
@@ -262,13 +336,13 @@ fn find_anchor<'js>(
     skip: &[NodeId],
 ) -> Option<Node<'js>> {
     let raw = {
-        let wrappers = dom.wrappers.borrow();
+        let wrappers = &dom.wrappers;
         // Usually an ancestor is wrapped: the document always is.
         let mut found = None;
         let mut n = id;
         while let Some(up) = doc.parent(n).or_else(|| owner(doc, n)) {
-            if let Some(raw) = wrappers.get(&up) {
-                found = Some(*raw);
+            if let Some(raw) = wrappers.get(up) {
+                found = Some(raw);
                 break;
             }
             n = up;
@@ -277,7 +351,7 @@ fn find_anchor<'js>(
             // `id` itself is not wrapped yet, or is the parent of an
             // insertion and was checked by the caller.
             any_in_tree_except(doc, n, skip, |m| {
-                found = wrappers.get(&m).copied();
+                found = wrappers.get(m);
                 found.is_some()
             });
         }
@@ -371,16 +445,13 @@ fn wrapped_under<'js>(
     roots: &[NodeId],
 ) -> Vec<Node<'js>> {
     let mut ids = Vec::new();
-    {
-        let wrappers = dom.wrappers.borrow();
-        for &root in roots {
-            any_in_tree_except(doc, root, &[], |n| {
-                if wrappers.contains_key(&n) {
-                    ids.push(n);
-                }
-                false
-            });
-        }
+    for &root in roots {
+        any_in_tree_except(doc, root, &[], |n| {
+            if dom.wrappers.contains(n) {
+                ids.push(n);
+            }
+            false
+        });
     }
     dom.cached_all(ctx, &ids)
 }
@@ -494,7 +565,7 @@ pub(crate) fn after_remove(
 
 /// Rebuilds every ring from scratch, after the host changed the tree.
 pub(crate) fn regroup_all(ctx: &Ctx<'_>, dom: &DomState) {
-    let ids: Vec<NodeId> = dom.wrappers.borrow().keys().copied().collect();
+    let ids = dom.wrappers.ids();
     let nodes = dom.cached_all(ctx, &ids);
     for n in &nodes {
         unlink(n);
@@ -517,12 +588,9 @@ pub(crate) fn regroup_all(ctx: &Ctx<'_>, dom: &DomState) {
 /// replaced.
 pub(crate) fn detach_all(ctx: &Ctx<'_>, dom: &DomState) {
     let root = dom.doc().root();
-    let ids: Vec<NodeId> = dom.wrappers.borrow().keys().copied().collect();
+    let ids = dom.wrappers.ids();
     let nodes = dom.cached_all(ctx, &ids);
-    {
-        let mut wrappers = dom.wrappers.borrow_mut();
-        wrappers.retain(|&id, _| id == root);
-    }
+    dom.wrappers.clear_except(root);
     for n in &nodes {
         if n.borrow().id != root {
             n.borrow().stale.set(true);
@@ -538,7 +606,7 @@ pub(crate) fn detach_all(ctx: &Ctx<'_>, dom: &DomState) {
 /// the node documents of detached trees.
 #[cfg(test)]
 pub(crate) fn check_groups(ctx: &Ctx<'_>, dom: &DomState) -> std::result::Result<(), String> {
-    let ids: Vec<NodeId> = dom.wrappers.borrow().keys().copied().collect();
+    let ids = dom.wrappers.ids();
     let doc = dom.doc();
     let mut by_root: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for &id in &ids {

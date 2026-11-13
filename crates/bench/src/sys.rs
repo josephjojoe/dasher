@@ -10,6 +10,29 @@ pub fn peak_rss() -> u64 {
     imp::peak_rss()
 }
 
+/// CPU time the calling thread has used so far, user and system.
+#[cfg(unix)]
+pub fn thread_cpu() -> std::time::Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a writable `timespec`; the clock exists on Linux
+    // and on macOS 10.12 and later.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    if status != 0 {
+        return std::time::Duration::ZERO;
+    }
+    let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
+    let nanos = u32::try_from(ts.tv_nsec).unwrap_or(0);
+    std::time::Duration::new(secs, nanos)
+}
+
+#[cfg(not(unix))]
+pub fn thread_cpu() -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     /// A `kB` field of `/proc/self/status`, in bytes.
@@ -83,6 +106,17 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn counts_this_threads_cpu_time() {
+        let before = thread_cpu();
+        let mut x = 0u64;
+        while thread_cpu() < before + std::time::Duration::from_millis(5) {
+            x = std::hint::black_box(x.wrapping_add(1));
+        }
+        assert!(x > 0);
+    }
 
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     #[test]
