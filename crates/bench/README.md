@@ -185,6 +185,11 @@ Set `DASHER_REPLAY_LOG` as well to have every request the replay answers
 (or refuses) printed to stderr as `replay: hit|miss <method> <url>`, to
 count a page's requests.
 
+With `DASHER_EAGER_JS` set, a `replay` build compiles every function with
+its script instead of on its first call (see
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)),
+so one build can be measured both ways.
+
 Compare CPU time (user plus system), not wall time: under the virtual clock
 a page's wall time is its CPU time plus fixed waits. Run each page three
 times and take the median. Runs of one build agree to about 1%. On a
@@ -254,6 +259,7 @@ Each change was also measured on its own, against the build without it:
 | `stack` written when first read | −3% (−14% on one page) | none | macOS |
 | bracket lookahead answers remembered by the parser | −5% (−4% on Linux) | none | macOS and Linux |
 | closures and `arguments` made from a known shape, regexp searches run by dasher, `Map` hash mixed (together) | −4% (−8% on one page) | none | macOS |
+| functions compiled on their first call, not with their script (16 heavy pages) | +3% | −8% (−22% on one page) | Linux |
 
 Before the allocator change, a quarter to over a third of CPU time on
 the heavy pages was inside `malloc`, `free` and `malloc_usable_size`

@@ -95,8 +95,14 @@ class Derived extends Base {
   callPrivate() { return [this.#method(), this.#getter, #secret in this, #secret in {}]; }
   static count() { return Derived.#count; }
 }
+class Accessors {
+  get #f() { return this.f; } set #f(v) { this.f = v; }
+  set #s(v) { this.s = v; }
+  run() { this.#f = 1; this.#f ??= 2; this.#f += 1; this.#s = 3; return () => [this.#f, this.s]; }
+}
 var d = new Derived();
-out.classes = [d.field(), d.who(), d.viaArrow(), d.callPrivate(), Derived.count(), Base.make().who()];
+out.classes = [d.field(), d.who(), d.viaArrow(), d.callPrivate(), Derived.count(), Base.make().who(),
+               new Accessors().run()()];
 function Target() { return () => new.target === Target; }
 out.newTarget = [new Target()(), Target()()];
 var proto = { hi() { return 'proto'; } };
@@ -109,6 +115,13 @@ function strictOuter() { 'use strict'; return function () { return this === unde
 function sloppy() { return function () { return typeof this; }; }
 function ownDirective() { 'use strict'; return (function () { return this; })() === undefined; }
 out.strict = [strictOuter()(), sloppy()(), ownDirective()];
+// A class is strict code inside a sloppy function, heritage included.
+function sloppyAround() {
+  class K { m() { return this; } static n() { try { return arguments.callee; } catch (e) { return e.name; } } }
+  var D = class extends function () { return typeof this; } {};
+  return [K.prototype.m.call(undefined) === undefined, K.n(), Object.getPrototypeOf(D).call(undefined)];
+}
+out.classStrict = sloppyAround();
 
 // Generators and async functions.
 function* gen() { const inner = function* () { yield* [1, 2]; }; yield* inner(); yield 3; }

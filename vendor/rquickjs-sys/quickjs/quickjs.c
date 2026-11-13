@@ -784,6 +784,9 @@ typedef struct JSLazyRecord {
     uint8_t is_strict_mode : 1;
     uint8_t has_simple_parameter_list : 1;
     uint8_t is_module : 1;
+    /* strict before the function's own directives: a class is strict code
+       while it is parsed, whatever the function around it is */
+    uint8_t parent_strict : 1;
     /* an '=' token in the function: js_parse_skip_parens_token() reports
        one in a bracket it scans, and skips over a function it has a
        record for */
@@ -806,19 +809,6 @@ typedef struct JSLazyInfo {
     uint8_t parent_strict : 1;  /* strict before its own directives */
     uint8_t parent_static_init : 1; /* defined in a class static block */
 } JSLazyInfo;
-
-#ifdef LAZY_DEBUG
-static struct {
-    long dropped, dropped_bytes, kept_eval, skipped, reparsed, stubs, compiled, compiled_bytes;
-} lazy_stats;
-static void lazy_stats_print(void)
-{
-    fprintf(stderr, "lazy: dropped %ld (%ld bytes), kept for eval %ld, skipped %ld, parsed again in full %ld, stubs %ld, compiled %ld (%ld bytes)\n",
-            lazy_stats.dropped, lazy_stats.dropped_bytes, lazy_stats.kept_eval, lazy_stats.skipped,
-            lazy_stats.reparsed, lazy_stats.stubs, lazy_stats.compiled, lazy_stats.compiled_bytes);
-}
-#define LAZY_STAT(x) (lazy_stats.x)
-#endif
 
 typedef struct JSBoundFunction {
     JSValue func_obj;
@@ -20596,6 +20586,7 @@ typedef struct JSFunctionDef {
                               is fixed, as for direct eval */
     bool lazy_parent_static_init : 1; /* for a lazy root */
     bool lazy_record_borrowed : 1; /* lazy_record belongs to a JSLazyInfo */
+    bool lazy_parent_strict : 1; /* is_strict_mode before its directives */
     uint8_t lazy_parent_func_kind; /* for a lazy root */
     
     JSFunctionKindEnum func_kind : 8;
@@ -21319,7 +21310,6 @@ static __exception int ident_realloc(JSContext *ctx, char **pbuf, size_t *psize,
 
 #ifndef QJS_DISABLE_PARSER
 
-/* convert a TOK_IDENT to a keyword when needed */
 /* dasher: the kind of the function 'fd' is defined in. A lazy root has
    no parent to look at, so it keeps what its parent was. */
 static inline int js_parent_func_kind(JSFunctionDef *fd)
@@ -21333,6 +21323,7 @@ static inline bool js_parent_is_static_init(JSFunctionDef *fd)
         fd->lazy_parent_static_init;
 }
 
+/* convert a TOK_IDENT to a keyword when needed */
 static void update_token_ident(JSParseState *s)
 {
     if (s->token.u.ident.atom <= JS_ATOM_LAST_KEYWORD ||
@@ -30667,7 +30658,7 @@ static JSFunctionDef *js_new_function_def(JSContext *ctx,
        name up again */
     if (parent && parent->filename != JS_ATOM_NULL)
         fd->filename = JS_DupAtom(ctx, parent->filename);
-    else
+    else if (filename) /* dasher: a lazy root sets its own */
         fd->filename = JS_NewAtom(ctx, filename);
     fd->line_num = line_num;
     fd->col_num = col_num;
@@ -34546,9 +34537,6 @@ static int add_module_variables(JSContext *ctx, JSFunctionDef *fd)
     return 0;
 }
 
-/* create a function object from a function definition. The function
-   definition is freed. All the child functions are also created. It
-   must be done this way to resolve all the variables. */
 /* dasher: the closure of a lazy function. A shell (JS_LAZY_SHELL) keeps
    the names it uses and does not define. Each is looked up from where the
    function was defined, the way resolve_scope_var() looks up a name that
@@ -34836,14 +34824,11 @@ static JSValue js_create_lazy_function(JSContext *ctx, JSFunctionDef *fd)
     b->realm = JS_DupContext(ctx);
     b->is_lazy = 1;
     b->lazy = li;
-#ifdef LAZY_DEBUG
-    LAZY_STAT(stubs)++;
-#endif
     li->record = r;
     fd->lazy_record = NULL;
     li->func_type = fd->func_type;
     li->is_func_expr = fd->is_func_expr;
-    li->parent_strict = fd->parent->is_strict_mode;
+    li->parent_strict = r->parent_strict;
     li->parent_func_kind = fd->parent->func_kind;
     li->parent_static_init = fd->parent->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT;
     add_gc_object(ctx->rt, &b->header, JS_GC_OBJ_TYPE_FUNCTION_BYTECODE);
@@ -34888,6 +34873,9 @@ static void js_link_scopes(JSFunctionDef *fd)
 
 static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd);
 
+/* create a function object from a function definition. The function
+   definition is freed. All the child functions are also created. It
+   must be done this way to resolve all the variables. */
 /* dasher: with 'into', a lazy function compiled on its first call: its
    code goes into 'into', and its cpool, vardefs, closure_var and code into
    a block 'into' keeps in 'lazy'. Returns undefined then. */
@@ -36057,14 +36045,7 @@ static int js_lazy_drop(JSParseState *s, JSFunctionDef *fd)
     r->has_simple_parameter_list = fd->has_simple_parameter_list;
     r->is_module = s->is_module;
     r->has_assign = s->assign_count != fd->lazy_start_assign;
-#ifdef LAZY_DEBUG
-    {
-        static bool registered;
-        if (!registered && getenv("LAZY_DEBUG")) { registered = true; atexit(lazy_stats_print); }
-    }
-    LAZY_STAT(dropped)++;
-    LAZY_STAT(dropped_bytes) += fd->source_len;
-#endif
+    r->parent_strict = fd->lazy_parent_strict;
 
     js_lazy_make_shell(ctx, fd);
     fd->lazy_record = r;
@@ -36122,15 +36103,9 @@ static int js_lazy_begin(JSParseState *s, JSFunctionDef *fd,
     if (r) {
         if (compile_now) {
             /* parsed in full, with the records of the functions inside */
-#ifdef LAZY_DEBUG
-            LAZY_STAT(reparsed)++;
-#endif
             fd->lazy_record = r;
             return 0;
         }
-#ifdef LAZY_DEBUG
-        LAZY_STAT(skipped)++;
-#endif
         fd->lazy_record = r;
         fd->lazy_state = JS_LAZY_SHELL;
         fd->defined_arg_count = r->defined_arg_count;
@@ -36159,6 +36134,7 @@ static int js_lazy_begin(JSParseState *s, JSFunctionDef *fd,
     fd->lazy_start_mark = s->mark - s->buf_start;
     fd->lazy_start_line = s->token.line_num;
     fd->lazy_start_assign = s->assign_count;
+    fd->lazy_parent_strict = fd->is_strict_mode;
     return 0;
 }
 
@@ -36173,9 +36149,6 @@ static int js_lazy_end(JSParseState *s, JSFunctionDef *fd)
         return 0;
     }
     if (js_lazy_has_eval(fd)) {
-#ifdef LAZY_DEBUG
-        LAZY_STAT(kept_eval)++;
-#endif
         fd->lazy_state = JS_LAZY_NONE;
         return 0;
     }
@@ -36194,19 +36167,15 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     JSSourceText *t = b->source_text;
     JSParseState s1, *s = &s1;
     JSFunctionDef *fd;
+    char filename_buf[ATOM_GET_STR_BUF_SIZE];
     const char *filename;
     JSValue ret;
     int i, err;
 
     ctx = b->realm;
-#ifdef LAZY_DEBUG
-    lazy_stats.compiled++;
-    lazy_stats.compiled_bytes += b->source_len;
-    if (getenv("LAZY_DEBUG_LOG")) fprintf(stderr, "lazy compile %.*s\n", 60, b->source);
-#endif
-    filename = JS_AtomToCString(ctx, b->filename);
-    if (!filename)
-        return -1;
+    /* only for error messages, which a parse that has succeeded once
+       gives only when it runs out of memory or stack */
+    filename = JS_AtomGetStr(ctx, filename_buf, sizeof(filename_buf), b->filename);
     js_parse_init(ctx, s, t->buf, t->len, filename, r->start_line);
     s->lazy = ctx->rt->lazy_functions;
     s->is_module = r->is_module;
@@ -36218,10 +36187,11 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     s->mark = s->buf_start + r->start_mark;
     s->token.line_num = r->start_line;
 
-    fd = js_new_function_def(ctx, NULL, false, li->is_func_expr, filename,
+    fd = js_new_function_def(ctx, NULL, false, li->is_func_expr, NULL,
                              b->line_num, b->col_num);
     if (!fd)
         goto fail;
+    fd->filename = JS_DupAtom(ctx, b->filename);
     fd->is_lazy_root = true;
     fd->func_name = JS_DupAtom(ctx, b->func_name);
     js_parse_function_set_flags(fd, li->func_type, b->func_kind);
@@ -36251,8 +36221,6 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     js_skip_memo_free(s);
     js_source_text_release(ctx->rt, s->source_text);
     s->source_text = NULL;
-    JS_FreeCString(ctx, filename);
-    filename = NULL;
     if (err)
         goto fail_fd;
     /* the closure is the one the function was created with */
@@ -36266,13 +36234,9 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     return 0;
  fail_fd:
     js_free_function_def(ctx, fd);
+    return -1;
  fail:
-    if (filename) {
-        free_token(s, &s->token);
-        js_skip_memo_free(s);
-        js_source_text_release(ctx->rt, s->source_text);
-        JS_FreeCString(ctx, filename);
-    }
+    js_source_text_release(ctx->rt, s->source_text);
     return -1;
 }
 

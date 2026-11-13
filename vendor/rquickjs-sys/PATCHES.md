@@ -195,3 +195,102 @@ summed over the pages (20.3 to 19.6 s), 8% less on the page that gains
 most, and no change in memory. The search hook on its own is under 1%,
 and so is the `Map` hash: the patterns and keys they help are rarer on
 these pages than in the loops above.
+
+## `quickjs/quickjs.c`: functions are compiled on their first call
+
+Upstream compiles every function in a script before any of it runs. Most
+of a page's functions are never called: on bbc.com/news 15,000 of 52,637
+ran. Here a function that is not likely to run at once is parsed in full
+and then dropped, and compiled again from the script's text the first
+time it is called. `JS_SetLazyFunctions(rt, false)` turns this off.
+
+**What is parsed, and when.** The parser still reads every function in
+full (`js_parse_function_decl2`), so a syntax error anywhere stops the
+whole script, as the spec requires. At the end of a function that is a
+candidate (`js_lazy_begin`) it is dropped (`js_lazy_drop`): what its
+parent needs is kept in a *shell*, a `JSFunctionDef` with nothing in it,
+and what compiling it later needs in a `JSLazyRecord`. When the parent is
+compiled the shell becomes a `JSFunctionBytecode` with no code
+(`js_create_lazy_function`, `is_lazy`), which closures are made from as
+usual. Its first call (`JS_CallInternal`, `async_func_init`) compiles it
+(`js_lazy_compile`) from the script's shared `JSSourceText` and fills in
+the same `JSFunctionBytecode`. Bytecode is written out compiled:
+`JS_WriteObject` compiles what has not been, so dasher's glue stays fully
+compiled.
+
+A record also holds the records of the functions inside the function, so
+compiling it skips over each of them (resuming the tokenizer at the token
+after it) instead of parsing it again, and makes it a lazy function in
+turn. A function is then read twice at most, once with its script and
+once when it is first called, unless it is inside one that is compiled
+with its parent (above) and whose parent is not. The bracket lookahead skips them too
+(`js_lazy_peek`), so the record notes whether the function had an `=`
+token, the one thing the lookahead reports from inside a function.
+
+**What is compiled with its parent.** Constructors and class static
+blocks (they run when the class is defined or used); functions in a
+`with` statement; a function written in parentheses or after `!`, which is
+taken to be called at once (as V8 does), unless the function around it is
+not compiled now either; and a function that calls `eval` directly, or
+has one inside it that does, since eval can reach any variable around it.
+
+**Closures.** A record keeps the names the function and those inside it
+use and do not define (`js_lazy_collect`, the local half of
+`resolve_scope_var`), private names apart. When the parent is compiled,
+each is looked up from where the function was defined, as
+`resolve_scope_var` would for a name it does not find locally, which marks
+the variables it reaches as captured and gives the stub its closure
+(`js_lazy_resolve_name`). An undefined private name is still a syntax
+error of the script. Compiling the function later then works like direct
+eval does: the function is a top level (`is_lazy_root`) whose names
+outside it are looked up in that fixed closure, which stays in the order
+of the walk so that a `with` object or a sloppy eval's variable object on
+the way is tested only by the names found beyond it. The setter of a
+private accessor has a name of its own, which is captured with it.
+
+What a function takes from its definition site and the parser would have
+read off the parent is kept: strictness before its own directives (a
+class is strict code inside a sloppy function), the parent's kind (for
+`yield` and `await` in arrow parameters), whether the code is a module.
+Line and column numbers come out the same because the tokenizer is
+restarted where it was (`JSLazyRecord.start`, `start_eol`, `start_mark`),
+and `Function.prototype.toString`, `length` and `name` read what the stub
+holds.
+
+Measured on Linux (arm64, glibc profiling build), on a machine shared
+with other work, the two ways from one build (`DASHER_EAGER_JS`, see
+`crates/bench/README.md`):
+
+- **Parse-only corpus** (1,296 distinct scripts from 18 recorded pages,
+  128.4 MB, compiled and not run): 15.0 to 20.9 MB/s (8.55 to 6.15 s),
+  and the compiled scripts hold 56% less of the JS heap (580 to 254 MiB).
+- **16 heavy recorded pages** (CPU time and peak RSS, median of three
+  runs, the two builds alternating page by page): 8% less peak RSS summed
+  over the pages (1338 to 1230 MiB; 22% less on edition.cnn.com, 16% on
+  espn.com, 13% on github.com, 11% on yahoo.com), and 3% more CPU time
+  (41.0 to 42.3 s), with 7 to 9% more on theverge.com, wired.com and
+  zillow.com. Element counts, tag counts, link counts and page text were
+  the same on every page.
+
+The CPU time goes two ways. Less is spent compiling, since the later
+passes run only for the functions that are called, but a function that
+is called is parsed twice, and parsing is two thirds of compiling. And
+the smaller heap is collected more often, because a collection is due
+when the heap has grown by half since the last one. On theverge.com,
+6.5% more cycles over all: 0.25 G cycles more in the cycle collector, 0.4
+G more parsing and scanning names, 0.17 G fewer in `resolve_variables`,
+`resolve_labels` and `js_create_function`. Anything that makes the parser
+faster makes the first two smaller.
+
+Tried and left out: taking a function written as an argument of a call
+(`f(function () {...})`, the factory of a UMD wrapper) to be called at
+once, as a function in parentheses is. Within noise on the 16 pages
+(0.5% less CPU, 0.9% more memory).
+
+`crates/js/tests/runtime.rs` checks closures, `with`, direct eval,
+`arguments`, default parameters, classes and private names, `super`,
+`new.target`, strict mode, generators, async functions, function
+properties and text, stack positions and early errors against what the
+engine gives with every function compiled with its script. test262 (tc39
+`main` of 2026-11-13, 41,841 tests) fails the same tests either way.
+
