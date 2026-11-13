@@ -329,6 +329,10 @@ impl Page {
 
     /// Scrolls the window to `(x, y)`, in CSS pixels, and lets the page
     /// handle the `scroll` event and any `IntersectionObserver` callbacks.
+    ///
+    /// Like each round of auto-scroll, this first reveals what the page
+    /// has added since it loaded (or since the last scroll), under the
+    /// default [`Visibility::Loaded`](crate::Visibility::Loaded).
     pub fn scroll_to(&mut self, x: f64, y: f64) -> Result<()> {
         self.scroll(&format!(
             "window.scrollTo({}, {})",
@@ -349,6 +353,7 @@ impl Page {
 
     fn scroll(&mut self, script: &str) -> Result<()> {
         let page = self.inner.as_ref().ok_or(Error::NoDocument)?;
+        page.js().reveal();
         let result = page.js().eval_json(script);
         // Errors in the page's handlers are the page's own, and logged.
         let _ = page.js().run_ready();

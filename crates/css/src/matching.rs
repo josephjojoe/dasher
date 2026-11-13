@@ -36,7 +36,8 @@ pub(crate) struct Context<'a> {
     pub(crate) doc: &'a Document,
     /// The element `:scope` matches; `None` makes it match `:root`.
     scope: Option<NodeId>,
-    quirks: bool,
+    /// Whether ids and classes match ASCII case-insensitively.
+    pub(crate) quirks: bool,
     /// Whether descendant and child combinators cross from a shadow tree
     /// to its host, for queries that look into shadow trees.
     deep: bool,
@@ -78,6 +79,14 @@ impl<'a> Context<'a> {
         list.selectors
             .iter()
             .any(|complex| self.matches_complex(complex, el, None))
+    }
+
+    /// Whether `el` matches every simple selector in `compound`: a complex
+    /// selector of that one compound.
+    pub(crate) fn matches_compound(&self, compound: &[Simple], el: NodeId) -> bool {
+        compound
+            .iter()
+            .all(|simple| self.matches_simple(simple, el, None))
     }
 
     fn matches_complex(&self, complex: &Complex, el: NodeId, anchor: Option<NodeId>) -> bool {

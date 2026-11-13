@@ -38,8 +38,10 @@ stylesheets, fonts and media are never downloaded.
 Where pages expect layout (`getBoundingClientRect`, `offsetHeight`, scroll
 position, `IntersectionObserver`, `getComputedStyle`), dasher returns plausible
 synthetic values. They are chosen so that content gated behind visibility or
-scrolling still loads: by default everything counts as visible and in the
-viewport, and the document is treated as tall enough to scroll.
+scrolling still loads: by default the page as it stood at the load event
+counts as visible and in the viewport, so its lazy parts load once, and what
+the page appends after that waits below the fold until dasher is asked to
+scroll. See [Visibility](#visibility).
 
 Content that web components render into shadow roots is part of the result:
 the HTML carries each shadow tree as declarative shadow DOM
@@ -71,6 +73,31 @@ Data structures favour compactness: arena/index-based nodes, interned names,
 no per-node reference counting. Each `Page` owns its JS runtime and DOM, and
 dropping the page frees all of it. The target artifact is a single static
 binary (musl) in a distroless or scratch-sized container.
+
+## Visibility
+
+What counts as in view decides how much lazily loaded content a page
+fetches, and so what a run costs. It is a named policy, set per run:
+`--visibility` in the CLI, `"visibility"` in a service job, and
+`BrowserBuilder::visibility(Visibility::…)` in the Rust API.
+
+| policy | what is in view | what it costs |
+| --- | --- | --- |
+| `loaded` (default) | The page as it stood at the load event. What it appends later is below the fold, pushing what follows it down, until `--scroll` reveals it. | Lazy sections, images and components present at load arrive. A loader can add about two viewports of content before the next scroll, so a feed loads one batch, and a page that checks for more after every batch (as engadget.com does) stops. |
+| `all` | Everything, always. | The most content, but a page that checks for more after every batch keeps loading until the timeout: engadget.com made 4,800 to 8,000 requests and spent 38 to 60 CPU seconds, against under 2 s with the other policies. |
+| `viewport` | Only what is scrolled to, in a 1920×1080 window. | The least work. Content below the fold arrives only with `--scroll`. |
+
+`--scroll` is the way to ask for more of an infinite feed under any
+policy: each round reveals what came in and scrolls down again, up to
+`--max-scrolls` rounds.
+
+On sixteen recorded real pages (see
+[crates/bench/README.md](crates/bench/README.md#visibility)), `loaded` kept
+the same text as `all` on fifteen and cost 36 CPU seconds in all, against 77
+for `all` and 34 for `viewport`. `viewport` kept the same text as well,
+except on engadget.com (1,615 words, against 4,128 under `loaded`). The
+difference is all on pages with self-triggering loaders: elsewhere the three
+policies cost the same.
 
 ## Workspace layout
 
