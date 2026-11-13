@@ -461,6 +461,9 @@ struct JSContext {
        for a normal function that has a `prototype`. */
     JSShape *closure_shape[JS_CLOSURE_SHAPE_COUNT];
     JSShape *arguments_shape[2]; /* strict, sloppy */
+    /* dasher: the shapes of objects JSON.parse made, by their first atom;
+       see json_fast_object() */
+    JSShape *json_shapes[64];
 
     JSValue *class_proto;
     JSValue function_proto;
@@ -2546,6 +2549,10 @@ static void JS_MarkContext(JSRuntime *rt, JSContext *ctx,
         if (ctx->arguments_shape[i])
             mark_func(rt, &ctx->arguments_shape[i]->header);
     }
+    for(i = 0; i < countof(ctx->json_shapes); i++) {
+        if (ctx->json_shapes[i])
+            mark_func(rt, &ctx->json_shapes[i]->header);
+    }
 }
 
 void JS_FreeContext(JSContext *ctx)
@@ -2621,6 +2628,8 @@ void JS_FreeContext(JSContext *ctx)
         js_free_shape_null(ctx->rt, ctx->closure_shape[i]);
     for(i = 0; i < 2; i++)
         js_free_shape_null(ctx->rt, ctx->arguments_shape[i]);
+    for(i = 0; i < countof(ctx->json_shapes); i++)
+        js_free_shape_null(ctx->rt, ctx->json_shapes[i]);
 
     list_del(&ctx->link);
     remove_gc_object(&ctx->header);
@@ -48190,14 +48199,15 @@ static JSValue internalize_json_property(JSContext *ctx, JSValueConst holder,
 /* dasher: JSON.parse reads the string it is given directly, 8-bit or
    16-bit, instead of converting it to UTF-8 and running the tokenizer
    above over that. Members are collected on a value stack; an object
-   whose keys come in the same order as an earlier one's is made from that
-   one's shape, and its keys are compared with the shape's atoms instead of
-   being looked up. Integers become int32 values. The fast parser only
+   whose keys come in the same order as an earlier one's (in this parse or
+   an earlier one) is made from that one's shape, and its keys are
+   compared with the shape's atoms instead of being looked up. The context
+   keeps the last shape for each of 64 slots, keyed by first atom. Integers become int32 values. The fast parser only
    accepts valid JSON: on anything else (or a stack that runs short) it
    gives up and JS_ParseJSON runs on the same text, so error messages and
    their positions are upstream's. */
 
-#define JSON_FAST_SHAPES 64
+#define JSON_FAST_SHAPES countof(((JSContext *)0)->json_shapes)
 
 typedef struct JSONFast {
     JSContext *ctx;
@@ -48209,8 +48219,9 @@ typedef struct JSONFast {
     uint32_t vals_len, vals_size;
     JSAtom *atoms;
     uint32_t atoms_len, atoms_size;
-    /* final shapes of objects parsed so far, by their first atom */
-    JSShape *shapes[JSON_FAST_SHAPES];
+    /* final shapes of objects parsed so far, by their first atom
+       (ctx->json_shapes, kept from one parse to the next) */
+    JSShape **shapes;
 } JSONFast;
 
 /* results of the parsing functions */
@@ -48589,7 +48600,9 @@ static int json_fast_object(JSONFast *s, JSValue *pv)
 {
     JSContext *ctx = s->ctx;
     uint32_t vbase = s->vals_len, abase = s->atoms_len, n, i;
-    JSShape *sh = NULL; /* the shape this object seems to follow */
+    /* the shape this object seems to follow, held: a nested object can
+       replace it in the cache while this one's members are parsed */
+    JSShape *sh = NULL;
     JSAtom atom, hint;
     JSValue obj, v;
     JSObject *p;
@@ -48600,52 +48613,61 @@ static int json_fast_object(JSONFast *s, JSValue *pv)
     c = json_fast_peek(s);
     if (c != '}') {
         for (;;) {
+            ret = JSON_FAST_GIVE_UP;
             if (c != '"')
-                return JSON_FAST_GIVE_UP;
+                goto done;
             n = s->atoms_len - abase;
             hint = JS_ATOM_NULL;
             if (sh) {
-                if (n < sh->prop_count)
+                if (n < sh->prop_count) {
                     hint = sh->prop[n].atom;
-                else
+                } else {
+                    js_free_shape(ctx->rt, sh);
                     sh = NULL;
+                }
             }
             ret = json_fast_key(s, hint, &atom);
             if (ret != JSON_FAST_OK)
-                return ret;
-            if (json_fast_push_atom(s, atom))
-                return JSON_FAST_EXCEPTION;
+                goto done;
+            ret = json_fast_push_atom(s, atom);
+            if (ret != JSON_FAST_OK)
+                goto done;
             if (n == 0) {
-                sh = s->shapes[atom % JSON_FAST_SHAPES];
-                if (sh && sh->prop[0].atom != atom)
-                    sh = NULL;
+                JSShape *sh1 = s->shapes[atom % JSON_FAST_SHAPES];
+                if (sh1 && sh1->prop[0].atom == atom)
+                    sh = js_dup_shape(sh1);
             } else if (sh && atom != hint) {
+                js_free_shape(ctx->rt, sh);
                 sh = NULL;
             }
+            ret = JSON_FAST_GIVE_UP;
             if (json_fast_peek(s) != ':')
-                return JSON_FAST_GIVE_UP;
+                goto done;
             s->pos++;
             ret = json_fast_value(s, &v);
             if (ret != JSON_FAST_OK)
-                return ret;
-            if (json_fast_push_val(s, v))
-                return JSON_FAST_EXCEPTION;
+                goto done;
+            ret = json_fast_push_val(s, v);
+            if (ret != JSON_FAST_OK)
+                goto done;
             c = json_fast_peek(s);
             if (c == '}')
                 break;
+            ret = JSON_FAST_GIVE_UP;
             if (c != ',')
-                return JSON_FAST_GIVE_UP;
+                goto done;
             s->pos++;
             c = json_fast_peek(s);
         }
     }
     s->pos++;
     n = s->atoms_len - abase;
+    ret = JSON_FAST_EXCEPTION;
     if (sh && sh->prop_count == n) {
         /* the same keys in the same order as an earlier object */
         obj = JS_NewObjectFromShape(ctx, js_dup_shape(sh), JS_CLASS_OBJECT);
         if (JS_IsException(obj))
-            return JSON_FAST_EXCEPTION;
+            goto done;
         p = JS_VALUE_GET_OBJ(obj);
         for (i = 0; i < n; i++) {
             p->prop[i].u.value = s->vals[vbase + i];
@@ -48654,7 +48676,7 @@ static int json_fast_object(JSONFast *s, JSValue *pv)
     } else {
         obj = JS_NewObject(ctx);
         if (JS_IsException(obj))
-            return JSON_FAST_EXCEPTION;
+            goto done;
         p = JS_VALUE_GET_OBJ(obj);
         for (i = 0; i < n; i++) {
             atom = s->atoms[abase + i];
@@ -48668,7 +48690,7 @@ static int json_fast_object(JSONFast *s, JSValue *pv)
                 if (!pr) {
                     JS_FreeValue(ctx, v);
                     JS_FreeValue(ctx, obj);
-                    return JSON_FAST_EXCEPTION;
+                    goto done;
                 }
                 pr->u.value = v;
             }
@@ -48685,7 +48707,12 @@ static int json_fast_object(JSONFast *s, JSValue *pv)
     s->atoms_len = abase;
     s->vals_len = vbase;
     *pv = obj;
-    return JSON_FAST_OK;
+    ret = JSON_FAST_OK;
+ done:
+    /* on failure the stacks are emptied by json_parse_fast() */
+    if (sh)
+        js_free_shape(ctx->rt, sh);
+    return ret;
 }
 
 static int json_fast_array(JSONFast *s, JSValue *pv)
@@ -48769,6 +48796,7 @@ static JSValue json_parse_fast(JSContext *ctx, JSValueConst str)
 
     memset(s, 0, sizeof(*s));
     s->ctx = ctx;
+    s->shapes = ctx->json_shapes;
     s->len = p->len;
     s->wide = p->is_wide_char;
     if (s->wide)
@@ -48787,10 +48815,6 @@ static JSValue json_parse_fast(JSContext *ctx, JSValueConst str)
         JS_FreeAtom(ctx, s->atoms[i]);
     js_free(ctx, s->vals);
     js_free(ctx, s->atoms);
-    for (i = 0; i < JSON_FAST_SHAPES; i++) {
-        if (s->shapes[i])
-            js_free_shape(ctx->rt, s->shapes[i]);
-    }
     if (ret == JSON_FAST_EXCEPTION)
         return JS_EXCEPTION;
     if (ret == JSON_FAST_GIVE_UP)
@@ -48848,6 +48872,8 @@ typedef struct JSONStringifyContext {
        kept alive by the frame serializing it) */
     JSObject **stack;
     uint32_t stack_len, stack_size;
+    /* dasher: the last shape js_json_shape_ok() accepted, held */
+    JSShape *ok_shape;
     JSValue property_list;
     JSValue gap;
     JSValue empty;
@@ -49038,26 +49064,39 @@ exception:
    is hashed (so it does not change while we hold it), with no key that
    sorts first as an array index, and only plain data properties among
    the enumerable string keys */
-static bool js_json_shape_ok(JSContext *ctx, JSObject *p)
+/* whether a shape property is an enumerable string key (a shape with
+   has_small_array_index false has no tagged integer atoms) */
+static inline bool js_json_shape_key(JSContext *ctx, JSShapeProperty *prs)
+{
+    JSAtom atom = prs->atom;
+    return atom != JS_ATOM_NULL && (prs->flags & JS_PROP_ENUMERABLE) &&
+        ctx->rt->atom_array[atom]->atom_type == JS_ATOM_TYPE_STRING;
+}
+
+static bool js_json_shape_ok(JSContext *ctx, JSONStringifyContext *jsc,
+                             JSObject *p)
 {
     JSShape *sh = p->shape;
     JSShapeProperty *prs;
     uint32_t i, n;
-    JSAtom atom;
 
     if (p->class_id != JS_CLASS_OBJECT || p->is_exotic || !sh->is_hashed ||
         sh->has_small_array_index)
         return false;
+    /* the last shape found to qualify (hashed shapes do not change) */
+    if (sh == jsc->ok_shape)
+        return true;
     for (i = 0, prs = get_shape_prop(sh); i < sh->prop_count; i++, prs++) {
-        atom = prs->atom;
-        if (atom == JS_ATOM_NULL || !(prs->flags & JS_PROP_ENUMERABLE) ||
-            JS_AtomGetKind(ctx, atom) != JS_ATOM_KIND_STRING)
+        if (!js_json_shape_key(ctx, prs))
             continue;
         if ((prs->flags & JS_PROP_TMASK) != JS_PROP_NORMAL)
             return false;
-        if (JS_AtomIsArrayIndex(ctx, &n, atom))
+        if (JS_AtomIsArrayIndex(ctx, &n, prs->atom))
             return false;
     }
+    if (jsc->ok_shape)
+        js_free_shape(ctx->rt, jsc->ok_shape);
+    jsc->ok_shape = js_dup_shape(sh);
     return true;
 }
 
@@ -49173,7 +49212,7 @@ static int js_json_to_str(JSContext *ctx, JSONStringifyContext *jsc,
             }
             string_buffer_putc8(jsc->b, ']');
         } else if (JS_IsUndefined(jsc->property_list) &&
-                   js_json_shape_ok(ctx, p)) {
+                   js_json_shape_ok(ctx, jsc, p)) {
             /* dasher: keys and values straight from the shape. Holding the
                shape keeps it as it is: if the object changes while its
                members are serialized (a toJSON or getter further down), it
@@ -49189,8 +49228,7 @@ static int js_json_to_str(JSContext *ctx, JSONStringifyContext *jsc,
             for (j = 0; j < sh->prop_count; j++) {
                 prs = &get_shape_prop(sh)[j];
                 atom = prs->atom;
-                if (atom == JS_ATOM_NULL || !(prs->flags & JS_PROP_ENUMERABLE) ||
-                    JS_AtomGetKind(ctx, atom) != JS_ATOM_KIND_STRING)
+                if (!js_json_shape_key(ctx, prs))
                     continue;
                 if (p->shape == sh)
                     v = js_dup(p->prop[j].u.value);
@@ -49350,6 +49388,7 @@ JSValue JS_JSONStringify(JSContext *ctx, JSValueConst obj,
     jsc->stack = NULL;
     jsc->stack_len = 0;
     jsc->stack_size = 0;
+    jsc->ok_shape = NULL;
     jsc->property_list = JS_UNDEFINED;
     jsc->gap = JS_UNDEFINED;
     jsc->b = &b_s;
@@ -49357,7 +49396,8 @@ JSValue JS_JSONStringify(JSContext *ctx, JSValueConst obj,
     ret = JS_UNDEFINED;
     wrapper = JS_UNDEFINED;
 
-    string_buffer_init(ctx, jsc->b, 0);
+    /* dasher: room for a small result before the first resize */
+    string_buffer_init(ctx, jsc->b, 64);
     if (JS_IsFunction(ctx, replacer)) {
         jsc->replacer_func = replacer;
     } else {
@@ -49473,6 +49513,8 @@ done:
     JS_FreeValue(ctx, jsc->gap);
     JS_FreeValue(ctx, jsc->property_list);
     js_free(ctx, jsc->stack);
+    if (jsc->ok_shape)
+        js_free_shape(ctx->rt, jsc->ok_shape);
     return ret;
 }
 
