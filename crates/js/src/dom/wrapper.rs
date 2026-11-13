@@ -44,10 +44,13 @@ pub(crate) enum Extra {
     ComputedStyle,
     ClassList,
     Dataset,
+    ChildNodes,
+    Children,
+    Attributes,
 }
 
 impl Extra {
-    const COUNT: usize = 4;
+    const COUNT: usize = 7;
 }
 
 impl<'js> NodeWrapper<'js> {

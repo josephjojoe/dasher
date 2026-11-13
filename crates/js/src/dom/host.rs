@@ -930,10 +930,10 @@ static STRING_MAP_EXOTIC: qjs::JSClassExoticMethods = qjs::JSClassExoticMethods 
 };
 
 /// Array index atoms are tagged integers (QuickJS's `JS_ATOM_TAG_INT`).
-const ATOM_TAG_INT: qjs::JSAtom = 1 << 31;
+pub(super) const ATOM_TAG_INT: qjs::JSAtom = 1 << 31;
 
 /// A property key, as the exotic methods see it.
-enum Key {
+pub(super) enum Key {
     Index(u32),
     Str(JsStr),
     Symbol,
@@ -944,7 +944,7 @@ enum Key {
 /// # Safety
 ///
 /// `ctx` must be live and `atom` one of its atoms.
-unsafe fn key_of(ctx: *mut qjs::JSContext, atom: qjs::JSAtom) -> std::result::Result<Key, ()> {
+pub(super) unsafe fn key_of(ctx: *mut qjs::JSContext, atom: qjs::JSAtom) -> std::result::Result<Key, ()> {
     if atom & ATOM_TAG_INT != 0 {
         return Ok(Key::Index(atom & !ATOM_TAG_INT));
     }
@@ -995,7 +995,7 @@ unsafe fn host_in<'a>(
 /// # Safety
 ///
 /// `desc` must be null or writable; `value` is a reference of our own.
-unsafe fn fill(
+pub(super) unsafe fn fill(
     ctx: *mut qjs::JSContext,
     desc: *mut qjs::JSPropertyDescriptor,
     value: qjs::JSValue,
@@ -1024,7 +1024,7 @@ unsafe fn fill(
 /// # Safety
 ///
 /// `ctx` must be live and `obj` alive. May run JS (a `Proxy` prototype).
-unsafe fn proto_has(ctx: *mut qjs::JSContext, obj: qjs::JSValue, atom: qjs::JSAtom) -> c_int {
+pub(super) unsafe fn proto_has(ctx: *mut qjs::JSContext, obj: qjs::JSValue, atom: qjs::JSAtom) -> c_int {
     // SAFETY: as for the function.
     unsafe {
         let proto = qjs::JS_GetPrototype(ctx, obj);
@@ -1042,7 +1042,7 @@ unsafe fn proto_has(ctx: *mut qjs::JSContext, obj: qjs::JSValue, atom: qjs::JSAt
 /// # Safety
 ///
 /// As for an exotic `define_own_property`.
-unsafe fn define_plain(
+pub(super) unsafe fn define_plain(
     ctx: *mut qjs::JSContext,
     obj: qjs::JSValue,
     atom: qjs::JSAtom,
@@ -1114,7 +1114,7 @@ unsafe fn property_list(
     0
 }
 
-unsafe extern "C" fn delete_nothing(
+pub(super) unsafe extern "C" fn delete_nothing(
     _ctx: *mut qjs::JSContext,
     _obj: qjs::JSValue,
     _atom: qjs::JSAtom,

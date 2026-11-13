@@ -23,7 +23,6 @@
   const ArrayIsArray = Array.isArray;
   const ReflectApply = Reflect.apply;
   const queueTask = internals.queueTask;
-  const unproxy = N.unproxy;
 
   function tag(ctor, name) {
     defineProperty(ctor.prototype, Symbol.toStringTag, { value: name, configurable: true });
@@ -74,20 +73,11 @@
   const state = State.of;
 
   // ---------------------------------------------------------------------
-  // Collections. Live ones are Rust objects behind a Proxy that answers
-  // indexed (and, for HTMLCollection, named) properties; methods reach the
-  // Rust object through native.dom.unproxy. Static NodeLists are arrays
-  // with NodeList.prototype.
-
-  function arrayIndex(key) {
-    if (typeof key !== 'string') return -1;
-    const n = +key;
-    return n >>> 0 === n && n !== 4294967295 && String(n) === key ? n : -1;
-  }
-
-  function listLength(list) {
-    return ArrayIsArray(list) ? list.length : N.collLength(list);
-  }
+  // Collections. Live ones are native objects (dom/lists.rs) that answer
+  // indexed (and, for HTMLCollection, named) properties themselves; their
+  // `length`, `item` and `namedItem` are native members. Static NodeLists
+  // are arrays with NodeList.prototype. As in browsers, the iteration
+  // members are Array.prototype's, which work on both.
 
   function listItem(list, i) {
     if (ArrayIsArray(list)) {
@@ -97,62 +87,14 @@
     return N.collItem(list, i);
   }
 
-  function makeHandler(named) {
-    return {
-      get(target, key, receiver) {
-        const i = arrayIndex(key);
-        if (i >= 0) {
-          const v = N.collItem(target, i);
-          return v === null ? undefined : v;
-        }
-        if (named && typeof key === 'string' && !(key in target)) {
-          const v = N.collNamed(target, key);
-          return v === null ? undefined : v;
-        }
-        return Reflect.get(target, key, receiver);
-      },
-      has(target, key) {
-        const i = arrayIndex(key);
-        if (i >= 0) return i < N.collLength(target);
-        if (named && typeof key === 'string' && !(key in target)) return N.collNamed(target, key) !== null;
-        return Reflect.has(target, key);
-      },
-      set(target, key, value, receiver) {
-        if (arrayIndex(key) >= 0) return true;
-        return Reflect.set(target, key, value, receiver);
-      },
-      ownKeys(target) {
-        const keys = [];
-        const n = N.collLength(target);
-        for (let i = 0; i < n; i++) keys.push(String(i));
-        if (named) for (const name of N.collNames(target)) if (!keys.includes(name)) keys.push(name);
-        return keys.concat(Reflect.ownKeys(target));
-      },
-      getOwnPropertyDescriptor(target, key) {
-        const i = arrayIndex(key);
-        if (i >= 0) {
-          const v = N.collItem(target, i);
-          return v === null ? undefined : { value: v, writable: false, enumerable: true, configurable: true };
-        }
-        if (named && typeof key === 'string' && !Reflect.has(target, key)) {
-          const v = N.collNamed(target, key);
-          if (v !== null) return { value: v, writable: false, enumerable: false, configurable: true };
-        }
-        return Reflect.getOwnPropertyDescriptor(target, key);
-      },
-    };
-  }
-  const nodeListHandler = makeHandler(false);
-  const htmlCollectionHandler = makeHandler(true);
-
   const KIND = { childNodes: 0, children: 1, tag: 2, tagNS: 3, className: 4, name: 5, selector: 6 };
 
   function nodeList(root, kind, a, b) {
-    return new Proxy(N.collection(root, kind, a, b, NodeList.prototype), nodeListHandler);
+    return N.collection(root, kind, a, b, NodeList.prototype, false);
   }
 
   function htmlCollection(root, kind, a, b, proto = HTMLCollection.prototype) {
-    return new Proxy(N.collection(root, kind, a, b, proto), htmlCollectionHandler);
+    return N.collection(root, kind, a, b, proto, true);
   }
 
   // A collection cached on the node, so repeated reads return the same one.
@@ -170,8 +112,13 @@
     return setPrototypeOf(array, NodeList.prototype);
   }
 
-  function* iterate(list) {
-    for (let i = 0; i < listLength(list); i++) yield listItem(list, i);
+  // Array.prototype's iteration members, in place of the stand-ins below.
+  function arrayIteration(Ctor, keys) {
+    for (const key of keys) {
+      const desc = Object.getOwnPropertyDescriptor(Ctor.prototype, key);
+      desc.value = Array.prototype[key === Symbol.iterator ? 'values' : key];
+      defineProperty(Ctor.prototype, key, desc);
+    }
   }
 
   class NodeList {
@@ -179,28 +126,18 @@
       illegal(key);
     }
     get length() {
-      return N.collLength(this);
+      return nativeMember();
     }
     item(index) {
       return listItem(this, index >>> 0);
     }
-    forEach(callback, thisArg) {
-      for (let i = 0; i < listLength(this); i++) ReflectApply(callback, thisArg, [listItem(this, i), i, this]);
-    }
-    *entries() {
-      let i = 0;
-      for (const v of iterate(this)) yield [i++, v];
-    }
-    *keys() {
-      for (let i = 0; i < listLength(this); i++) yield i;
-    }
-    values() {
-      return iterate(this);
-    }
-    [Symbol.iterator]() {
-      return iterate(this);
-    }
+    forEach() {}
+    entries() {}
+    keys() {}
+    values() {}
+    [Symbol.iterator]() {}
   }
+  arrayIteration(NodeList, ['forEach', 'entries', 'keys', 'values', Symbol.iterator]);
   tag(NodeList, 'NodeList');
 
   class HTMLCollection {
@@ -208,18 +145,17 @@
       illegal(key);
     }
     get length() {
-      return N.collLength(this);
+      return nativeMember();
     }
     item(index) {
-      return N.collItem(this, index >>> 0);
+      return nativeMember(index);
     }
     namedItem(name) {
-      return N.collNamed(this, str(name));
+      return nativeMember(name);
     }
-    [Symbol.iterator]() {
-      return iterate(this);
-    }
+    [Symbol.iterator]() {}
   }
+  arrayIteration(HTMLCollection, [Symbol.iterator]);
   tag(HTMLCollection, 'HTMLCollection');
 
   class HTMLFormControlsCollection extends HTMLCollection {}
@@ -343,7 +279,7 @@
       return nativeMember();
     }
     get childNodes() {
-      return cached(this, 'childNodes', () => nodeList(this, KIND.childNodes, null, null));
+      return nativeMember();
     }
     get firstChild() {
       return nativeMember();
@@ -466,7 +402,7 @@
   // ParentNode. https://dom.spec.whatwg.org/#interface-parentnode
   const ParentNode = {
     get children() {
-      return cached(this, 'children', () => htmlCollection(this, KIND.children, null, null));
+      return nativeMember();
     },
     get firstElementChild() {
       return nativeMember();
@@ -977,61 +913,16 @@
     return null;
   }
 
-  const namedNodeMapHandler = {
-    get(target, key, receiver) {
-      const i = arrayIndex(key);
-      const el = mapOwner(target);
-      if (i >= 0) {
-        const a = attrAt(el, i);
-        return a === null ? undefined : a;
-      }
-      if (typeof key === 'string' && !(key in target)) {
-        const a = attrNamed(el, key);
-        return a === null ? undefined : a;
-      }
-      return Reflect.get(target, key, receiver);
-    },
-    has(target, key) {
-      const i = arrayIndex(key);
-      if (i >= 0) return i < N.attrCount(mapOwner(target));
-      return Reflect.has(target, key);
-    },
-    ownKeys(target) {
-      const keys = [];
-      const n = N.attrCount(mapOwner(target));
-      for (let i = 0; i < n; i++) keys.push(String(i));
-      return keys.concat(Reflect.ownKeys(target));
-    },
-    getOwnPropertyDescriptor(target, key) {
-      const i = arrayIndex(key);
-      if (i >= 0) {
-        const a = attrAt(mapOwner(target), i);
-        return a === null ? undefined : { value: a, writable: false, enumerable: true, configurable: true };
-      }
-      return Reflect.getOwnPropertyDescriptor(target, key);
-    },
-  };
-
-  class MapState extends Stamp {
-    #el;
-    constructor(o, el) {
-      super(o);
-      this.#el = el;
-    }
-    static owner(o) {
-      o = unproxy(o);
-      if (!(#el in o)) throw new TypeError('Illegal invocation');
-      return o.#el;
-    }
-  }
-  const mapOwner = MapState.owner;
+  // `el.attributes` is a native object (dom/lists.rs), whose indexed and
+  // named properties come from attrAt and attrNamed.
+  const mapOwner = N.mapOwner;
 
   class NamedNodeMap {
     constructor(key) {
       illegal(key);
     }
     get length() {
-      return N.attrCount(mapOwner(this));
+      return nativeMember();
     }
     item(index) {
       return attrAt(mapOwner(this), index >>> 0);
@@ -1069,11 +960,6 @@
   }
   tag(NamedNodeMap, 'NamedNodeMap');
 
-  function namedNodeMap(el) {
-    const target = Object.create(NamedNodeMap.prototype);
-    new MapState(target, el);
-    return new Proxy(target, namedNodeMapHandler);
-  }
 
   // ---------------------------------------------------------------------
   // DOMTokenList (classList, relList), CSSStyleDeclaration (el.style,
@@ -1448,7 +1334,7 @@
       return cached(this, 'part', () => tokenList(this, 'part'));
     }
     get attributes() {
-      return cached(this, 'attributes', () => namedNodeMap(this));
+      return nativeMember();
     }
     hasAttributes() {
       return N.attrCount(this) > 0;
@@ -4187,6 +4073,8 @@
       DocumentFragment: DocumentFragment.prototype,
       DocumentType: DocumentType.prototype,
       NodeList: NodeList.prototype,
+      HTMLCollection: HTMLCollection.prototype,
+      NamedNodeMap: NamedNodeMap.prototype,
       HTMLElement: HTMLElement.prototype,
       SVGElement: SVGElement.prototype,
       MathMLElement: MathMLElement.prototype,
@@ -4202,6 +4090,8 @@
     hooks: {
       connected: (scripts) => connected(scripts),
       baseURL: () => internals.baseURL(),
+      attrAt,
+      attrNamed,
     },
     reflected,
   }, (name, message) => domException(name, message));

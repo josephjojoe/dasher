@@ -17,6 +17,7 @@ use rquickjs::{Array, Ctx, Function, Object, Result, Value, qjs};
 
 use super::DomState;
 use super::attrs::Reflected;
+use super::lists::{AttrKey, Lists, Proto};
 use super::members::new_string;
 use super::wrapper::wrap;
 
@@ -30,6 +31,17 @@ pub(crate) struct Hooks {
     /// The glue's `internals.baseURL()`.
     base_url: qjs::JSValue,
     node_list_proto: qjs::JSValue,
+    collection_proto: qjs::JSValue,
+    attributes_proto: qjs::JSValue,
+    /// The glue's `attrAt(el, i)` and `attrNamed(el, name)`, which make
+    /// the `Attr` objects of a `NamedNodeMap`.
+    attr_at: qjs::JSValue,
+    attr_named: qjs::JSValue,
+    /// The list classes (see the `lists` module).
+    lists: Lists,
+    /// `length`, `item` and `namedItem`: keys a list's exotic lookup can
+    /// skip, since its prototype has them.
+    list_members: [qjs::JSAtom; 3],
     reflected: RefCell<Vec<Rc<Reflected>>>,
     /// The base URL last resolved against, parsed.
     base: RefCell<Option<(String, Option<url::Url>)>>,
@@ -53,6 +65,15 @@ impl Hooks {
         let connected: Function<'js> = hooks.get("connected")?;
         let base_url: Function<'js> = hooks.get("baseURL")?;
         let node_list: Object<'js> = interfaces.get("NodeList")?;
+        let collection: Object<'js> = interfaces.get("HTMLCollection")?;
+        let attributes: Object<'js> = interfaces.get("NamedNodeMap")?;
+        let attr_at: Function<'js> = hooks.get("attrAt")?;
+        let attr_named: Function<'js> = hooks.get("attrNamed")?;
+        let raw = ctx.as_raw().as_ptr();
+        let atom = |name: &str| {
+            // SAFETY: `ctx` is live; the atom's reference is ours.
+            unsafe { qjs::JS_NewAtomLen(raw, name.as_ptr().cast(), name.len() as qjs::size_t) }
+        };
         Ok(Hooks {
             // SAFETY: `ctx` is live.
             rt: unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) },
@@ -63,6 +84,12 @@ impl Hooks {
             connected: keep(ctx, &connected.into_value()),
             base_url: keep(ctx, &base_url.into_value()),
             node_list_proto: keep(ctx, &node_list.into_value()),
+            collection_proto: keep(ctx, &collection.into_value()),
+            attributes_proto: keep(ctx, &attributes.into_value()),
+            attr_at: keep(ctx, &attr_at.into_value()),
+            attr_named: keep(ctx, &attr_named.into_value()),
+            lists: Lists::register(ctx)?,
+            list_members: [atom("length"), atom("item"), atom("namedItem")],
             reflected: RefCell::default(),
             base: RefCell::default(),
         })
@@ -122,6 +149,56 @@ impl Hooks {
         unsafe { qjs::JS_SetPrototype(ctx, array, self.node_list_proto) >= 0 }
     }
 
+    pub(crate) fn lists(&self) -> &Lists {
+        &self.lists
+    }
+
+    pub(crate) fn proto(&self, proto: Proto) -> qjs::JSValue {
+        match proto {
+            Proto::NodeList => self.node_list_proto,
+            Proto::HtmlCollection => self.collection_proto,
+            Proto::NamedNodeMap => self.attributes_proto,
+        }
+    }
+
+    /// Whether `atom` is a member every list's prototype has.
+    pub(crate) fn is_list_member(&self, atom: qjs::JSAtom) -> bool {
+        self.list_members.contains(&atom)
+    }
+
+    /// The `Attr` the glue makes for `key` of `owner`'s attributes, or
+    /// `null`, as a new reference (or `JS_EXCEPTION`). Runs JS.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must be live and `owner` alive.
+    pub(crate) unsafe fn attr(
+        &self,
+        ctx: *mut qjs::JSContext,
+        owner: qjs::JSValue,
+        key: AttrKey,
+    ) -> qjs::JSValue {
+        let (f, arg) = match key {
+            AttrKey::Index(i) => (
+                self.attr_at,
+                qjs::JS_MKVAL(qjs::JS_TAG_INT, i32::try_from(i).unwrap_or(i32::MAX)),
+            ),
+            // SAFETY: as for the function.
+            AttrKey::Name(atom) => (self.attr_named, unsafe { qjs::JS_AtomToString(ctx, atom) }),
+        };
+        // SAFETY: a tag check.
+        if unsafe { qjs::JS_IsException(arg) } {
+            return arg;
+        }
+        let mut args = [owner, arg];
+        // SAFETY: the hooks are live functions of ours; the call takes
+        // references of its own.
+        let v = unsafe { qjs::JS_Call(ctx, f, qjs::JS_UNDEFINED, 2, args.as_mut_ptr()) };
+        // SAFETY: `arg` is ours (an int needs no freeing).
+        unsafe { qjs::JS_FreeValue(ctx, args[1]) };
+        v
+    }
+
     /// Adds a reflected attribute, returning its index.
     pub(crate) fn add_reflected(&self, reflected: Reflected) -> usize {
         let mut table = self.reflected.borrow_mut();
@@ -172,11 +249,19 @@ impl Drop for Hooks {
             self.connected,
             self.base_url,
             self.node_list_proto,
+            self.collection_proto,
+            self.attributes_proto,
+            self.attr_at,
+            self.attr_named,
         ]);
         for v in values {
             // SAFETY: each is a reference of ours (or `undefined`), in this
             // runtime, which outlives `DomData`.
             unsafe { qjs::JS_FreeValueRT(self.rt, v) };
+        }
+        for atom in self.list_members {
+            // SAFETY: as above.
+            unsafe { qjs::JS_FreeAtomRT(self.rt, atom) };
         }
     }
 }

@@ -1,7 +1,8 @@
 //! Live collections: `childNodes`, `children`, `getElementsBy*` and the
 //! document's `forms`, `images`, `links` and the like.
 //!
-//! A collection holds its root's wrapper and caches the matching node ids,
+//! The list objects are in the `lists` module; what they hold is here. A
+//! list holds its root's wrapper and caches the matching node ids,
 //! recomputed when the DOM version changes. Holding the root keeps the
 //! whole tree, and so every cached id, from being released.
 
@@ -10,11 +11,6 @@ use std::rc::Rc;
 
 use dasher_css::SelectorList;
 use dasher_dom::{Document, Name, NodeId};
-use rquickjs::class::{JsClass, Readable, Trace, Tracer};
-use rquickjs::function::Constructor;
-use rquickjs::{Class, Ctx, JsLifetime, Object, Result};
-
-use super::wrapper::Node;
 
 /// Which nodes a collection holds.
 pub(crate) enum Filter {
@@ -66,24 +62,23 @@ impl Filter {
     }
 }
 
-/// The Rust side of a live collection object.
-pub(crate) struct Collection<'js> {
-    pub(crate) root: Node<'js>,
+/// What a live list holds: the nodes its filter picks under its root,
+/// cached and recomputed when the DOM version changes.
+pub(crate) struct Matches {
     filter: Filter,
     /// The DOM version the ids were computed at, and the ids.
     cache: RefCell<Option<(u32, Rc<[NodeId]>)>>,
 }
 
-impl<'js> Collection<'js> {
-    pub(crate) fn new(root: Node<'js>, filter: Filter) -> Self {
+impl Matches {
+    pub(crate) fn new(filter: Filter) -> Self {
         Self {
-            root,
             filter,
             cache: RefCell::new(None),
         }
     }
 
-    /// The matching nodes as of `version`.
+    /// The matching nodes under `root` as of `version`.
     pub(crate) fn ids(&self, doc: &Document, root: NodeId, version: u32) -> Rc<[NodeId]> {
         if let Some((v, ids)) = &*self.cache.borrow() {
             if *v == version {
@@ -95,30 +90,3 @@ impl<'js> Collection<'js> {
         ids
     }
 }
-
-impl<'js> Trace<'js> for Collection<'js> {
-    fn trace<'a>(&self, tracer: Tracer<'a, 'js>) {
-        self.root.trace(tracer);
-    }
-}
-
-// SAFETY: `Collection` only holds values bound to `'js`, and `Changed` is the
-// same struct with the lifetime substituted.
-unsafe impl<'js> JsLifetime<'js> for Collection<'js> {
-    type Changed<'to> = Collection<'to>;
-}
-
-impl<'js> JsClass<'js> for Collection<'js> {
-    const NAME: &'static str = "Collection";
-    type Mutable = Readable;
-
-    fn prototype(_ctx: &Ctx<'js>) -> Result<Option<Object<'js>>> {
-        Ok(None)
-    }
-
-    fn constructor(_ctx: &Ctx<'js>) -> Result<Option<Constructor<'js>>> {
-        Ok(None)
-    }
-}
-
-pub(crate) type CollectionObject<'js> = Class<'js, Collection<'js>>;

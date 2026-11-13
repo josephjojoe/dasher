@@ -96,13 +96,38 @@
 //! converted from UTF-8 twice. Only a node without a wrapper yet, a
 //! one-off string or an error goes through rquickjs.
 //!
-//! The document stays borrowed (shared) for the whole call, which is right
-//! for reading. The first member that changes the tree (or runs JS: a
-//! `DOMException` is thrown only after the borrow is let go) needs `Call`
-//! to borrow the document lazily instead; members taking strings need a
-//! conversion of `JSValue` arguments like `Call::node_arg` for nodes. The
-//! natives `dom.js` calls internally (`N.nav` and friends) stay, since glue
-//! code must not see page script's overrides of the public members.
+//! A body is one of two kinds. A `Read` body runs with the document
+//! borrowed (shared) for the whole call, its string arguments converted
+//! beforehand (converting an object runs JS). A `Write` body runs with
+//! nothing borrowed: it converts its own arguments and changes the tree
+//! through the mutation natives in `natives` (`set_attr`, `insert`,
+//! `detach`...), which borrow the document and deliver mutation records and
+//! custom element reactions themselves, exactly as when the glue called
+//! them. A `DOMException` is thrown only after the borrow is let go.
+//!
+//! A member made with `Member::or_js` keeps the function `dom.js` defines in
+//! its place as its *fallback*: the stand-in is then the full JS
+//! implementation, not `nativeMember()`. Calls with fewer arguments than
+//! the member requires go straight to it (so the glue's own "1 argument
+//! required" message is thrown), and a body hands it anything it does not
+//! handle by returning `Thrown::Fallback`, before it has done anything
+//! scripts could notice: an argument that is not a node, an event handler
+//! attribute (whose changes the glue tracks), a script or custom element to
+//! create, an extra document. That keeps every rare case exactly as it was
+//! while the common path runs no JS. The fallbacks, and the glue's hooks the
+//! natives call (`connected()` for the scripts an insertion connects, the
+//! base URL), are kept in the `hooks` module.
+//!
+//! Members also live on objects that are not nodes: the style, token list
+//! and dataset objects of the `host` module, and the live lists of the
+//! `lists` module (`childNodes`, `children`, `getElementsBy*`, `attributes`),
+//! which are exotic QuickJS objects answering their indexed and named
+//! properties without a `Proxy`. Their receivers find the node behind them.
+//! The IDL attributes HTML elements reflect (`a.href`, `el.hidden`...) are
+//! made native from the list `reflect()` in `dom.js` builds (see the `attrs`
+//! module). The natives `dom.js` calls internally (`N.nav` and friends)
+//! stay, since glue code must not see page script's overrides of the public
+//! members.
 
 mod attrs;
 mod collection;
@@ -112,6 +137,7 @@ mod hooks;
 mod host;
 mod inner_text;
 mod layout;
+mod lists;
 mod members;
 mod mutation;
 mod natives;

@@ -14,7 +14,8 @@ use rquickjs::function::IntoJsFunc;
 use rquickjs::{Array, Class, Ctx, Function, IntoJs, Object, Result, Value, qjs};
 
 use super::DomState;
-use super::collection::{Collection, CollectionObject, Filter};
+use super::collection::Filter;
+use super::lists;
 use super::inner_text::inner_text;
 use super::layout;
 use super::mutation::deliver;
@@ -788,9 +789,6 @@ fn unproxy<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Value<'js> {
     }
 }
 
-fn collection<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<CollectionObject<'js>> {
-    Class::from_value(&unproxy(ctx, value))
-}
 
 fn selector_error(ctx: &Ctx<'_>, selector: &str) -> rquickjs::Error {
     throw_dom(
@@ -1602,8 +1600,9 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
               kind: u32,
               a: Option<String>,
               b: Option<String>,
-              proto: Object<'js>|
-              -> Result<CollectionObject<'js>> {
+              proto: Object<'js>,
+              named: bool|
+              -> Result<Value<'js>> {
             let filter = match kind {
                 0 => Filter::ChildNodes,
                 1 => Filter::Children,
@@ -1619,7 +1618,7 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
                     Filter::Selector(list)
                 }
             };
-            Class::instance_proto(Collection::new(root, filter), proto)
+            lists::new_collection(&ctx, &root, filter, &proto, named)
         },
     )?;
     let d = Rc::clone(dom);
@@ -1627,10 +1626,8 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "collLength",
         move |ctx: Ctx<'js>, c: Value<'js>| -> Result<usize> {
-            let c = collection(&ctx, c)?;
-            let c = c.borrow();
-            let root = id(&ctx, &c.root)?;
-            Ok(c.ids(&d.doc(), root, d.version()).len())
+            let (list, root) = lists::list_value(&ctx, &c)?;
+            Ok(list.ids(&d, &d.doc(), root).len())
         },
     )?;
     let d = Rc::clone(dom);
@@ -1638,11 +1635,9 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "collItem",
         move |ctx: Ctx<'js>, c: Value<'js>, i: f64| -> Result<Value<'js>> {
-            let c = collection(&ctx, c)?;
             let item = {
-                let c = c.borrow();
-                let root = id(&ctx, &c.root)?;
-                let ids = c.ids(&d.doc(), root, d.version());
+                let (list, root) = lists::list_value(&ctx, &c)?;
+                let ids = list.ids(&d, &d.doc(), root);
                 (i >= 0.0 && i.fract() == 0.0)
                     .then(|| ids.get(i as usize).copied())
                     .flatten()
@@ -1655,47 +1650,29 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "collNamed",
         move |ctx: Ctx<'js>, c: Value<'js>, name: String| -> Result<Value<'js>> {
-            let c = collection(&ctx, c)?;
             let item = {
-                let c = c.borrow();
-                let root = id(&ctx, &c.root)?;
+                let (list, root) = lists::list_value(&ctx, &c)?;
                 let doc = d.doc();
-                let ids = c.ids(&doc, root, d.version());
-                ids.iter().copied().find(|&n| {
-                    !name.is_empty()
-                        && (doc.element_id(n) == Some(name.as_str())
-                            || (doc.namespace(n) == Some(Name::NS_HTML)
-                                && doc.attribute_named(n, Name::NAME) == Some(name.as_str())))
-                })
+                let ids = list.ids(&d, &doc, root);
+                lists::named_item(&doc, &ids, &name)
             };
             wrap_opt(&ctx, &d, item)
         },
     )?;
-    let d = Rc::clone(dom);
-    def(
-        obj,
-        "collNames",
-        move |ctx: Ctx<'js>, c: Value<'js>| -> Result<Vec<String>> {
-            let c = collection(&ctx, c)?;
-            let c = c.borrow();
-            let root = id(&ctx, &c.root)?;
-            let doc = d.doc();
-            let mut names: Vec<String> = Vec::new();
-            for &n in c.ids(&doc, root, d.version()).iter() {
-                let candidates = [
-                    doc.element_id(n),
-                    (doc.namespace(n) == Some(Name::NS_HTML))
-                        .then(|| doc.attribute_named(n, Name::NAME))
-                        .flatten(),
-                ];
-                for name in candidates.into_iter().flatten() {
-                    if !name.is_empty() && !names.iter().any(|x| x == name) {
-                        names.push(name.to_owned());
-                    }
-                }
-            }
-            Ok(names)
-        },
-    )?;
+    // The element whose attributes a `NamedNodeMap` is.
+    def(obj, "mapOwner", |ctx: Ctx<'js>, map: Value<'js>| -> Result<Value<'js>> {
+        let (list, _) = lists::list_value(&ctx, &map)?;
+        if !list.is_attributes() {
+            return Err(rquickjs::Exception::throw_type(&ctx, "Illegal invocation"));
+        }
+        // SAFETY: `list` lives in `map`, which is alive; the `Value` takes a
+        // new reference to its owner.
+        Ok(unsafe {
+            Value::from_raw(
+                ctx.clone(),
+                qjs::JS_DupValue(ctx.as_raw().as_ptr(), list.owner()),
+            )
+        })
+    })?;
     Ok(())
 }

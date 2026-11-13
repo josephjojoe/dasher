@@ -22,6 +22,7 @@ use super::DomState;
 use super::attrs::{self, Reflected};
 use super::{edits, queries};
 use super::hooks::Hooks;
+use super::lists::{self, ListClass};
 use super::host::{self, Host, HostClass, Hosts};
 use super::layout;
 use super::natives::{stale_node_error, throw_dom};
@@ -40,6 +41,9 @@ pub(super) enum Receiver {
     Style,
     /// A `DOMTokenList`.
     Tokens,
+    /// A live list of the `lists` module. The call's `node` is the list
+    /// object itself (its root's node is what the call sees as the node).
+    List(ListClass),
     /// No `this` (a function such as `getComputedStyle`): the node is the
     /// first argument, which must be an element, or the call throws a
     /// `TypeError` with this message.
@@ -53,6 +57,7 @@ impl Receiver {
             Receiver::Element | Receiver::Style | Receiver::Tokens | Receiver::ElementArg(_) => {
                 doc.is_element(id)
             }
+            Receiver::List(_) => true,
             Receiver::CharacterData => doc.text(id).is_some(),
         }
     }
@@ -244,6 +249,9 @@ const HTML_ELEMENT: &[&str] = &["HTMLElement"];
 /// The `ChildNode` mixin's interfaces.
 const ANY_CHILD_NODE: &[&str] = &["Element", "CharacterData", "DocumentType"];
 const DOCUMENT: &[&str] = &["Document"];
+const NODE_LIST: Receiver = Receiver::List(ListClass::NodeList);
+const COLLECTION: Receiver = Receiver::List(ListClass::HtmlCollection);
+const ATTRIBUTES: Receiver = Receiver::List(ListClass::NamedNodeMap);
 /// The interfaces with `getElementById`.
 const BY_ID: &[&str] = &["Document", "DocumentFragment"];
 /// The `ElementCSSInlineStyle` and `HTMLOrSVGElement` mixins' interfaces.
@@ -402,6 +410,15 @@ static MEMBERS: &[Member] = &[
     reader("matches", 1, Receiver::Element, ELEMENT, STR, queries::matches).or_js(1),
     reader("webkitMatchesSelector", 1, Receiver::Element, ELEMENT, STR, queries::matches),
     reader("closest", 1, Receiver::Element, ELEMENT, STR, queries::closest).or_js(1),
+    // Live lists (see the `lists` module).
+    getter("childNodes", Receiver::Node, NODE, lists::child_nodes),
+    getter("children", Receiver::Node, PARENT_NODE, lists::children),
+    getter("attributes", Receiver::Element, ELEMENT, lists::attributes),
+    getter("length", NODE_LIST, &["NodeList"], lists::node_list_length),
+    getter("length", COLLECTION, &["HTMLCollection"], lists::collection_length),
+    reader("item", 1, COLLECTION, &["HTMLCollection"], INDEX, lists::collection_item),
+    reader("namedItem", 1, COLLECTION, &["HTMLCollection"], STR, lists::named_item_member),
+    getter("length", ATTRIBUTES, &["NamedNodeMap"], lists::attributes_length),
 ];
 
 // -------------------------------------------------------------------------
@@ -1090,6 +1107,14 @@ unsafe extern "C" fn call_member(
                 None => return unsafe { throw_type(ctx, message) },
             }
         }
+        Receiver::List(class) => {
+            // SAFETY: `this` is alive for the call.
+            let Some(list) = (unsafe { members.lists().get(this, class) }) else {
+                // SAFETY: as above.
+                return unsafe { Thrown::Illegal.throw(ctx) };
+            };
+            (list.wrapper(), this)
+        }
         receiver => match receiver.host_class() {
             Some(class) => {
                 // SAFETY: `this` is alive for the call.
@@ -1305,6 +1330,33 @@ impl Members {
     /// `value` resolved against the base URL, as a new JS string. Runs JS.
     pub(super) fn resolve_url(&self, ctx: *mut qjs::JSContext, value: &str) -> qjs::JSValue {
         self.hooks.resolve_url(ctx, value)
+    }
+
+    pub(super) fn lists(&self) -> &lists::Lists {
+        self.hooks.lists()
+    }
+
+    pub(super) fn proto(&self, proto: lists::Proto) -> qjs::JSValue {
+        self.hooks.proto(proto)
+    }
+
+    pub(super) fn is_list_member(&self, atom: qjs::JSAtom) -> bool {
+        self.hooks.is_list_member(atom)
+    }
+
+    /// The glue's `Attr` for `key` of `owner`'s attributes, or `null`.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must be live and `owner` alive.
+    pub(super) unsafe fn attr(
+        &self,
+        ctx: *mut qjs::JSContext,
+        owner: qjs::JSValue,
+        key: lists::AttrKey,
+    ) -> qjs::JSValue {
+        // SAFETY: as for the function.
+        unsafe { self.hooks.attr(ctx, owner, key) }
     }
 
     /// The node wrapper `value` is, if it is one.
