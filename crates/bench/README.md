@@ -478,6 +478,48 @@ through four prototypes (an own data property is 40 ns), and 27 ns for
 QuickJS calling a C function as a getter. The members' own work is the
 rest, 0 to 20 ns.
 
+### DOM indexes and selector plans
+
+The id index in dasher-dom and the query plans in dasher-css (see their
+crate docs) changed these rows. Same machine and build settings as the
+baseline, `main` at `cfa9030` against the change, run back to back, median
+of 5 runs, on a machine under load from other builds:
+
+| benchmark | before ns/op | after ns/op | |
+| --- | ---: | ---: | ---: |
+| getElementById | 69,110 | 556 | 124× |
+| querySelectorAll(#id) | 118,503 | 1,170 | 101× |
+| querySelectorAll(.class) | 174,353 | 146,582 | 1.19× |
+| querySelectorAll(tag) | 272,475 | 233,384 | 1.17× |
+| matches(tag) | 672 | 625 | 1.08× |
+| querySelector(tag) | 728 | 683 | 1.07× |
+
+The other DOM rows did not change beyond noise; `setAttribute` and
+`append+removeChild` pay nothing for keeping the index. Most of what is
+left of these calls is the JS bindings: in Rust, without them,
+`getElementById` takes 54 ns and `querySelector("#id")` 86 ns, against
+57 µs and 108 µs before, and `matches("div")` 14 ns.
+[`../css/examples/query_timing.rs`](../css/examples/query_timing.rs) times
+queries at that level, on the same page:
+
+```sh
+cargo run --release -p dasher-css --example query_timing
+```
+
+It prints the best of 25 rounds per query, which stays steady on a busy
+machine where the median does not. Selectors with an `#id` further left
+(`main #c250 a`, `#target span`) went from 60 to 250 µs to 0.1 to 0.5 µs;
+single-compound selectors (`.text`, `li`, `[data-x='3']`) became 1.3 to
+1.5× faster; descendant and child selectors without an id (`div.a > p`,
+`section.card h2`) stayed where they were.
+
+The index costs 11.8 bytes per element with an id (`tests/memory.rs` in
+dasher-dom), 1.7 bytes per node on its listing page where every ninth
+node has an id. Peak RSS of the four fixture pages did not move beyond
+run-to-run noise (±0.5 MiB). There is no class or tag index and no
+ancestor filter: a tree walk costs about 10 ns per element, and an index
+would cost every page memory for the few that query that way.
+
 ## Per-page limits
 
 Each page has two hard limits. Going over either one stops the page and

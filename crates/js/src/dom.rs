@@ -128,8 +128,48 @@ use crate::runtime::{JsRuntime, Shared};
 
 pub(crate) use wrapper::{Node, wrap};
 
-/// How many parsed selectors are kept for reuse.
-const SELECTOR_CACHE_SIZE: usize = 64;
+/// How many parsed selectors each generation of the selector cache holds.
+/// See [`SelectorCache`].
+const SELECTOR_CACHE_SIZE: usize = 128;
+
+/// Parsed selectors by text, so a page that runs the same query over and
+/// over parses it once.
+///
+/// Two generations make it roughly least-recently-used without the
+/// bookkeeping: new entries go into `current`; when it is full it becomes
+/// `previous` (dropping the old `previous`), and a hit in `previous` moves
+/// the entry back to `current`. A burst of one-off selectors (such as
+/// `'#' + id` for every element) therefore cannot flush the few a page
+/// uses all the time. At most `2 * SELECTOR_CACHE_SIZE` lists are kept,
+/// a few tens of KiB.
+#[derive(Default)]
+struct SelectorCache {
+    current: HashMap<String, Rc<SelectorList>>,
+    previous: HashMap<String, Rc<SelectorList>>,
+}
+
+impl SelectorCache {
+    fn get(&mut self, text: &str) -> Option<Rc<SelectorList>> {
+        if let Some(list) = self.current.get(text) {
+            return Some(Rc::clone(list));
+        }
+        let (text, list) = self.previous.remove_entry(text)?;
+        self.insert(text, Rc::clone(&list));
+        Some(list)
+    }
+
+    fn insert(&mut self, text: String, list: Rc<SelectorList>) {
+        if self.current.len() >= SELECTOR_CACHE_SIZE {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        self.current.insert(text, list);
+    }
+
+    fn clear(&mut self) {
+        self.current.clear();
+        self.previous.clear();
+    }
+}
 
 /// How busy scripts have been changing the document, for judging when a
 /// page has settled. Read it with [`JsRuntime::dom_activity`].
@@ -160,7 +200,7 @@ pub(crate) struct DomState {
     candidates: RefCell<Vec<NodeId>>,
     /// Bumped by every change to the tree or to attributes.
     version: Cell<u32>,
-    selectors: RefCell<HashMap<String, Rc<SelectorList>>>,
+    selectors: RefCell<SelectorCache>,
     /// Nodes with registered mutation observers. Each has a wrapper, whose
     /// finalizer removes it.
     observed: RefCell<HashSet<NodeId>>,
@@ -296,15 +336,13 @@ impl DomState {
         &self,
         text: &str,
     ) -> Result<Rc<SelectorList>, dasher_css::SelectorError> {
-        if let Some(list) = self.selectors.borrow().get(text) {
-            return Ok(Rc::clone(list));
+        if let Some(list) = self.selectors.borrow_mut().get(text) {
+            return Ok(list);
         }
         let list = Rc::new(SelectorList::parse(text)?);
-        let mut cache = self.selectors.borrow_mut();
-        if cache.len() >= SELECTOR_CACHE_SIZE {
-            cache.clear();
-        }
-        cache.insert(text.to_owned(), Rc::clone(&list));
+        self.selectors
+            .borrow_mut()
+            .insert(text.to_owned(), Rc::clone(&list));
         Ok(list)
     }
 
