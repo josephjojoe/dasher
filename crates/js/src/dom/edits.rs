@@ -18,13 +18,15 @@
 use dasher_dom::{DomError, Name, NodeId, NodeKind};
 use rquickjs::qjs;
 
+type Result<T, E = Thrown> = std::result::Result<T, E>;
+
 use super::members::{Ret, Thrown, Write};
 use super::natives::{
     self, detach, insert, replace_all, replace_child, set_inner_html, set_text_content,
     valid_element_name,
 };
 
-type Done = std::result::Result<Ret<'static>, Thrown>;
+type Done = Result<Ret<'static>, Thrown>;
 
 impl From<DomError> for Thrown {
     fn from(e: DomError) -> Self {
@@ -33,7 +35,7 @@ impl From<DomError> for Thrown {
 }
 
 /// The node argument `i` is, `None` if it is not a node wrapper.
-fn node_arg(w: &Write<'_>, i: usize) -> std::result::Result<Option<NodeId>, Thrown> {
+fn node_arg(w: &Write<'_>, i: usize) -> Result<Option<NodeId>, Thrown> {
     // SAFETY: the argument is alive for the call.
     let Some(wrapper) = (unsafe { w.members.wrapper(w.ctx, w.arg(i)) }) else {
         return Ok(None);
@@ -43,7 +45,7 @@ fn node_arg(w: &Write<'_>, i: usize) -> std::result::Result<Option<NodeId>, Thro
 
 /// A node argument that must be there, or the JS implementation throws
 /// what it throws.
-fn required_node(w: &Write<'_>, i: usize) -> std::result::Result<NodeId, Thrown> {
+fn required_node(w: &Write<'_>, i: usize) -> Result<NodeId, Thrown> {
     node_arg(w, i)?.ok_or(Thrown::Fallback)
 }
 
@@ -54,7 +56,7 @@ fn returned(w: &Write<'_>, i: usize) -> Ret<'static> {
 }
 
 /// Hands the scripts an insertion connected to the glue.
-fn connected(w: &Write<'_>, scripts: &[NodeId]) -> std::result::Result<(), Thrown> {
+fn connected(w: &Write<'_>, scripts: &[NodeId]) -> Result<(), Thrown> {
     if scripts.is_empty() {
         return Ok(());
     }
@@ -112,13 +114,29 @@ pub(super) fn remove(w: &Write<'_>) -> Done {
 /// (made text nodes). An object that is not a node would be converted to a
 /// string by running JS, and a symbol converts differently in the glue, so
 /// either falls back.
-struct Nodes {
+struct Nodes<'w> {
+    dom: &'w super::DomState,
+    /// While the call holds ids of the unwrapped nodes it made, no tree
+    /// may be freed: a tree is garbage once nothing wraps any of its nodes.
+    hold: Option<super::HoldGarbage<'w>>,
     /// Each argument: a node, or `None` for a primitive.
     args: Vec<Option<NodeId>>,
+    /// The nodes made for the call, queued to be freed (if they end up
+    /// unused) once it is over.
+    made: std::cell::RefCell<Vec<NodeId>>,
 }
 
-impl Nodes {
-    fn of(w: &Write<'_>) -> std::result::Result<Nodes, Thrown> {
+impl Drop for Nodes<'_> {
+    fn drop(&mut self) {
+        self.hold = None;
+        for &n in self.made.get_mut().iter() {
+            self.dom.add_candidate(n);
+        }
+    }
+}
+
+impl<'w> Nodes<'w> {
+    fn of(w: &Write<'w>) -> Result<Nodes<'w>, Thrown> {
         let mut args = Vec::with_capacity(w.args.len());
         for i in 0..w.args.len() {
             let node = node_arg(w, i)?;
@@ -131,7 +149,12 @@ impl Nodes {
             }
             args.push(node);
         }
-        Ok(Nodes { args })
+        Ok(Nodes {
+            dom: w.dom,
+            hold: Some(w.dom.hold_garbage()),
+            args,
+            made: std::cell::RefCell::default(),
+        })
     }
 
     fn contains(&self, n: NodeId) -> bool {
@@ -140,14 +163,13 @@ impl Nodes {
 
     /// The one node the arguments stand for, as the glue's
     /// `convertNodes`: a lone node, a new text node, or a new fragment of
-    /// them all. What is made here is queued to be freed if it ends up
-    /// unused.
-    fn convert(&self, w: &Write<'_>) -> std::result::Result<NodeId, Thrown> {
-        let text = |i: usize| -> std::result::Result<NodeId, Thrown> {
+    /// them all.
+    fn convert(&self, w: &Write<'_>) -> Result<NodeId, Thrown> {
+        let text = |i: usize| -> Result<NodeId, Thrown> {
             // A primitive: converting it runs no JS.
             let s = w.str_arg(i)?;
             let t = w.dom.doc_mut().create_text(&s.as_str());
-            w.dom.add_candidate(t);
+            self.made.borrow_mut().push(t);
             Ok(t)
         };
         if let [one] = self.args[..] {
@@ -157,7 +179,7 @@ impl Nodes {
             };
         }
         let fragment = w.dom.doc_mut().create_fragment();
-        w.dom.add_candidate(fragment);
+        self.made.borrow_mut().push(fragment);
         for (i, &arg) in self.args.iter().enumerate() {
             let n = match arg {
                 Some(n) => n,
@@ -268,7 +290,7 @@ pub(super) fn replace_with(w: &Write<'_>) -> Done {
 fn text_value(
     w: &Write<'_>,
     undefined_empty: bool,
-) -> std::result::Result<super::members::JsStr, Thrown> {
+) -> Result<super::members::JsStr, Thrown> {
     let v = w.arg(0);
     // SAFETY: tag checks of a live value.
     let empty = unsafe { qjs::JS_IsNull(v) || (undefined_empty && qjs::JS_IsUndefined(v)) };

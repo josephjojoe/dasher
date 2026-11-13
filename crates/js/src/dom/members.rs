@@ -19,6 +19,9 @@ use dasher_dom::{Document, Name, NodeId, NodeKind, ShadowRootMode};
 use rquickjs::{Class, Ctx, Exception, Function, Object, Result, Value, qjs};
 
 use super::DomState;
+use super::attrs::{self, Reflected};
+use super::{edits, queries};
+use super::hooks::Hooks;
 use super::host::{self, Host, HostClass, Hosts};
 use super::layout;
 use super::natives::{stale_node_error, throw_dom};
@@ -121,6 +124,26 @@ struct Member {
     /// How `Read` bodies' arguments are converted.
     args: &'static [Arg],
     body: Body,
+    /// With fewer arguments than this, the call goes to the JS fallback.
+    required: u8,
+    /// Whether `dom.js`'s function stays as the member's fallback: the
+    /// body can hand the call to it with [`Thrown::Fallback`] (see
+    /// [`Member::or_js`]).
+    fallback: bool,
+}
+
+impl Member {
+    /// This member, keeping the function `dom.js` defines in its place as
+    /// the fallback for what the body does not handle, and for calls with
+    /// fewer than `required` arguments (which it rejects with the glue's
+    /// own message).
+    const fn or_js(self, required: u8) -> Member {
+        Member {
+            required,
+            fallback: true,
+            ..self
+        }
+    }
 }
 
 const fn getter(
@@ -136,6 +159,8 @@ const fn getter(
         on,
         args: &[],
         body: Body::Read(f),
+        required: 0,
+        fallback: false,
     }
 }
 
@@ -152,6 +177,8 @@ const fn setter(
         on,
         args: &[],
         body: Body::Write(f),
+        required: 0,
+        fallback: false,
     }
 }
 
@@ -181,6 +208,8 @@ const fn reader(
         on,
         args,
         body: Body::Read(f),
+        required: 0,
+        fallback: false,
     }
 }
 
@@ -199,6 +228,8 @@ const fn writer(
         on,
         args: &[],
         body: Body::Write(f),
+        required: 0,
+        fallback: false,
     }
 }
 
@@ -210,6 +241,11 @@ const PARENT_NODE: &[&str] = &["Element", "Document", "DocumentFragment"];
 /// The `NonDocumentTypeChildNode` mixin's interfaces.
 const CHILD_NODE: &[&str] = &["Element", "CharacterData"];
 const HTML_ELEMENT: &[&str] = &["HTMLElement"];
+/// The `ChildNode` mixin's interfaces.
+const ANY_CHILD_NODE: &[&str] = &["Element", "CharacterData", "DocumentType"];
+const DOCUMENT: &[&str] = &["Document"];
+/// The interfaces with `getElementById`.
+const BY_ID: &[&str] = &["Document", "DocumentFragment"];
 /// The `ElementCSSInlineStyle` and `HTMLOrSVGElement` mixins' interfaces.
 const STYLED: &[&str] = &["HTMLElement", "SVGElement", "MathMLElement"];
 const STYLE: &[&str] = &["CSSStyleDeclaration"];
@@ -289,6 +325,8 @@ static MEMBERS: &[Member] = &[
         on: FUNCTIONS,
         args: &[],
         body: Body::Read(host::computed_style),
+        required: 0,
+        fallback: false,
     },
     // CSSStyleDeclaration.
     getter("cssText", Receiver::Style, STYLE, host::css_text),
@@ -322,6 +360,48 @@ static MEMBERS: &[Member] = &[
     getter("offsetLeft", Receiver::Element, HTML_ELEMENT, layout::box_left),
     getter("offsetWidth", Receiver::Element, HTML_ELEMENT, layout::box_width),
     getter("offsetHeight", Receiver::Element, HTML_ELEMENT, layout::box_height),
+    // Attributes (see the `attrs` module).
+    reader("getAttribute", 1, Receiver::Element, ELEMENT, STR, attrs::get_attribute).or_js(1),
+    reader("hasAttribute", 1, Receiver::Element, ELEMENT, STR, attrs::has_attribute).or_js(1),
+    method("hasAttributes", 0, Receiver::Element, ELEMENT, attrs::has_attributes),
+    method("getAttributeNames", 0, Receiver::Element, ELEMENT, attrs::get_attribute_names),
+    writer("getAttributeNS", 2, Receiver::Element, ELEMENT, attrs::get_attribute_ns),
+    writer("hasAttributeNS", 2, Receiver::Element, ELEMENT, attrs::has_attribute_ns),
+    writer("setAttribute", 2, Receiver::Element, ELEMENT, attrs::set_attribute).or_js(2),
+    writer("setAttributeNS", 3, Receiver::Element, ELEMENT, attrs::set_attribute_ns).or_js(3),
+    writer("removeAttribute", 1, Receiver::Element, ELEMENT, attrs::remove_attribute).or_js(1),
+    writer("removeAttributeNS", 2, Receiver::Element, ELEMENT, attrs::remove_attribute_ns).or_js(0),
+    writer("toggleAttribute", 1, Receiver::Element, ELEMENT, attrs::toggle_attribute).or_js(1),
+    setter("id", Receiver::Element, ELEMENT, attrs::set_id),
+    setter("className", Receiver::Element, ELEMENT, attrs::set_class_name),
+    // Tree edits (see the `edits` module).
+    writer("appendChild", 1, Receiver::Node, NODE, edits::append_child).or_js(1),
+    writer("insertBefore", 2, Receiver::Node, NODE, edits::insert_before).or_js(2),
+    writer("removeChild", 1, Receiver::Node, NODE, edits::remove_child).or_js(1),
+    writer("replaceChild", 2, Receiver::Node, NODE, edits::replace_child_member).or_js(2),
+    writer("cloneNode", 0, Receiver::Node, NODE, edits::clone_node).or_js(0),
+    setter("textContent", Receiver::Node, NODE, edits::set_text_content_member),
+    setter("innerHTML", Receiver::Element, ELEMENT, edits::set_inner_html_member),
+    writer("prepend", 0, Receiver::Node, PARENT_NODE, edits::prepend).or_js(0),
+    writer("append", 0, Receiver::Node, PARENT_NODE, edits::append).or_js(0),
+    writer("replaceChildren", 0, Receiver::Node, PARENT_NODE, edits::replace_children).or_js(0),
+    writer("before", 0, Receiver::Node, ANY_CHILD_NODE, edits::before).or_js(0),
+    writer("after", 0, Receiver::Node, ANY_CHILD_NODE, edits::after).or_js(0),
+    writer("replaceWith", 0, Receiver::Node, ANY_CHILD_NODE, edits::replace_with).or_js(0),
+    writer("remove", 0, Receiver::Node, ANY_CHILD_NODE, edits::remove),
+    writer("createElement", 1, Receiver::Node, DOCUMENT, edits::create_element).or_js(1),
+    writer("createTextNode", 1, Receiver::Node, DOCUMENT, edits::create_text_node).or_js(1),
+    writer("createComment", 1, Receiver::Node, DOCUMENT, edits::create_comment).or_js(1),
+    writer("createDocumentFragment", 0, Receiver::Node, DOCUMENT, edits::create_document_fragment)
+        .or_js(0),
+    // Queries (see the `queries` module).
+    reader("getElementById", 1, Receiver::Node, BY_ID, STR, queries::get_element_by_id),
+    reader("querySelector", 1, Receiver::Node, PARENT_NODE, STR, queries::query_selector).or_js(1),
+    reader("querySelectorAll", 1, Receiver::Node, PARENT_NODE, STR, queries::query_selector_all)
+        .or_js(1),
+    reader("matches", 1, Receiver::Element, ELEMENT, STR, queries::matches).or_js(1),
+    reader("webkitMatchesSelector", 1, Receiver::Element, ELEMENT, STR, queries::matches),
+    reader("closest", 1, Receiver::Element, ELEMENT, STR, queries::closest).or_js(1),
 ];
 
 // -------------------------------------------------------------------------
@@ -578,6 +658,10 @@ pub(super) enum Thrown {
     Error(rquickjs::Error),
     /// An exception is already pending.
     Pending,
+    /// Not for the native body: call the JS fallback instead (members made
+    /// with [`Member::or_js`] only). A body returns it before it has done
+    /// anything scripts could notice.
+    Fallback,
 }
 
 /// One call of a `Read` member: what it can look at.
@@ -901,6 +985,9 @@ impl Thrown {
             // SAFETY: as for the function.
             Thrown::Type(message) => unsafe { throw_type(ctx, message) },
             Thrown::Pending => qjs::JS_EXCEPTION,
+            // `call_member` handles it for members that have a fallback.
+            // SAFETY: as for the function.
+            Thrown::Fallback => unsafe { throw_type(ctx, c"Illegal invocation") },
             Thrown::Error(e) => {
                 // SAFETY: as for the function.
                 let ctx = unsafe { ctx_of(ctx) };
@@ -1026,6 +1113,10 @@ unsafe extern "C" fn call_member(
         return unsafe { Thrown::Stale.throw(ctx) };
     };
     let dom = wrapper.dom();
+    if member.fallback && args.len() < usize::from(member.required) {
+        // SAFETY: as above.
+        return unsafe { members.call_fallback(ctx, magic, this, argc, argv) };
+    }
     let rejected = |ctx| match member.receiver {
         // SAFETY: as above.
         Receiver::ElementArg(message) => unsafe { throw_type(ctx, message) },
@@ -1080,6 +1171,10 @@ unsafe extern "C" fn call_member(
             }
         }
     };
+    if let (Thrown::Fallback, true) = (&thrown, member.fallback) {
+        // SAFETY: as above; nothing is borrowed.
+        return unsafe { members.call_fallback(ctx, magic, this, argc, argv) };
+    }
     // Throwing a `DOMException` runs JS: the document is let go by now.
     // SAFETY: as above.
     unsafe { thrown.throw(ctx) }
@@ -1103,6 +1198,8 @@ pub(crate) struct Members {
     atoms: RefCell<Atoms>,
     /// The classes of style, token list and dataset objects.
     pub(super) hosts: Hosts,
+    /// The fallbacks, hooks and tables kept from `dom.js`.
+    hooks: Hooks,
 }
 
 /// Strings the members return over and over, as atoms (interned strings
@@ -1127,7 +1224,12 @@ impl Members {
     /// value; the object's opaque pointer points at it. So a node wrapper is
     /// an object of rquickjs's class id whose cell starts with the vtable
     /// pointer `document`'s does.
-    pub(crate) fn attach(ctx: &Ctx<'_>, document: &Node<'_>, hosts: Hosts) -> Box<Members> {
+    pub(crate) fn attach(
+        ctx: &Ctx<'_>,
+        document: &Node<'_>,
+        hosts: Hosts,
+        hooks: Hooks,
+    ) -> Box<Members> {
         let raw = document.as_raw();
         // SAFETY: `raw` is a live class object, so its opaque is its cell,
         // which starts with the vtable pointer.
@@ -1150,12 +1252,59 @@ impl Members {
             rt: unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) },
             atoms: RefCell::default(),
             hosts,
+            hooks,
         });
         let ptr: *const Members = &*members;
         // SAFETY: the box is kept in `DomData` for as long as the context
         // runs JS, and does not move.
         unsafe { qjs::JS_SetContextOpaque(ctx.as_raw().as_ptr(), ptr.cast_mut().cast()) };
         members
+    }
+
+    /// Calls member `magic`'s JS fallback (see [`Member::or_js`]).
+    ///
+    /// # Safety
+    ///
+    /// The arguments must be those QuickJS passed to the member.
+    unsafe fn call_fallback(
+        &self,
+        ctx: *mut qjs::JSContext,
+        magic: c_int,
+        this: qjs::JSValue,
+        argc: c_int,
+        argv: *mut qjs::JSValue,
+    ) -> qjs::JSValue {
+        // SAFETY: as for the function.
+        unsafe { self.hooks.call_fallback(ctx, magic, this, argc, argv) }
+    }
+
+    /// Hands the scripts an insertion connected to the glue.
+    pub(super) fn connected(
+        &self,
+        ctx: &Ctx<'_>,
+        dom: &Rc<DomState>,
+        scripts: &[NodeId],
+    ) -> Result<()> {
+        self.hooks.connected(ctx, dom, scripts)
+    }
+
+    /// Makes `array` a static `NodeList`; false with an exception thrown
+    /// if that fails.
+    pub(super) fn static_node_list(&self, ctx: *mut qjs::JSContext, array: qjs::JSValue) -> bool {
+        self.hooks.static_node_list(ctx, array)
+    }
+
+    pub(super) fn add_reflected(&self, reflected: Reflected) -> usize {
+        self.hooks.add_reflected(reflected)
+    }
+
+    pub(super) fn reflected(&self, index: usize) -> Option<Rc<Reflected>> {
+        self.hooks.reflected(index)
+    }
+
+    /// `value` resolved against the base URL, as a new JS string. Runs JS.
+    pub(super) fn resolve_url(&self, ctx: *mut qjs::JSContext, value: &str) -> qjs::JSValue {
+        self.hooks.resolve_url(ctx, value)
     }
 
     /// The node wrapper `value` is, if it is one.
@@ -1194,7 +1343,7 @@ impl Members {
     }
 
     /// The string for `name`, upper-cased if `upper`, from the cache.
-    fn name(
+    pub(super) fn name(
         &self,
         ctx: *mut qjs::JSContext,
         doc: &Document,
@@ -1236,7 +1385,7 @@ impl Members {
     }
 
     /// The string `s`, from the cache.
-    fn fixed(&self, ctx: *mut qjs::JSContext, s: &'static str) -> qjs::JSValue {
+    pub(super) fn fixed(&self, ctx: *mut qjs::JSContext, s: &'static str) -> qjs::JSValue {
         let mut atoms = self.atoms.borrow_mut();
         let atom = match atoms.fixed.iter().find(|(f, _)| *f == s) {
             Some(&(_, atom)) => atom,
@@ -1291,11 +1440,19 @@ impl Drop for Members {
 /// `Function` is put on the `functions` object instead. The property
 /// keeps its place and attributes. Fails if a stand-in is missing, so
 /// `dom.js` and [`MEMBERS`] cannot drift apart.
-pub(super) fn install<'js>(ctx: &Ctx<'js>, interfaces: &Object<'js>) -> Result<()> {
+///
+/// Returns, by member, the function a member made with [`Member::or_js`]
+/// replaced (the one on its first interface), to keep as its fallback.
+pub(super) fn install<'js>(
+    ctx: &Ctx<'js>,
+    interfaces: &Object<'js>,
+) -> Result<Vec<Option<Value<'js>>>> {
     let object: Object<'js> = ctx.globals().get("Object")?;
     let describe: Function<'js> = object.get("getOwnPropertyDescriptor")?;
     let define: Function<'js> = object.get("defineProperty")?;
+    let mut fallbacks = Vec::with_capacity(MEMBERS.len());
     for (magic, member) in MEMBERS.iter().enumerate() {
+        fallbacks.push(None);
         let f = new_function(ctx, member, magic)?;
         let key = match member.kind {
             Kind::Getter => "get",
@@ -1322,11 +1479,14 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, interfaces: &Object<'js>) -> Result<(
                     ),
                 ));
             };
+            if member.fallback && fallbacks[magic].is_none() {
+                fallbacks[magic] = Some(desc.get::<_, Value<'js>>(key)?);
+            }
             desc.set(key, f.clone())?;
             define.call::<_, Value<'js>>((proto, member.name, desc))?;
         }
     }
-    Ok(())
+    Ok(fallbacks)
 }
 
 /// The C function for `member`: named and sized as `dom.js`'s stand-in is
@@ -1341,7 +1501,28 @@ fn new_function<'js>(ctx: &Ctx<'js>, member: &Member, magic: usize) -> Result<Va
     };
     let name = CString::new(name).expect("member names have no NUL");
     let magic = c_int::try_from(magic).expect("few members");
-    type Magic = unsafe extern "C" fn(
+    new_magic_function(ctx, call_member, &name, length, magic)
+}
+
+/// The C function signature of members, with its magic number.
+pub(super) type Magic = unsafe extern "C" fn(
+    *mut qjs::JSContext,
+    qjs::JSValue,
+    c_int,
+    *mut qjs::JSValue,
+    c_int,
+) -> qjs::JSValue;
+
+/// A native function `name` of `length` that QuickJS calls as `f` with
+/// `magic`.
+pub(super) fn new_magic_function<'js>(
+    ctx: &Ctx<'js>,
+    f: Magic,
+    name: &CStr,
+    length: c_int,
+    magic: c_int,
+) -> Result<Value<'js>> {
+    type MagicFn = unsafe extern "C" fn(
         *mut qjs::JSContext,
         qjs::JSValue,
         c_int,
@@ -1356,7 +1537,7 @@ fn new_function<'js>(ctx: &Ctx<'js>, member: &Member, magic: usize) -> Result<Va
     ) -> qjs::JSValue;
     // SAFETY: QuickJS keeps C functions as a union of pointer types and
     // calls this one as `generic_magic`, with the signature it has.
-    let f = unsafe { std::mem::transmute::<Magic, Plain>(call_member) };
+    let f = unsafe { std::mem::transmute::<MagicFn, Plain>(f) };
     // SAFETY: `ctx` is live and `name` a C string, which QuickJS copies.
     let raw = unsafe {
         qjs::JS_NewCFunction2(

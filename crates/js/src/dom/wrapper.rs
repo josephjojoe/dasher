@@ -11,6 +11,8 @@ use rquickjs::class::{JsClass, Readable, Trace, Tracer};
 use rquickjs::function::Constructor;
 use rquickjs::{Class, Ctx, Function, JsLifetime, Object, Result, Value, qjs};
 
+use super::attrs;
+use super::hooks::Hooks;
 use super::host::Hosts;
 use super::members::{self, Members};
 use super::{DomState, any_in_tree_except, group_root, owner};
@@ -183,11 +185,14 @@ pub(crate) fn init<'js>(
 ) -> Result<()> {
     let document = create(dom, dom.doc().root(), protos.get("Document")?)?;
     let interfaces: Object<'js> = protos.get("interfaces")?;
-    members::install(ctx, &interfaces)?;
+    let fallbacks = members::install(ctx, &interfaces)?;
+    let hooks = Hooks::new(ctx, fallbacks, &protos.get("hooks")?, &interfaces)?;
     let (hosts, host_protos) = Hosts::register(ctx, &interfaces)?;
+    let members = Members::attach(ctx, &document, hosts, hooks);
+    attrs::install_reflected(ctx, &members, protos.get("reflected")?)?;
     let data = DomData {
         exception,
-        members: Members::attach(ctx, &document, hosts),
+        members,
         _host_protos: host_protos,
         document,
         mutation_hook: RefCell::new(None),

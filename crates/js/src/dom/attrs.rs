@@ -22,7 +22,9 @@ use std::borrow::Cow;
 use std::ffi::{CString, c_int};
 
 use dasher_dom::{Document, Name, NodeId};
-use rquickjs::{Ctx, Exception, Object, Result, Value, qjs};
+use rquickjs::{Ctx, Exception, Object, Value, qjs};
+
+type Result<T, E = rquickjs::Error> = std::result::Result<T, E>;
 
 use super::members::{
     Call, JsStr, Members, Outcome, Ret, Thrown, Write, ctx_of, new_string, throw_type,
@@ -31,11 +33,11 @@ use super::natives::{
     html_lower, remove_attr, remove_attr_ns, set_attr, set_attr_ns, valid_attribute_name,
 };
 
-type Done = std::result::Result<Ret<'static>, Thrown>;
+type Done = Result<Ret<'static>, Thrown>;
 
 /// Argument `i` as `nullableStr(v) || null` does in `dom.js`: `None` for
 /// `null`, `undefined`, a missing argument or the empty string.
-fn namespace_arg(w: &Write<'_>, i: usize) -> std::result::Result<Option<String>, Thrown> {
+fn namespace_arg(w: &Write<'_>, i: usize) -> Result<Option<String>, Thrown> {
     let v = w.arg(i);
     // SAFETY: tag checks of a live value.
     if unsafe { qjs::JS_IsNull(v) || qjs::JS_IsUndefined(v) } {
@@ -136,6 +138,29 @@ pub(super) fn has_attribute_ns(w: &Write<'_>) -> Done {
     ))
 }
 
+/// Attribute name argument `i` of a member that changes attributes, or
+/// `Thrown::Fallback` to leave the call to the glue: for an event handler
+/// attribute (`on*`), whose changes the glue tracks around its natives, and
+/// for an object, whose conversion runs JS (which the fallback would run
+/// again).
+fn changed_name(w: &Write<'_>, i: usize) -> Result<JsStr, Thrown> {
+    // SAFETY: a tag check of a live value.
+    let tag = unsafe { qjs::JS_VALUE_GET_TAG(w.arg(i)) };
+    if tag == qjs::JS_TAG_OBJECT || tag == qjs::JS_TAG_SYMBOL {
+        return Err(Thrown::Fallback);
+    }
+    let name = w.str_arg(i)?;
+    let handler = name
+        .as_str()
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"on"));
+    if handler {
+        return Err(Thrown::Fallback);
+    }
+    Ok(name)
+}
+
 fn invalid_name(name: &str) -> Thrown {
     Thrown::Dom(
         "InvalidCharacterError",
@@ -144,7 +169,7 @@ fn invalid_name(name: &str) -> Thrown {
 }
 
 pub(super) fn set_attribute(w: &Write<'_>) -> Done {
-    let name = w.str_arg(0)?;
+    let name = changed_name(w, 0)?;
     let value = w.str_arg(1)?;
     let name = name.as_str();
     if !valid_attribute_name(&name) {
@@ -155,8 +180,12 @@ pub(super) fn set_attribute(w: &Write<'_>) -> Done {
 }
 
 pub(super) fn set_attribute_ns(w: &Write<'_>) -> Done {
+    // SAFETY: a tag check of a live value.
+    if unsafe { qjs::JS_VALUE_GET_TAG(w.arg(0)) } == qjs::JS_TAG_OBJECT {
+        return Err(Thrown::Fallback);
+    }
+    let name = changed_name(w, 1)?;
     let ns = namespace_arg(w, 0)?;
-    let name = w.str_arg(1)?;
     let value = w.str_arg(2)?;
     let name = name.as_str();
     if !valid_attribute_name(&name) {
@@ -175,32 +204,36 @@ pub(super) fn set_attribute_ns(w: &Write<'_>) -> Done {
 }
 
 pub(super) fn remove_attribute(w: &Write<'_>) -> Done {
-    let name = w.str_arg(0)?;
+    let name = changed_name(w, 0)?;
     remove_attr(&w.rctx(), w.dom, w.id, &name.as_str())?;
     Ok(Ret::Undefined)
 }
 
 pub(super) fn remove_attribute_ns(w: &Write<'_>) -> Done {
+    // SAFETY: a tag check of a live value.
+    if unsafe { qjs::JS_VALUE_GET_TAG(w.arg(0)) } == qjs::JS_TAG_OBJECT {
+        return Err(Thrown::Fallback);
+    }
+    let local = changed_name(w, 1)?;
     let ns = namespace_arg(w, 0)?;
-    let local = w.str_arg(1)?;
     remove_attr_ns(&w.rctx(), w.dom, w.id, ns.as_deref(), &local.as_str())?;
     Ok(Ret::Undefined)
 }
 
 pub(super) fn toggle_attribute(w: &Write<'_>) -> Done {
-    let name = w.str_arg(0)?;
+    let name = changed_name(w, 0)?;
     let name = name.as_str();
     // Only the boolean values count, as `force === true` in the glue.
     let force = w.arg(1);
     let present = attribute(&w.dom.doc(), w.id, &name).is_some();
     if present {
-        if force == qjs::JS_TRUE {
+        if is_bool(force, true) {
             return Ok(Ret::Bool(true));
         }
         remove_attr(&w.rctx(), w.dom, w.id, &name)?;
         return Ok(Ret::Bool(false));
     }
-    if force == qjs::JS_FALSE {
+    if is_bool(force, false) {
         return Ok(Ret::Bool(false));
     }
     if !valid_attribute_name(&name) {
@@ -208,6 +241,12 @@ pub(super) fn toggle_attribute(w: &Write<'_>) -> Done {
     }
     set_attr(&w.rctx(), w.dom, w.id, &name, "")?;
     Ok(Ret::Bool(true))
+}
+
+/// Whether `v` is the boolean `b`.
+fn is_bool(v: qjs::JSValue, b: bool) -> bool {
+    // SAFETY: tag and payload checks of a live value.
+    unsafe { qjs::JS_VALUE_GET_TAG(v) == qjs::JS_TAG_BOOL && (qjs::JS_VALUE_GET_INT(v) != 0) == b }
 }
 
 /// The setter of an IDL attribute that reflects `name` as a string.
@@ -387,7 +426,11 @@ unsafe extern "C" fn call_reflected(
     };
     let dom = wrapper.dom();
     let index = (magic / 2) as usize;
-    let reflected = members.reflected(index);
+    let Some(reflected) = members.reflected(index) else {
+        // SAFETY: as above.
+        return unsafe { Thrown::Illegal.throw(ctx) };
+    };
+    let reflected = &*reflected;
     if magic % 2 == 0 {
         let doc = dom.doc();
         if !doc.is_element(id) {
@@ -485,7 +528,7 @@ fn set_reflected(
     id: NodeId,
     reflected: &Reflected,
     value: qjs::JSValue,
-) -> std::result::Result<(), Thrown> {
+) -> Result<(), Thrown> {
     let attr = reflected.attr.as_str();
     let text: Cow<'_, str> = match &reflected.how {
         Reflect::Bool => {

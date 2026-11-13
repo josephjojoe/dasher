@@ -12,10 +12,12 @@ use dasher_css::SelectorList;
 use dasher_dom::NodeId;
 use rquickjs::qjs;
 
+type Result<T, E = Thrown> = std::result::Result<T, E>;
+
 use super::members::{Call, Outcome, Ret, Thrown};
 
 /// The selector list for argument 0, or the `SyntaxError` the glue threw.
-fn selector(c: &Call<'_>) -> std::result::Result<Rc<SelectorList>, Thrown> {
+fn selector(c: &Call<'_>) -> Result<Rc<SelectorList>, Thrown> {
     let text = c.str_arg(0)?;
     let text = text.as_str();
     c.dom.selector(&text).map_err(|_| {

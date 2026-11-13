@@ -85,14 +85,18 @@
 //! natives `dom.js` calls internally (`N.nav` and friends) stay, since glue
 //! code must not see page script's overrides of the public members.
 
+mod attrs;
 mod collection;
 mod custom;
+mod edits;
+mod hooks;
 mod host;
 mod inner_text;
 mod layout;
 mod members;
 mod mutation;
 mod natives;
+mod queries;
 mod shadow;
 mod style;
 mod wrapper;
@@ -354,6 +358,17 @@ impl DomState {
         }
     }
 
+    /// Keeps detached trees from being released until the result is
+    /// dropped, as [`JsRuntime::hold_detached_nodes`] does for the host:
+    /// for native members that hold ids of unwrapped nodes they made
+    /// across changes to the tree.
+    pub(crate) fn hold_garbage(&self) -> HoldGarbage<'_> {
+        HoldGarbage {
+            dom: self,
+            was: self.hold.replace(true),
+        }
+    }
+
     /// Queues `id`'s tree to be released if it turns out to be garbage.
     pub(crate) fn add_candidate(&self, id: NodeId) {
         self.candidates.borrow_mut().push(id);
@@ -397,6 +412,18 @@ impl DomState {
         for root in garbage {
             doc.release(root);
         }
+    }
+}
+
+/// See [`DomState::hold_garbage`].
+pub(crate) struct HoldGarbage<'a> {
+    dom: &'a DomState,
+    was: bool,
+}
+
+impl Drop for HoldGarbage<'_> {
+    fn drop(&mut self) {
+        self.dom.hold.set(self.was);
     }
 }
 
