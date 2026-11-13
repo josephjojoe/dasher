@@ -21,7 +21,6 @@
   const pageNow = native.now;
   const defineProperty = Object.defineProperty;
   const ReflectApply = Reflect.apply;
-  const setTimeoutRef = globalThis.setTimeout;
   const clearTimeoutRef = globalThis.clearTimeout;
   const KEY = Symbol('dasher');
 
@@ -668,8 +667,16 @@
   tag(MessageChannel, 'MessageChannel');
 
   // requestIdleCallback. The page is treated as idle as soon as the
-  // callback's turn comes, with the usual 50 ms budget.
+  // callback's turn comes, with the usual 50 ms budget. A callback asked
+  // for from inside an idle callback waits for the next idle period, 50 ms
+  // on, as in a browser with nothing else to do. Idle callbacks do not keep
+  // the page busy: one that reschedules itself forever runs as page time
+  // passes, but the page still counts as having nothing left to do.
   // https://w3c.github.io/requestidlecallback/
+
+  const IDLE_PERIOD = 50;
+  const setIdleTimer = internals.setIdleTimer;
+  let inIdleCallback = false;
 
   class IdleDeadline {
     #start;
@@ -697,10 +704,15 @@
     }
     void options;
     const id = ++lastIdleId;
-    const timer = ReflectApply(setTimeoutRef, globalThis, [() => {
+    const timer = setIdleTimer(() => {
       idleTimers.delete(id);
-      ReflectApply(callback, globalThis, [new IdleDeadline(KEY, pageNow(), false)]);
-    }, 0]);
+      inIdleCallback = true;
+      try {
+        ReflectApply(callback, globalThis, [new IdleDeadline(KEY, pageNow(), false)]);
+      } finally {
+        inIdleCallback = false;
+      }
+    }, inIdleCallback ? IDLE_PERIOD : 0);
     idleTimers.set(id, timer);
     return id;
   }

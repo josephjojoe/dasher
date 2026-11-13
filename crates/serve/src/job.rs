@@ -53,6 +53,18 @@ pub struct Job {
     /// 30 000; the service may cap it. When loading runs out of time the
     /// page is used as far as it got.
     pub timeout_ms: Option<u64>,
+    /// The most page time, in milliseconds, the virtual clock may skip
+    /// ahead while waiting for the page to go quiet. Pages that update
+    /// themselves on a timer forever never do; once this is spent the
+    /// quiet periods are given up and the page is used as it stands.
+    /// Defaults to 5000; 0 for no limit.
+    pub page_time_budget_ms: Option<u64>,
+    /// The most CPU time, in milliseconds, loading, waiting and scrolling
+    /// may use. Defaults to 20 000; 0 for no limit.
+    pub cpu_budget_ms: Option<u64>,
+    /// The most requests the page may make: the document, scripts,
+    /// `fetch()` and XHR. Defaults to 2000; 0 for no limit.
+    pub request_budget: Option<u64>,
     /// Scrolls the page after it has loaded to bring in infinite feeds
     /// and lazy content: `true`, or `{"max_scrolls": n}`.
     #[serde(default)]
@@ -134,6 +146,32 @@ impl Job {
     /// The quiet period of the wait strategies.
     pub fn quiet(&self) -> Duration {
         self.quiet_ms.map_or(DEFAULT_QUIET, Duration::from_millis)
+    }
+
+    /// The page-time budget for settling; `None` for none.
+    pub fn page_time_budget(&self) -> Option<Duration> {
+        match self.page_time_budget_ms {
+            None => Some(dasher::DEFAULT_PAGE_TIME_BUDGET),
+            Some(0) => None,
+            Some(ms) => Some(Duration::from_millis(ms)),
+        }
+    }
+
+    /// The CPU and request budget for the whole page load.
+    pub fn work_budget(&self) -> dasher::WorkBudget {
+        let defaults = dasher::WorkBudget::default();
+        dasher::WorkBudget {
+            cpu: match self.cpu_budget_ms {
+                None => defaults.cpu,
+                Some(0) => None,
+                Some(ms) => Some(Duration::from_millis(ms)),
+            },
+            requests: match self.request_budget {
+                None => defaults.requests,
+                Some(0) => None,
+                Some(n) => Some(n),
+            },
+        }
     }
 
     /// Whether the page's HTML is returned.

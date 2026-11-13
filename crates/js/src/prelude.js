@@ -172,6 +172,14 @@
     return id;
   }
 
+  // A timer for requestIdleCallback: it runs when due, but does not keep
+  // the page busy (see timers.rs).
+  function setIdleTimer(handler, timeout) {
+    const id = native.setIdleTimer(timeout);
+    timerCallbacks.set(id, { handler, args: [] });
+    return id;
+  }
+
   function clearTimer(id) {
     const n = id >>> 0;
     if (n !== 0 && timerCallbacks.delete(n)) native.clearTimer(n);
@@ -379,6 +387,7 @@
   return {
     inspect: (value) => inspect(value, 0, []),
     runTimer,
+    setIdleTimer,
     runFrame,
     usv,
     expose,

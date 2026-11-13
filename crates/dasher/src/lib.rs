@@ -131,8 +131,9 @@ pub use dasher_js::{
 };
 pub use dasher_net::{Cookie, SameSite};
 pub use dasher_page::{
-    AutoScrollOptions, AutoScrollReport, AutoScrollStop, DEFAULT_MAX_SCROLLS, DEFAULT_QUIET,
-    DEFAULT_SETTLE_TIMEOUT, LoadError, NetworkIdle, SettleOptions, SettleOutcome,
+    AutoScrollOptions, AutoScrollReport, AutoScrollStop, Budget, DEFAULT_CPU_BUDGET,
+    DEFAULT_MAX_SCROLLS, DEFAULT_PAGE_TIME_BUDGET, DEFAULT_QUIET, DEFAULT_REQUEST_BUDGET,
+    DEFAULT_SETTLE_TIMEOUT, LoadError, NetworkIdle, SettleOptions, SettleOutcome, WorkBudget,
 };
 /// The JSON value [`Page::evaluate`] returns, from `serde_json`.
 pub use serde_json::Value as JsonValue;

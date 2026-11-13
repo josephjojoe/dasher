@@ -31,6 +31,8 @@ pub(crate) struct Clock {
     /// The time origin as milliseconds since the Unix epoch.
     epoch_ms: f64,
     skipped: Cell<Duration>,
+    /// The most `skipped` may reach, if skipping is limited.
+    skip_limit: Cell<Option<Duration>>,
 }
 
 impl Clock {
@@ -43,6 +45,7 @@ impl Clock {
             start: Instant::now(),
             epoch_ms,
             skipped: Cell::new(Duration::ZERO),
+            skip_limit: Cell::new(None),
         }
     }
 
@@ -58,12 +61,38 @@ impl Clock {
         }
     }
 
-    /// Moves page time forward to `time`. Never moves it back.
-    pub(crate) fn advance_to(&self, time: Duration) {
+    /// Moves page time forward to `time`, or as far towards it as the
+    /// [skip limit](Self::set_skip_limit) allows. Never moves it back.
+    /// Returns whether page time reached `time`.
+    pub(crate) fn advance_to(&self, time: Duration) -> bool {
         let now = self.now();
-        if time > now {
-            self.skipped.set(self.skipped.get() + (time - now));
+        if time <= now {
+            return true;
         }
+        let wanted = time - now;
+        let skip = self.skip_left().map_or(wanted, |left| left.min(wanted));
+        self.skipped.set(self.skipped.get() + skip);
+        skip == wanted
+    }
+
+    /// How much page time has been skipped in all: how far page time is
+    /// ahead of the wall clock (in `Manual` mode, all of page time).
+    pub(crate) fn skipped(&self) -> Duration {
+        self.skipped.get()
+    }
+
+    /// Caps [`skipped`](Self::skipped) at `limit`: page time no longer
+    /// jumps ahead once it has skipped that much in all. `None` lifts the
+    /// cap.
+    pub(crate) fn set_skip_limit(&self, limit: Option<Duration>) {
+        self.skip_limit.set(limit);
+    }
+
+    /// How much more page time may be skipped, if skipping is limited.
+    pub(crate) fn skip_left(&self) -> Option<Duration> {
+        self.skip_limit
+            .get()
+            .map(|limit| limit.saturating_sub(self.skipped.get()))
     }
 
     /// The time origin as milliseconds since the Unix epoch, which is what
@@ -87,6 +116,23 @@ mod tests {
         assert_eq!(clock.now(), Duration::from_secs(10));
         clock.advance_to(Duration::from_secs(1));
         assert_eq!(clock.now(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn skipping_stops_at_the_limit() {
+        let clock = Clock::new(ClockMode::Manual);
+        let s = Duration::from_secs;
+        clock.set_skip_limit(Some(s(5)));
+        assert!(clock.advance_to(s(3)));
+        assert_eq!(clock.skip_left(), Some(s(2)));
+        assert!(!clock.advance_to(s(10)));
+        assert_eq!(clock.now(), s(5));
+        assert_eq!(clock.skip_left(), Some(Duration::ZERO));
+        assert!(!clock.advance_to(s(6)));
+        assert_eq!(clock.now(), s(5));
+        clock.set_skip_limit(None);
+        assert!(clock.advance_to(s(6)));
+        assert_eq!(clock.skipped(), s(6));
     }
 
     #[test]

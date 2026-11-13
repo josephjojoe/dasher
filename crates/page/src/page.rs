@@ -6,14 +6,15 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep, ShadowRoots};
 use dasher_js::{
-    DocumentInfo, DocumentWrite, EventTarget, JsRuntime, PendingOperation, ReadyState,
-    ResourceLimit, RunLimits, RunOutcome, RuntimeOptions, ScriptError, WindowOptions,
+    Budget, DocumentInfo, DocumentWrite, EventTarget, JsRuntime, PendingOperation, ReadyState,
+    ResourceLimit, RunLimits, RunOutcome, RuntimeOptions, ScriptError, WindowOptions, WorkLimits,
 };
 use dasher_net::{HeaderMap, Request, ResourceType, Response, Session, StatusCode, Url};
 use encoding_rs::Encoding;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::budget::WorkBudget;
 use crate::charset;
 use crate::refresh::{self, Refresh};
 use crate::script::{FetchParams, Order, ScriptElement, ScriptId, ScriptType, Scripts, base_url};
@@ -49,6 +50,12 @@ pub struct PageOptions {
     /// runs out, loading stops where it is and the page is returned as it
     /// stands (see [`Page::timed_out`]). `None` waits as long as it takes.
     pub timeout: Option<Duration>,
+    /// How much work the page may do, counted from the start of loading
+    /// and still counting after it, through [`Page::settle`],
+    /// [`Page::auto_scroll`] and [`Page::run`], until
+    /// [`Page::set_budget`] sets another. When it runs out the page stops
+    /// where it is (see [`Page::budget_exhausted`]).
+    pub budget: WorkBudget,
 }
 
 impl Default for PageOptions {
@@ -58,6 +65,7 @@ impl Default for PageOptions {
             max_navigations: DEFAULT_MAX_NAVIGATIONS,
             max_refresh_delay: Some(DEFAULT_MAX_REFRESH_DELAY),
             timeout: Some(Duration::from_secs(30)),
+            budget: WorkBudget::default(),
         }
     }
 }
@@ -112,6 +120,8 @@ pub(crate) enum Stop {
     Halted,
     /// The page went over a resource limit and can run no more.
     Limit(ResourceLimit),
+    /// The page used up its CPU or request budget.
+    Budget(Budget),
 }
 
 /// A live page: a document, its JS runtime and the session they load
@@ -129,6 +139,9 @@ pub struct Page {
     session: Session,
     options: PageOptions,
     pub(crate) deadline: Option<Instant>,
+    /// The work limits, carried over to the runtime of each document.
+    work_limits: WorkLimits,
+    budget_exhausted: Option<Budget>,
     navigations_left: usize,
     status: StatusCode,
     headers: HeaderMap,
@@ -168,7 +181,17 @@ impl Page {
         let url = Url::parse(url).map_err(|_| LoadError::InvalidUrl(url.to_owned()))?;
         let deadline = options.timeout.map(|t| Instant::now() + t);
         let budget = options.max_navigations;
-        let mut page = Page::open(session.clone(), url, None, options, deadline, budget).await?;
+        let limits = work_limits(session, options.budget);
+        let mut page = Page::open(
+            session.clone(),
+            url,
+            None,
+            options,
+            deadline,
+            limits,
+            budget,
+        )
+        .await?;
         while page.navigate(deadline).await? {}
         page.clear_deadline();
         Ok(page)
@@ -182,6 +205,7 @@ impl Page {
         referrer: Option<Url>,
         options: PageOptions,
         deadline: Option<Instant>,
+        work_limits: WorkLimits,
         navigations_left: usize,
     ) -> Result<Page, LoadError> {
         if !matches!(url.scheme(), "http" | "https") {
@@ -209,6 +233,7 @@ impl Page {
         };
         let js = JsRuntime::new(runtime).map_err(LoadError::Runtime)?;
         js.set_deadline(deadline);
+        js.set_work_limits(work_limits);
         js.take_over_inserted_scripts();
         let mut page = Page {
             scripts: Scripts::default(),
@@ -216,6 +241,8 @@ impl Page {
             session,
             options,
             deadline,
+            work_limits,
+            budget_exhausted: None,
             navigations_left,
             status: response.status(),
             headers: response.headers().clone(),
@@ -234,6 +261,7 @@ impl Page {
             // A navigation request stays pending for `navigate`.
             Ok(()) | Err(Stop::Navigate) => {}
             Err(Stop::Halted) => page.timed_out = true,
+            Err(Stop::Budget(budget)) => page.budget_exhausted = Some(budget),
             Err(Stop::Limit(limit)) => return Err(LoadError::LimitExceeded(limit)),
         }
         Ok(page)
@@ -272,7 +300,7 @@ impl Page {
         let Some(request) = self.js.take_navigation_request() else {
             return Ok(false);
         };
-        if self.navigations_left == 0 || self.timed_out {
+        if self.navigations_left == 0 || self.timed_out || self.budget_exhausted.is_some() {
             return Ok(false);
         }
         let Ok(url) = Url::parse(&request.url) else {
@@ -289,6 +317,7 @@ impl Page {
             referrer,
             self.options.clone(),
             deadline,
+            self.work_limits,
             self.navigations_left - 1,
         )
         .await?;
@@ -342,6 +371,22 @@ impl Page {
         self.timed_out
     }
 
+    /// The budget that stopped loading before the `load` event (or while
+    /// waiting for a refresh), if one did: [`Budget::Cpu`] or
+    /// [`Budget::Requests`] of [`PageOptions::budget`]. The page is as far
+    /// as it got.
+    pub fn budget_exhausted(&self) -> Option<Budget> {
+        self.budget_exhausted
+    }
+
+    /// Replaces the page's [work budget](PageOptions::budget), counting
+    /// from now. [`WorkBudget::unlimited`] lets a page that used up its
+    /// budget run again.
+    pub fn set_budget(&mut self, budget: WorkBudget) {
+        self.work_limits = work_limits(&self.session, budget);
+        self.js.set_work_limits(self.work_limits);
+    }
+
     /// The document serialized as HTML, doctype included. Shadow trees
     /// (open and closed) are included as declarative shadow DOM: each a
     /// `<template shadowrootmode>` first in its host, as
@@ -366,6 +411,7 @@ impl Page {
             Err(Stop::Navigate) => RunOutcome::NavigationRequested,
             Err(Stop::Halted) => RunOutcome::DeadlineExceeded,
             Err(Stop::Limit(limit)) => RunOutcome::LimitExceeded(limit),
+            Err(Stop::Budget(budget)) => RunOutcome::BudgetExhausted(budget),
         }
     }
 
@@ -537,6 +583,7 @@ impl Page {
         match wait.outcome {
             Some(RunOutcome::DeadlineExceeded | RunOutcome::Interrupted) => Err(Stop::Halted),
             Some(RunOutcome::LimitExceeded(limit)) => Err(Stop::Limit(limit)),
+            Some(RunOutcome::BudgetExhausted(budget)) => Err(Stop::Budget(budget)),
             _ => Ok(()),
         }
     }
@@ -774,11 +821,15 @@ impl Page {
     }
 
     /// Fails with [`Stop::Limit`] if the page went over a resource limit,
-    /// else with [`Stop::Navigate`] if the page asked to navigate and may.
-    /// A request past the navigation budget is dropped.
+    /// with [`Stop::Budget`] if it used up its work budget, else with
+    /// [`Stop::Navigate`] if the page asked to navigate and may. A request
+    /// past the navigation budget is dropped.
     pub(crate) fn check_navigation(&self) -> Result<(), Stop> {
         if let Some(limit) = self.js.limit_exceeded() {
             return Err(Stop::Limit(limit));
+        }
+        if let Some(budget) = self.js.budget_exhausted() {
+            return Err(Stop::Budget(budget));
         }
         if self.js.navigation_request().is_none() {
             return Ok(());
@@ -841,15 +892,19 @@ impl Page {
                     RunOutcome::NavigationRequested => {}
                     RunOutcome::DeadlineExceeded
                     | RunOutcome::Interrupted
-                    | RunOutcome::LimitExceeded(_) => {
+                    | RunOutcome::LimitExceeded(_)
+                    | RunOutcome::BudgetExhausted(_) => {
                         if let Until::Run(_) = until {
                             wait.outcome = Some(outcome);
                             return Ok(None);
                         }
-                        if let RunOutcome::LimitExceeded(limit) = outcome {
-                            return Err(Stop::Limit(limit));
+                        match outcome {
+                            RunOutcome::LimitExceeded(limit) => return Err(Stop::Limit(limit)),
+                            RunOutcome::BudgetExhausted(budget) => {
+                                return Err(Stop::Budget(budget));
+                            }
+                            _ => return Err(Stop::Halted),
                         }
-                        return Err(Stop::Halted);
                     }
                     RunOutcome::Idle | RunOutcome::ReachedTime | RunOutcome::TaskLimit => {
                         if let Until::Run(_) = until {
@@ -925,6 +980,12 @@ impl Drop for BodyReader {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// The work limits that give `budget` from now.
+fn work_limits(session: &Session, budget: WorkBudget) -> WorkLimits {
+    let started = session.activity().requests_started();
+    WorkLimits::from_now(budget.cpu, budget.requests, started)
 }
 
 async fn sleep_until(deadline: Option<Instant>) {

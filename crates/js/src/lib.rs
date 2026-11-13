@@ -334,6 +334,7 @@
 //! # }
 //! ```
 
+mod budget;
 mod clock;
 mod console;
 mod data_url;
@@ -363,6 +364,7 @@ mod timers;
 mod urls;
 mod window;
 
+pub use budget::{Budget, WorkLimits, thread_cpu_time};
 pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
 pub use dom::DomActivity;

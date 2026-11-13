@@ -138,6 +138,7 @@
 //! # }
 //! ```
 
+mod budget;
 mod charset;
 mod page;
 mod refresh;
@@ -145,6 +146,10 @@ mod script;
 mod scroll;
 mod settle;
 
+pub use budget::{
+    DEFAULT_CPU_BUDGET, DEFAULT_PAGE_TIME_BUDGET, DEFAULT_REQUEST_BUDGET, WorkBudget,
+};
+pub use dasher_js::Budget;
 pub use page::{DEFAULT_MAX_NAVIGATIONS, DEFAULT_MAX_REFRESH_DELAY, LoadError, Page, PageOptions};
 pub use scroll::{AutoScrollOptions, AutoScrollReport, AutoScrollStop, DEFAULT_MAX_SCROLLS};
 pub use settle::{
