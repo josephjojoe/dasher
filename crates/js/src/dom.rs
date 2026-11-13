@@ -87,12 +87,14 @@
 
 mod collection;
 mod custom;
+mod host;
 mod inner_text;
 mod layout;
 mod members;
 mod mutation;
 mod natives;
 mod shadow;
+mod style;
 mod wrapper;
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
@@ -107,6 +109,7 @@ use rquickjs::{Ctx, Function, Object};
 use crate::clock::Clock;
 use crate::runtime::{JsRuntime, Shared};
 
+pub(crate) use layout::Geometry;
 pub(crate) use wrapper::{Node, wrap};
 
 /// How many parsed selectors are kept for reuse.
@@ -164,6 +167,9 @@ pub(crate) struct DomState {
     layout_seen: Cell<u32>,
     /// The node limit every document of the page gets.
     node_limit: Option<usize>,
+    /// The viewport and visibility policy the synthetic layout follows.
+    geometry: Geometry,
+    layout: layout::LayoutCache,
     /// Whether scripts were told the parser inserted the body.
     body_seen: Cell<bool>,
     /// Set once script has made a document besides the page's.
@@ -176,10 +182,17 @@ pub(crate) struct DomState {
 }
 
 impl DomState {
-    pub(crate) fn new(mut doc: Document, node_limit: Option<usize>, clock: Rc<Clock>) -> Self {
+    pub(crate) fn new(
+        mut doc: Document,
+        node_limit: Option<usize>,
+        clock: Rc<Clock>,
+        geometry: Geometry,
+    ) -> Self {
         doc.set_node_limit(node_limit);
         Self {
             node_limit,
+            geometry,
+            layout: layout::LayoutCache::default(),
             doc: RefCell::new(doc),
             wrappers: wrapper::Wrappers::default(),
             candidates: RefCell::default(),
