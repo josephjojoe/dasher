@@ -10,10 +10,11 @@
 //! The parser does not own the document it builds. Each call that parses
 //! borrows it, so between calls the document can live elsewhere (in the JS
 //! runtime, say) and scripts can change it. Nodes the parser still refers to
-//! (its stack of open elements, for instance) must not be
-//! [released](Document::release) until [`DocumentParser::finish`] returns;
-//! detaching them is fine, the parser then builds into a detached subtree,
-//! as browsers do.
+//! (its stack of open elements, for instance), which
+//! [`DocumentParser::held_nodes`] lists, must not be
+//! [released](Document::release) between steps; detaching them is fine, the
+//! parser then builds into a detached subtree, as browsers do. Anything
+//! else scripts detach may be released while parsing goes on.
 //!
 //! Browsers queue a mutation record for every change the parser makes to
 //! the tree. So that the host can do the same, the parser can
@@ -24,7 +25,7 @@ use std::cell::RefCell;
 use html5ever::TokenizerResult;
 use html5ever::driver::Parser;
 use html5ever::tendril::StrTendril;
-use html5ever::tree_builder::TreeBuilderOpts;
+use html5ever::tree_builder::{Tracer, TreeBuilderOpts};
 use html5ever::{ParseOpts, parse_document};
 
 use crate::document::Document;
@@ -197,6 +198,39 @@ impl DocumentParser {
     /// Whether [`finish`](Self::finish) was called.
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// The nodes the parser still refers to and will use again: its stack
+    /// of open elements, its list of active formatting elements, its head
+    /// and form element pointers and the like. Until the next parsing call,
+    /// these must not be [released](Document::release), whether or not
+    /// they are still in the document; everything else may be. Empty once
+    /// [`finish`](Self::finish) was called.
+    ///
+    /// The document node is not listed: it is never released.
+    pub fn held_nodes(&self) -> Vec<NodeId> {
+        struct Collect(RefCell<Vec<NodeId>>);
+        impl Tracer for Collect {
+            type Handle = NodeId;
+            fn trace_handle(&self, node: &NodeId) {
+                self.0.borrow_mut().push(*node);
+            }
+        }
+        if self.finished {
+            return Vec::new();
+        }
+        let collect = Collect(RefCell::default());
+        self.parser.tokenizer.sink.trace_handles(&collect);
+        // The sink's own ids need no holding: the templates that became
+        // declarative shadow roots are never inserted, so never released
+        // but by the sink itself, and the text nodes it shrinks at the end
+        // are only looked at if they are still there.
+        let mut nodes = collect.0.into_inner();
+        let root = self.parser.tokenizer.sink.sink.document;
+        nodes.retain(|&n| n != root);
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
     }
 
     /// Parses as much of the input as possible, stopping after the next

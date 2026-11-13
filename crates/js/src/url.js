@@ -1,13 +1,13 @@
 // URL and URLSearchParams. Parsing and setters run in Rust (the `url`
-// crate); this file holds the WebIDL surface and the live link between a
-// URL and its searchParams.
+// crate, see urls.rs): a URL holds the parsed record, and its getters read
+// one component off it. This file holds the WebIDL surface and the live
+// link between a URL and its searchParams.
 // https://url.spec.whatwg.org/#api
 (function (native, internals) {
   'use strict';
 
   const usv = internals.usv;
-  const urlParse = native.urlParse;
-  const urlSet = native.urlSet;
+  const { urlNew, urlGet, urlSetPart, urlParse, urlHref, urlSet } = native;
   const queryParse = native.queryParse;
   const querySerialize = native.querySerialize;
   const ReflectOwnKeys = Reflect.ownKeys;
@@ -29,6 +29,10 @@
   function tag(ctor, name) {
     Object.defineProperty(ctor.prototype, Symbol.toStringTag, { value: name, configurable: true });
   }
+
+  // A value as a string for Rust, which makes it a USVString itself.
+  const str = (value) => typeof value === 'string' ? value : String(value);
+  const strOr = (value) => value === undefined ? undefined : str(value);
 
   function requireArgs(args, n, what) {
     if (args.length < n) {
@@ -195,71 +199,69 @@
   tag(URLSearchParams, 'URLSearchParams');
 
   class URL {
-    #parts;
+    #u;
     #query = null;
 
     constructor(url, base) {
       requireArgs(arguments, 1, "construct 'URL'");
-      const parts = urlParse(usv(url), base === undefined ? undefined : usv(base));
-      if (parts === undefined) {
+      const u = urlNew(str(url), strOr(base));
+      if (u === undefined) {
         throw new TypeError("Failed to construct 'URL': Invalid URL");
       }
-      this.#parts = parts;
+      this.#u = u;
     }
 
     static {
       setUrlQuery = (url, serialized) => {
-        url.#parts = urlSet(url.#parts[HREF], 'search', serialized);
+        urlSetPart(url.#u, 'search', serialized);
       };
     }
 
     static canParse(url, base) {
       requireArgs(arguments, 1, "execute 'canParse' on 'URL'");
-      return urlParse(usv(url), base === undefined ? undefined : usv(base)) !== undefined;
+      return urlNew(str(url), strOr(base)) !== undefined;
     }
 
     static parse(url, base) {
       requireArgs(arguments, 1, "execute 'parse' on 'URL'");
-      const parts = urlParse(usv(url), base === undefined ? undefined : usv(base));
-      return parts === undefined ? null : new URL(parts[HREF]);
+      const href = urlHref(str(url), strOr(base));
+      return href === undefined ? null : new URL(href);
     }
 
     #set(part, value) {
-      const parts = urlSet(this.#parts[HREF], part, usv(value));
-      if (parts === undefined) {
+      if (!urlSetPart(this.#u, part, str(value))) {
         throw new TypeError("Failed to set the '" + part + "' property on 'URL': Invalid URL");
       }
-      this.#parts = parts;
       if (this.#query !== null && (part === 'href' || part === 'search')) {
-        resetParams(this.#query, parts[SEARCH]);
+        resetParams(this.#query, urlGet(this.#u, SEARCH));
       }
     }
 
-    get href() { return this.#parts[HREF]; }
+    get href() { return urlGet(this.#u, HREF); }
     set href(value) { this.#set('href', value); }
-    get origin() { return this.#parts[ORIGIN]; }
-    get protocol() { return this.#parts[PROTOCOL]; }
+    get origin() { return urlGet(this.#u, ORIGIN); }
+    get protocol() { return urlGet(this.#u, PROTOCOL); }
     set protocol(value) { this.#set('protocol', value); }
-    get username() { return this.#parts[USERNAME]; }
+    get username() { return urlGet(this.#u, USERNAME); }
     set username(value) { this.#set('username', value); }
-    get password() { return this.#parts[PASSWORD]; }
+    get password() { return urlGet(this.#u, PASSWORD); }
     set password(value) { this.#set('password', value); }
-    get host() { return this.#parts[HOST]; }
+    get host() { return urlGet(this.#u, HOST); }
     set host(value) { this.#set('host', value); }
-    get hostname() { return this.#parts[HOSTNAME]; }
+    get hostname() { return urlGet(this.#u, HOSTNAME); }
     set hostname(value) { this.#set('hostname', value); }
-    get port() { return this.#parts[PORT]; }
+    get port() { return urlGet(this.#u, PORT); }
     set port(value) { this.#set('port', value); }
-    get pathname() { return this.#parts[PATHNAME]; }
+    get pathname() { return urlGet(this.#u, PATHNAME); }
     set pathname(value) { this.#set('pathname', value); }
-    get search() { return this.#parts[SEARCH]; }
+    get search() { return urlGet(this.#u, SEARCH); }
     set search(value) { this.#set('search', value); }
-    get hash() { return this.#parts[HASH]; }
+    get hash() { return urlGet(this.#u, HASH); }
     set hash(value) { this.#set('hash', value); }
 
     get searchParams() {
       if (this.#query === null) {
-        const params = new URLSearchParams(this.#parts[SEARCH]);
+        const params = new URLSearchParams(urlGet(this.#u, SEARCH));
         linkParams(params, this);
         this.#query = params;
       }
@@ -267,11 +269,11 @@
     }
 
     toString() {
-      return this.#parts[HREF];
+      return urlGet(this.#u, HREF);
     }
 
     toJSON() {
-      return this.#parts[HREF];
+      return urlGet(this.#u, HREF);
     }
   }
   tag(URL, 'URL');
@@ -279,7 +281,9 @@
   internals.expose({ URL, URLSearchParams });
   // Parses `input` against `base`, returning the component array (see the
   // indexes above) or undefined. Shared with location.
-  internals.urlParse = (input, base) => urlParse(usv(input), base === undefined ? undefined : usv(base));
+  internals.urlParse = (input, base) => urlParse(str(input), strOr(base));
+  // The serialization alone, or undefined.
+  internals.urlHref = (input, base) => urlHref(str(input), strOr(base));
   internals.urlSet = (href, part, value) => urlSet(href, part, usv(value));
   internals.URL_PARTS = { HREF, ORIGIN, PROTOCOL, USERNAME, PASSWORD, HOST, HOSTNAME, PORT, PATHNAME, SEARCH, HASH };
 })

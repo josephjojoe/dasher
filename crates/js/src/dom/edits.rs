@@ -116,21 +116,19 @@ pub(super) fn remove(w: &Write<'_>) -> Done {
 /// either falls back.
 struct Nodes<'w> {
     dom: &'w super::DomState,
-    /// While the call holds ids of the unwrapped nodes it made, no tree
-    /// may be freed: a tree is garbage once nothing wraps any of its nodes.
-    hold: Option<super::HoldGarbage<'w>>,
     /// Each argument: a node, or `None` for a primitive.
     args: Vec<Option<NodeId>>,
-    /// The nodes made for the call, queued to be freed (if they end up
-    /// unused) once it is over.
+    /// The nodes made for the call. Nothing wraps them, so they are held
+    /// (see `DomState::hold`) until the call is over, or the next change
+    /// could free them as garbage; letting go queues them to be freed if
+    /// they end up unused.
     made: std::cell::RefCell<Vec<NodeId>>,
 }
 
 impl Drop for Nodes<'_> {
     fn drop(&mut self) {
-        self.hold = None;
         for &n in self.made.get_mut().iter() {
-            self.dom.add_candidate(n);
+            self.dom.unhold(n);
         }
     }
 }
@@ -151,7 +149,6 @@ impl<'w> Nodes<'w> {
         }
         Ok(Nodes {
             dom: w.dom,
-            hold: Some(w.dom.hold_garbage()),
             args,
             made: std::cell::RefCell::default(),
         })
@@ -169,6 +166,7 @@ impl<'w> Nodes<'w> {
             // A primitive: converting it runs no JS.
             let s = w.str_arg(i)?;
             let t = w.dom.doc_mut().create_text(&s.as_str());
+            w.dom.hold(t);
             self.made.borrow_mut().push(t);
             Ok(t)
         };
@@ -179,6 +177,7 @@ impl<'w> Nodes<'w> {
             };
         }
         let fragment = w.dom.doc_mut().create_fragment();
+        w.dom.hold(fragment);
         self.made.borrow_mut().push(fragment);
         for (i, &arg) in self.args.iter().enumerate() {
             let n = match arg {

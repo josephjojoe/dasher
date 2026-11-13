@@ -25,10 +25,29 @@
 //! Nodes live in the document arena, which does not know about JS. When a
 //! subtree is detached and nothing in it has a wrapper, or the last wrapper
 //! of a detached tree is collected, the tree's root is queued as a
-//! candidate. Candidates are released from the arena the next time the DOM
-//! is mutated (or on [`JsRuntime::run_gc`]), after checking again that the
-//! tree is still detached and unwrapped. Nodes are only ever released there,
-//! which is what makes the node ids queued in between safe to look at.
+//! candidate. So is the tree a node leaves behind when it is removed or
+//! moved out of a detached tree, since the node may have held that tree's
+//! only wrapper. Candidates are released from the arena the next time the
+//! DOM is mutated (or on [`JsRuntime::run_gc`]), after checking again that
+//! the tree is still detached and unwrapped. Nodes are only ever released
+//! there, which is what makes the node ids queued in between safe to look
+//! at.
+//!
+//! Wrappers in rings are cycles, which only QuickJS's cycle collector
+//! frees, and it runs when the JS heap has grown, which says little about
+//! the arena: a loop making wrapped nodes and dropping them could reach the
+//! node limit first. So the DOM runs the collector itself when the arena
+//! has grown well past what the last collection left (see [`next_gc`]),
+//! before it nears the limit.
+//!
+//! The host holds node ids too: the page loader's parser keeps its open
+//! elements (taken from it at every [`JsRuntime::with_parser`] call), and
+//! the loader keeps script elements waiting to run. Those are *held* (see
+//! [`JsRuntime::hold_node`]), and a tree with a held node is kept like one
+//! with a wrapper; when the last hold on a node goes, its tree is queued as
+//! a candidate again. Holding only what is used, rather than everything
+//! while the page parses, is what lets a script that churns the DOM while
+//! the parser is still running stay within its node limit.
 //!
 //! # Mutations
 //!
@@ -108,7 +127,7 @@ use std::time::Duration;
 
 use dasher_css::SelectorList;
 use dasher_dom::{Document, DocumentParser, NodeId, NodeKind};
-use rquickjs::{Ctx, Function, Object};
+use rquickjs::{Ctx, Function, Object, qjs};
 
 use crate::clock::Clock;
 use crate::runtime::{JsRuntime, Shared};
@@ -202,9 +221,19 @@ pub(crate) struct DomState {
     ce_reactions: RefCell<Vec<custom::Reaction>>,
     activity: Cell<DomActivity>,
     clock: Rc<Clock>,
-    /// Set while the host holds node ids that must stay valid, such as the
-    /// parser's open elements: garbage trees are kept until it is cleared.
-    hold: Cell<bool>,
+    /// Nodes the host holds (see [`JsRuntime::hold_node`]), with how many
+    /// holds each has. A tree with a held node is not released.
+    held: RefCell<HashMap<NodeId, u32>>,
+    /// The nodes held for the parser (see [`JsRuntime::with_parser`]).
+    parser_held: RefCell<Vec<NodeId>>,
+    /// Bumped by [`JsRuntime::set_document`], so holds taken on the old
+    /// document's nodes are not let go of in the new one.
+    generation: Cell<u64>,
+    /// The JS runtime, to run its cycle collector; null before the DOM is
+    /// installed and once the runtime is going away.
+    rt: Cell<*mut qjs::JSRuntime>,
+    /// The number of live nodes at which to run the cycle collector next.
+    gc_at: Cell<usize>,
     /// Whether the layout hook is set (see the `layout` module).
     layout_watch: Cell<bool>,
     /// The version the layout hook last saw.
@@ -249,7 +278,11 @@ impl DomState {
             ce_reactions: RefCell::default(),
             activity: Cell::default(),
             clock,
-            hold: Cell::new(false),
+            held: RefCell::default(),
+            parser_held: RefCell::default(),
+            generation: Cell::new(0),
+            rt: Cell::new(std::ptr::null_mut()),
+            gc_at: Cell::new(next_gc(1, node_limit)),
             layout_watch: Cell::new(false),
             layout_seen: Cell::new(0),
             body_seen: Cell::new(false),
@@ -264,11 +297,34 @@ impl DomState {
     }
 
     /// The document, for changing. Releases garbage trees first, so their
-    /// arena slots can be reused.
+    /// arena slots can be reused, after collecting garbage wrappers if the
+    /// arena has grown enough to call for it.
+    ///
+    /// Like anything that can allocate JS values, this may run the GC, so
+    /// it must not be called while `wrappers` or the other cells finalizers
+    /// use are borrowed.
     pub(crate) fn doc_mut(&self) -> RefMut<'_, Document> {
+        let collect = self.doc.borrow().len() >= self.gc_at.get();
+        let rt = self.rt.get();
+        if collect && !rt.is_null() {
+            // SAFETY: `rt` is the live runtime this DOM belongs to (it is
+            // cleared before the runtime is freed), used on its own thread.
+            // Collecting runs only finalizers, which do not run JS and touch
+            // none of what is borrowed here.
+            unsafe { qjs::JS_RunGC(rt) };
+        }
         let mut doc = self.doc.borrow_mut();
         self.sweep(&mut doc);
+        if collect {
+            self.gc_at.set(next_gc(doc.len(), self.node_limit));
+        }
         doc
+    }
+
+    /// Sets the runtime whose cycle collector [`doc_mut`](Self::doc_mut)
+    /// runs, or clears it with null.
+    pub(crate) fn set_runtime(&self, rt: *mut qjs::JSRuntime) {
+        self.rt.set(rt);
     }
 
     pub(crate) fn node_limit(&self) -> Option<usize> {
@@ -358,28 +414,62 @@ impl DomState {
         }
     }
 
-    /// Keeps detached trees from being released until the result is
-    /// dropped, as [`JsRuntime::hold_detached_nodes`] does for the host:
-    /// for native members that hold ids of unwrapped nodes they made
-    /// across changes to the tree.
-    pub(crate) fn hold_garbage(&self) -> HoldGarbage<'_> {
-        HoldGarbage {
-            dom: self,
-            was: self.hold.replace(true),
-        }
-    }
-
     /// Queues `id`'s tree to be released if it turns out to be garbage.
     pub(crate) fn add_candidate(&self, id: NodeId) {
         self.candidates.borrow_mut().push(id);
     }
 
+    /// Adds a hold on `id` (see [`JsRuntime::hold_node`]).
+    fn hold(&self, id: NodeId) {
+        *self.held.borrow_mut().entry(id).or_default() += 1;
+    }
+
+    /// Takes away a hold on `id`. Once it has none, its tree may be garbage.
+    fn unhold(&self, id: NodeId) {
+        let mut held = self.held.borrow_mut();
+        let Some(count) = held.get_mut(&id) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            held.remove(&id);
+            drop(held);
+            self.add_candidate(id);
+        }
+    }
+
+    /// Makes `nodes` the ones held for the parser, letting go of those held
+    /// for it before.
+    fn hold_for_parser(&self, nodes: Vec<NodeId>) {
+        for &n in &nodes {
+            self.hold(n);
+        }
+        let old = std::mem::replace(&mut *self.parser_held.borrow_mut(), nodes);
+        for n in old {
+            self.unhold(n);
+        }
+    }
+
+    /// Queues the tree `from` is in as a candidate if it is detached: a
+    /// node was just taken out of it, which may have held the tree's only
+    /// wrapper. Nothing to do if `from` has one itself, as it usually does
+    /// (script called a method on it).
+    pub(crate) fn left_behind(&self, doc: &Document, from: NodeId) {
+        if self.wrappers.contains(from) {
+            return;
+        }
+        if group_root(doc, from) != doc.root() {
+            self.add_candidate(from);
+        }
+    }
+
     /// Releases the trees of queued candidates that are detached and have
-    /// no wrapper left. Waits while mutation records or custom element
-    /// reactions, which may name nodes of those trees, are queued, and while
-    /// the host holds detached nodes.
+    /// no wrapper or held node left. Waits while mutation records or custom
+    /// element reactions, which may name nodes of those trees, are queued
+    /// (they are only queued for the length of one DOM call, until they are
+    /// delivered to JS, which wraps the nodes they name).
     fn sweep(&self, doc: &mut Document) {
-        if self.hold.get() || self.has_pending_records() || self.has_pending_reactions() {
+        if self.has_pending_records() || self.has_pending_reactions() {
             return;
         }
         let candidates = std::mem::take(&mut *self.candidates.borrow_mut());
@@ -398,9 +488,14 @@ impl DomState {
         roots.dedup();
         let garbage: Vec<NodeId> = {
             let wrappers = &self.wrappers;
+            let held = self.held.borrow();
             roots
                 .into_iter()
-                .filter(|&r| !any_in_tree(doc, r, |n| wrappers.contains(n)))
+                .filter(|&r| {
+                    !any_in_tree(doc, r, |n| {
+                        wrappers.contains(n) || (!held.is_empty() && held.contains_key(&n))
+                    })
+                })
                 .collect()
         };
         if !garbage.is_empty() && !self.owners.borrow().is_empty() {
@@ -415,15 +510,54 @@ impl DomState {
     }
 }
 
-/// See [`DomState::hold_garbage`].
-pub(crate) struct HoldGarbage<'a> {
-    dom: &'a DomState,
-    was: bool,
+/// The live node count at which to run the cycle collector again, after
+/// one left `live` nodes: twice as many and then some, so collections stay
+/// rare relative to the nodes made between them, but short of the node
+/// limit, and at least an eighth more, so a page with nearly its limit in
+/// live nodes does not collect on every change.
+fn next_gc(live: usize, limit: Option<usize>) -> usize {
+    const SLACK: usize = 4096;
+    let doubled = live.saturating_mul(2).saturating_add(SLACK);
+    let near_limit = limit.map_or(usize::MAX, |l| l - l / 8);
+    doubled.min(near_limit).max(live + live / 8 + 1024)
 }
 
-impl Drop for HoldGarbage<'_> {
+/// A hold on a node of the page's document, from [`JsRuntime::hold_node`]:
+/// the node is not freed until this is dropped. It does nothing once the
+/// page's document has been [replaced](JsRuntime::set_document).
+pub struct HeldNode {
+    dom: Rc<DomState>,
+    node: NodeId,
+    generation: u64,
+}
+
+impl HeldNode {
+    pub(crate) fn new(dom: &Rc<DomState>, node: NodeId) -> Self {
+        dom.hold(node);
+        Self {
+            dom: Rc::clone(dom),
+            node,
+            generation: dom.generation.get(),
+        }
+    }
+
+    /// The node held.
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+}
+
+impl std::fmt::Debug for HeldNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("HeldNode").field(&self.node).finish()
+    }
+}
+
+impl Drop for HeldNode {
     fn drop(&mut self) {
-        self.dom.hold.set(self.was);
+        if self.dom.generation.get() == self.generation {
+            self.dom.unhold(self.node);
+        }
     }
 }
 
@@ -479,6 +613,10 @@ pub(crate) fn install<'js>(
     shared: &Rc<Shared>,
 ) -> rquickjs::Result<()> {
     let dom = Object::new(ctx.clone())?;
+    // SAFETY: `ctx` is a live context.
+    shared
+        .dom
+        .set_runtime(unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) });
     natives::install(&dom, &shared.dom)?;
     let s = Rc::clone(shared);
     dom.set(
@@ -533,6 +671,14 @@ impl JsRuntime {
     /// Runs `f`, which parses into the page's document with `parser`, with
     /// write access to the document as [`with_document_mut`] gives.
     ///
+    /// Afterwards the nodes the parser still refers to (its
+    /// [`held_nodes`](DocumentParser::held_nodes)) are held, as
+    /// [`hold_node`](Self::hold_node) holds them, in place of those held
+    /// after the previous call; so the page's one parser must be driven
+    /// only through this. Once it has [finished](DocumentParser::finish),
+    /// it holds nothing. Nodes scripts detach that it does not refer to are
+    /// freed as usual, while parsing goes on.
+    ///
     /// Unlike other host changes, what the parser builds is reported to
     /// `MutationObserver`s, as browsers report it: a `childList` record for
     /// each node inserted (or moved, for misnested markup), a
@@ -559,6 +705,8 @@ impl JsRuntime {
         let observed = dom.is_observed();
         parser.log_changes(observed);
         let result = self.with_document_mut(|doc| f(parser, doc));
+        // Before any script runs, which may detach them.
+        dom.hold_for_parser(parser.held_nodes());
         self.note_parsed_body();
         if observed {
             dom.parser_changes(&dom.doc(), &parser.take_changes());
@@ -588,13 +736,13 @@ impl JsRuntime {
         self.body_inserted(body);
     }
 
-    /// While `hold` is set, nodes detached from the document are not freed,
-    /// even once nothing refers to them, so node ids the host keeps across
-    /// script runs stay valid. The page loader holds them while it parses,
-    /// since the parser keeps ids of open elements that scripts may remove.
-    /// Clearing it lets the garbage be freed again.
-    pub fn hold_detached_nodes(&self, hold: bool) {
-        self.shared().dom.hold.set(hold);
+    /// Keeps `node`, and so the tree it is in, from being freed while the
+    /// returned [`HeldNode`] lives, so the host can keep its id across
+    /// script runs that may detach it (a script element waiting to run,
+    /// say). Nodes are otherwise freed once they are detached and script
+    /// can no longer reach them. A node may be held any number of times.
+    pub fn hold_node(&self, node: NodeId) -> HeldNode {
+        HeldNode::new(&self.shared().dom, node)
     }
 
     /// Replaces the page's document, e.g. with one parsed from the response.
@@ -615,6 +763,11 @@ impl JsRuntime {
         });
         let old = std::mem::replace(&mut *dom.doc.borrow_mut(), document);
         dom.candidates.borrow_mut().clear();
+        dom.held.borrow_mut().clear();
+        dom.parser_held.borrow_mut().clear();
+        dom.generation.set(dom.generation.get() + 1);
+        dom.gc_at
+            .set(next_gc(dom.doc.borrow().len(), dom.node_limit));
         dom.selectors.borrow_mut().clear();
         // The document node keeps its wrapper, and so its observers.
         let root = dom.doc.borrow().root();

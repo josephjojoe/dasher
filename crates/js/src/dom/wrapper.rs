@@ -545,8 +545,9 @@ pub(crate) enum Move {
     WholeTree,
     /// A fragment that is the root of its own tree moves its children.
     Fragment,
-    /// Anything else: find the wrappers under the moved nodes.
-    Walk,
+    /// Anything else: find the wrappers under the moved nodes. The node
+    /// leaves the rest of its tree, rooted at `from`, behind.
+    Walk { from: NodeId },
 }
 
 /// Works out, before `node` is inserted under `parent`, how the insertion
@@ -556,7 +557,7 @@ pub(crate) fn plan_insert(doc: &Document, parent: NodeId, node: NodeId) -> Move 
     if old == group_root(doc, parent) {
         Move::SameTree
     } else if old != node {
-        Move::Walk
+        Move::Walk { from: old }
     } else if doc.kind(node) == NodeKind::DocumentFragment {
         Move::Fragment
     } else {
@@ -578,8 +579,15 @@ pub(crate) fn after_insert<'js>(
     dom.inserted(doc, node);
     let whole = match plan {
         Move::SameTree => return,
-        Move::WholeTree | Move::Fragment => dom.cached(ctx, node),
-        Move::Walk => None,
+        Move::WholeTree => dom.cached(ctx, node),
+        Move::Fragment => {
+            dom.left_behind(doc, node);
+            dom.cached(ctx, node)
+        }
+        Move::Walk { from } => {
+            dom.left_behind(doc, from);
+            None
+        }
     };
     let anchor_at = |dom: &DomState| {
         dom.cached(ctx, parent)
@@ -612,7 +620,8 @@ pub(crate) fn after_insert<'js>(
 }
 
 /// Regroups wrappers after the subtree at `root` was detached from `from`.
-/// If nothing in it has a wrapper, it is queued to be freed.
+/// If nothing in it has a wrapper, it is queued to be freed; so is the
+/// tree it left, if that is detached too.
 pub(crate) fn after_remove(
     ctx: &Ctx<'_>,
     dom: &DomState,
@@ -621,6 +630,7 @@ pub(crate) fn after_remove(
     from: NodeId,
 ) {
     dom.removed_from(doc, root, from);
+    dom.left_behind(doc, from);
     let wrappers = wrapped_under(ctx, dom, doc, &[root]);
     let Some((first, rest)) = wrappers.split_first() else {
         dom.add_candidate(root);
