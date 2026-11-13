@@ -7,8 +7,8 @@ use std::collections::{HashMap, VecDeque};
 
 use dasher_dom::{Document, Name, NodeId};
 use dasher_js::{
-    ConsoleLevel, EventTarget, JsRuntime, ModuleCredentials, ModuleGraph, ModuleGraphStatus,
-    PendingOperation,
+    ConsoleLevel, EventTarget, HeldNode, JsRuntime, ModuleCredentials, ModuleGraph,
+    ModuleGraphStatus, PendingOperation,
 };
 use dasher_net::{Credentials, Request, ResourceType, Session, Url};
 use encoding_rs::Encoding;
@@ -166,6 +166,9 @@ struct Entry {
     source: Source,
     /// Keeps the event loop busy until the script has run.
     _operation: PendingOperation,
+    /// Keeps the element from being freed until the script has run, even
+    /// if script removes it meanwhile (it still runs then, as in browsers).
+    _hold: HeldNode,
 }
 
 /// External scripts in flight and the lists that order them.
@@ -220,7 +223,7 @@ impl Scripts {
     pub(crate) fn fetch(
         &mut self,
         session: &Session,
-        element: NodeId,
+        element: HeldNode,
         params: FetchParams,
         order: Order,
         operation: PendingOperation,
@@ -250,7 +253,7 @@ impl Scripts {
     /// `order`.
     pub(crate) fn module(
         &mut self,
-        element: NodeId,
+        element: HeldNode,
         graph: ModuleGraph,
         external: bool,
         order: Order,
@@ -266,7 +269,7 @@ impl Scripts {
 
     fn add(
         &mut self,
-        element: NodeId,
+        element: HeldNode,
         source: Source,
         order: Order,
         operation: PendingOperation,
@@ -276,9 +279,10 @@ impl Scripts {
         self.entries.insert(
             id,
             Entry {
-                element,
+                element: element.node(),
                 source,
                 _operation: operation,
+                _hold: element,
             },
         );
         match order {

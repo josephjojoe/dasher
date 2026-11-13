@@ -467,6 +467,16 @@ mix of work. Lightpanda does real layout, which is why its
 | URL parsing | 2,948 | 1,482 | 2.0× | 0.62 | 0.23 | 2.7× |
 | new Function | 3,619 | 1,066 | 3.4× | 0.20 | 0.04 | 5.0× |
 
+Since the baseline, DAS-39 moved Intl formatting and URL parsing into Rust
+(`crates/js/src/intl/`, `crates/js/src/urls.rs`). The same machine, with
+both builds and Node measured side by side and 9 runs each (the machine
+was busy, so absolute figures run a little high):
+
+| benchmark | before ns/op | after ns/op | Node `--jitless` ns/op | after ÷ Node |
+| --- | ---: | ---: | ---: | ---: |
+| Date and Intl formatting | 48,317 | 3,033 | 2,633 | 1.2× |
+| URL parsing | 2,942 | 1,630 | 1,558 | 1.0× |
+
 | benchmark | dasher ns/op | audit: dasher ns | audit: Lightpanda ns | dasher ÷ Lightpanda |
 | --- | ---: | ---: | ---: | ---: |
 | getElementById | 69,377 | 61,465 | 270 | 227.6× |
@@ -568,4 +578,8 @@ down a process that is serving other jobs.
   the default caps a runaway document at roughly 65 MiB. That is far beyond
   real pages, which rarely pass 100,000 nodes. Fragment parsing and deep
   clones stop early once over the limit, so a single
-  `innerHTML = hugeString` cannot overshoot it by much.
+  `innerHTML = hugeString` cannot overshoot it by much. The limit counts
+  live nodes, and removed nodes are freed as soon as script can no longer
+  reach them, also while the page is still parsing, so a page that keeps
+  rewriting the same few nodes (a ticker, a list re-rendered) stays flat
+  however long it runs (`crates/js/tests/churn.rs`).
