@@ -15823,12 +15823,74 @@ static int JS_IteratorClose(JSContext *ctx, JSValueConst enum_obj,
     return res;
 }
 
+static JSValue js_array_iterator_next(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv,
+                                      int *pdone, int magic);
+static JSValue js_create_array_iterator(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv, int magic);
+
+/* dasher: true if iterating the array 'val' would use the engine's own
+   array iterator: it is a fast array with no own Symbol.iterator, its
+   prototype is the realm's Array.prototype, whose Symbol.iterator is a
+   data property holding the original `values`, and
+   %ArrayIteratorPrototype%.next is a data property holding the original
+   `next`. The lookups are the ones a get would do, without the get. When
+   it returns true, *pnext (if not NULL) is that `next`, not duplicated. */
+static bool js_array_iterator_untouched(JSContext *ctx, JSValueConst val,
+                                        JSValueConst *pnext)
+{
+    JSObject *p, *proto;
+    JSShapeProperty *prs;
+    JSProperty *pr;
+    JSCFunctionType values = { .generic_magic = js_create_array_iterator };
+    JSCFunctionType next = { .iterator_next = js_array_iterator_next };
+
+    if (JS_VALUE_GET_TAG(val) != JS_TAG_OBJECT)
+        return false;
+    p = JS_VALUE_GET_OBJ(val);
+    if (p->class_id != JS_CLASS_ARRAY || !p->fast_array ||
+        find_own_property1(p, JS_ATOM_Symbol_iterator))
+        return false;
+    proto = p->shape->proto;
+    if (!proto || JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_ARRAY]) != JS_TAG_OBJECT ||
+        proto != JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_ARRAY]))
+        return false;
+    prs = find_own_property(&pr, proto, JS_ATOM_Symbol_iterator);
+    if (!prs || (prs->flags & JS_PROP_TMASK) ||
+        !JS_IsCFunction(ctx, pr->u.value, values.generic, JS_ITERATOR_KIND_VALUE))
+        return false;
+    if (JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_ARRAY_ITERATOR]) != JS_TAG_OBJECT)
+        return false;
+    proto = JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_ARRAY_ITERATOR]);
+    prs = find_own_property(&pr, proto, JS_ATOM_next);
+    if (!prs || (prs->flags & JS_PROP_TMASK) ||
+        !JS_IsCFunction(ctx, pr->u.value, next.generic, 0))
+        return false;
+    if (pnext)
+        *pnext = pr->u.value;
+    return true;
+}
+
 /* obj -> enum_rec (3 slots) */
 static __exception int js_for_of_start(JSContext *ctx, JSValue *sp,
                                        bool is_async)
 {
     JSValue op1, obj, method;
+    JSValueConst next;
     op1 = sp[-1];
+    /* dasher: an array with the engine's own iterator gets that iterator
+       made directly, without the get of Symbol.iterator, the call and the
+       get of `next` that would find the same. */
+    if (!is_async && js_array_iterator_untouched(ctx, op1, &next)) {
+        obj = js_create_array_iterator(ctx, op1, 0, NULL,
+                                       JS_ITERATOR_KIND_VALUE);
+        if (JS_IsException(obj))
+            return -1;
+        JS_FreeValue(ctx, op1);
+        sp[-1] = obj;
+        sp[0] = js_dup(next);
+        return 0;
+    }
     obj = JS_GetIterator(ctx, op1, is_async);
     if (JS_IsException(obj))
         return -1;
@@ -15981,6 +16043,49 @@ static __exception int js_append_enumerate(JSContext *ctx, JSValue *sp)
 
     pos = JS_VALUE_GET_INT(sp[-2]);
 
+    /* dasher: a fast array with the engine's own iterator, its length
+       matching its elements, is read straight from its elements; nothing
+       of the iterator can be seen. Into a fast array being built at its
+       end, the elements go in all at once. */
+    if (js_array_iterator_untouched(ctx, sp[-1], NULL)) {
+        JSObject *ps = JS_VALUE_GET_OBJ(sp[-1]), *pt;
+        uint32_t len, count = ps->u.array.count;
+        if (JS_VALUE_GET_TAG(ps->prop[0].u.value) == JS_TAG_INT &&
+            (uint32_t)JS_VALUE_GET_INT(ps->prop[0].u.value) == count) {
+            pt = JS_VALUE_GET_TAG(sp[-3]) == JS_TAG_OBJECT ?
+                JS_VALUE_GET_OBJ(sp[-3]) : NULL;
+            if (pt && pt != ps && pt->class_id == JS_CLASS_ARRAY &&
+                pt->fast_array && pt->extensible &&
+                pt->u.array.count == pos &&
+                JS_VALUE_GET_TAG(pt->prop[0].u.value) == JS_TAG_INT &&
+                (uint32_t)JS_VALUE_GET_INT(pt->prop[0].u.value) == pos &&
+                (get_shape_prop(pt->shape)->flags & JS_PROP_WRITABLE) &&
+                count <= INT32_MAX - pos) {
+                len = pos + count;
+                if (len > pt->u.array.u1.size &&
+                    expand_fast_array(ctx, pt, len))
+                    return -1;
+                for(i = 0; i < count; i++)
+                    pt->u.array.u.values[pos + i] = js_dup(ps->u.array.u.values[i]);
+                pt->u.array.count = len;
+                pt->prop[0].u.value = js_int32(len);
+                sp[-2] = js_int32(len);
+                return 0;
+            }
+            /* the elements are read before any is defined, as the
+               iterator would read each before its definition, which
+               cannot run code on a fresh array */
+            for(i = 0; i < ps->u.array.count; i++) {
+                if (JS_DefinePropertyValueUint32(ctx, sp[-3], pos++,
+                                                 js_dup(ps->u.array.u.values[i]),
+                                                 JS_PROP_C_W_E) < 0)
+                    return -1;
+            }
+            sp[-2] = js_int32(pos);
+            return 0;
+        }
+    }
+
     /* XXX: further optimisations:
        - use ctx->array_proto_values?
        - check if array_iterator_prototype next method is built-in and
@@ -16051,6 +16156,147 @@ exception:
     return -1;
 }
 
+/* dasher: true if no object on the prototype chain of 'p' (not 'p'
+   itself) has a property 'atom', and none is exotic, so that setting
+   'atom' on 'p' when 'p' lacks it can only add a data property. */
+static bool js_proto_chain_lacks(JSObject *p, JSAtom atom)
+{
+    for(p = p->shape->proto; p != NULL; p = p->shape->proto) {
+        if (p->is_exotic || find_own_property1(p, atom))
+            return false;
+    }
+    return true;
+}
+
+/* dasher: JS_CopyDataProperties() for a source that is an ordinary
+   object (spread, object rest, Object.assign) without the list of keys
+   and a lookup for each. Returns 1 if done, 0 if the general path must
+   do it (nothing has been copied then) and -1 on exception.
+
+   It does what the general path does, in the same order: the keys are
+   the source's enumerable own keys when the copy starts, strings first
+   and then symbols, and each value is read with a get. The source's
+   shape is held while copying, which keeps it from being changed in
+   place, so while the source still has that shape its values are read
+   from their slots; once a setter or getter has changed it, every
+   remaining value is read with JS_GetProperty as the general path does.
+   A source with an array index for a key takes the general path, which
+   puts those keys first. */
+static int js_copy_data_properties_fast(JSContext *ctx, JSValueConst target,
+                                        JSObject *p, JSObject *pexcl,
+                                        bool setprop)
+{
+    JSShape *sh = p->shape;
+    JSShapeProperty *prs;
+    JSObject *pt;
+    JSValue val;
+    uint32_t idx;
+    int i, pass, ret, n_sym = 0, n_enum = 0;
+    bool plain = true; /* every key a string with an ordinary C_W_E value */
+
+    if (p->class_id != JS_CLASS_OBJECT || sh->has_small_array_index)
+        return 0;
+    for(i = 0, prs = sh->prop; i < sh->prop_count; i++, prs++) {
+        if (prs->atom == JS_ATOM_NULL)
+            continue;
+        if (JS_AtomIsArrayIndex(ctx, &idx, prs->atom))
+            return 0;
+        switch(JS_AtomGetKind(ctx, prs->atom)) {
+        case JS_ATOM_KIND_STRING:
+            break;
+        case JS_ATOM_KIND_SYMBOL:
+            n_sym++;
+            plain = false;
+            break;
+        default:
+            plain = false;
+            continue;
+        }
+        if (prs->flags & JS_PROP_ENUMERABLE)
+            n_enum++;
+        if (prs->flags != JS_PROP_C_W_E)
+            plain = false;
+    }
+    if (n_enum == 0)
+        return 1;
+
+    /* An empty ordinary target with the source's prototype, copying every
+       key of a source of plain data properties, ends with the source's
+       shape: take it, and the values. Setting a key on the target can only
+       add it if nothing on the prototype chain has that key. */
+    if (plain && !pexcl && JS_VALUE_GET_TAG(target) == JS_TAG_OBJECT &&
+        (pt = JS_VALUE_GET_OBJ(target)) != p &&
+        pt->class_id == JS_CLASS_OBJECT && pt->extensible &&
+        pt->shape->prop_count == 0 && pt->shape->proto == sh->proto &&
+        sh->is_hashed && sh->deleted_prop_count == 0) {
+        bool ok = true;
+        if (setprop) {
+            for(i = 0; i < sh->prop_count && ok; i++)
+                ok = js_proto_chain_lacks(p, sh->prop[i].atom);
+        }
+        if (ok) {
+            JSProperty *new_prop;
+            if (pt->shape->prop_size != sh->prop_size) {
+                new_prop = js_realloc(ctx, pt->prop,
+                                      sizeof(new_prop[0]) * sh->prop_size);
+                if (!new_prop)
+                    return -1;
+                pt->prop = new_prop;
+            }
+            js_free_shape(ctx->rt, pt->shape);
+            pt->shape = js_dup_shape(sh);
+            for(i = 0; i < sh->prop_count; i++)
+                pt->prop[i].u.value = js_dup(p->prop[i].u.value);
+            return 1;
+        }
+    }
+
+    js_dup_shape(sh);
+    ret = 1;
+    for(pass = 0; pass < 2 && ret > 0; pass++) {
+        if (pass == 1 && n_sym == 0)
+            break;
+        for(i = 0; i < sh->prop_count; i++) {
+            JSAtom atom = sh->prop[i].atom;
+            int flags = sh->prop[i].flags;
+            JSAtomKindEnum kind;
+            if (atom == JS_ATOM_NULL || !(flags & JS_PROP_ENUMERABLE))
+                continue;
+            kind = JS_AtomGetKind(ctx, atom);
+            if (kind != (pass == 0 ? JS_ATOM_KIND_STRING : JS_ATOM_KIND_SYMBOL))
+                continue;
+            if (pexcl) {
+                int r = JS_GetOwnPropertyInternal(ctx, NULL, pexcl, atom);
+                if (r) {
+                    if (r < 0) {
+                        ret = -1;
+                        break;
+                    }
+                    continue;
+                }
+            }
+            if (p->shape == sh && !(flags & JS_PROP_TMASK))
+                val = js_dup(p->prop[i].u.value);
+            else
+                val = JS_GetProperty(ctx, JS_MKPTR(JS_TAG_OBJECT, p), atom);
+            if (JS_IsException(val)) {
+                ret = -1;
+                break;
+            }
+            if (setprop)
+                ret = JS_SetProperty(ctx, target, atom, val);
+            else
+                ret = JS_DefinePropertyValue(ctx, target, atom, val,
+                                             JS_PROP_C_W_E);
+            if (ret < 0)
+                break;
+            ret = 1;
+        }
+    }
+    js_free_shape(ctx->rt, sh);
+    return ret;
+}
+
 static __exception int JS_CopyDataProperties(JSContext *ctx,
                                              JSValue target,
                                              JSValue source,
@@ -16073,6 +16319,11 @@ static __exception int JS_CopyDataProperties(JSContext *ctx,
         pexcl = JS_VALUE_GET_OBJ(excluded);
 
     p = JS_VALUE_GET_OBJ(source);
+
+    /* dasher: an ordinary source is copied without a key list */
+    ret = js_copy_data_properties_fast(ctx, target, p, pexcl, setprop);
+    if (ret != 0)
+        return ret < 0 ? -1 : 0;
 
     gpn_flags = JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK | JS_GPN_ENUM_ONLY;
     if (p->is_exotic) {
@@ -18511,6 +18762,22 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         CASE(OP_define_array_el):
             {
                 int ret;
+                /* dasher: the next element of a fast array being built
+                   is added in place, as JS_CreateProperty would add it */
+                if (likely(JS_VALUE_GET_TAG(sp[-3]) == JS_TAG_OBJECT &&
+                           JS_VALUE_GET_TAG(sp[-2]) == JS_TAG_INT)) {
+                    JSObject *p1 = JS_VALUE_GET_OBJ(sp[-3]);
+                    if (p1->class_id == JS_CLASS_ARRAY && p1->fast_array &&
+                        p1->extensible &&
+                        JS_VALUE_GET_INT(sp[-2]) == p1->u.array.count) {
+                        ret = add_fast_array_element(ctx, p1, sp[-1],
+                                                     JS_PROP_THROW);
+                        sp -= 1;
+                        if (unlikely(ret < 0))
+                            goto exception;
+                        BREAK;
+                    }
+                }
                 ret = JS_DefinePropertyValueValue(ctx, sp[-3], js_dup(sp[-2]), sp[-1],
                                                   JS_PROP_C_W_E | JS_PROP_THROW);
                 sp -= 1;
@@ -39939,6 +40206,31 @@ static JSValue js_function_apply(JSContext *ctx, JSValueConst this_val,
          JS_VALUE_GET_TAG(array_arg) == JS_TAG_NULL) && magic != 2) {
         return JS_Call(ctx, this_val, this_arg, 0, NULL);
     }
+    /* dasher: a short fast array or arguments object, its length
+       matching its elements, is copied to the C stack instead of a list
+       allocated for the call. Each value is still duplicated: the callee
+       may change the array while it runs. For an array the length is
+       its own `length` slot, which is what the get would read. */
+    if (JS_VALUE_GET_TAG(array_arg) == JS_TAG_OBJECT) {
+        JSObject *p = JS_VALUE_GET_OBJ(array_arg);
+        JSValue stack_tab[16];
+        uint32_t i;
+        if (p->class_id == JS_CLASS_ARRAY && p->fast_array &&
+            p->u.array.count <= countof(stack_tab) &&
+            JS_VALUE_GET_TAG(p->prop[0].u.value) == JS_TAG_INT &&
+            JS_VALUE_GET_INT(p->prop[0].u.value) == p->u.array.count) {
+            len = p->u.array.count;
+            for(i = 0; i < len; i++)
+                stack_tab[i] = js_dup(p->u.array.u.values[i]);
+            if (magic & 1)
+                ret = JS_CallConstructor2(ctx, this_val, this_arg, len, vc(stack_tab));
+            else
+                ret = JS_Call(ctx, this_val, this_arg, len, vc(stack_tab));
+            for(i = 0; i < len; i++)
+                JS_FreeValue(ctx, stack_tab[i]);
+            return ret;
+        }
+    }
     tab = build_arg_list(ctx, &len, array_arg);
     if (!tab)
         return JS_EXCEPTION;
@@ -40600,6 +40892,46 @@ static JSValue js_get_this(JSContext *ctx, JSValueConst this_val)
     return js_dup(this_val);
 }
 
+static JSValue js_get_this(JSContext *ctx, JSValueConst this_val);
+
+/* dasher: true if ArraySpeciesCreate(obj) would construct the realm's own
+   Array: 'obj' is an Array with no own `constructor`, its prototype is
+   Array.prototype, whose `constructor` is a data property holding Array,
+   and Array's own Symbol.species is the original getter, which returns
+   Array. Those are the gets and the call the general path makes. */
+static bool js_array_species_is_array(JSContext *ctx, JSValueConst obj)
+{
+    JSObject *p, *proto, *ctor;
+    JSShapeProperty *prs;
+    JSProperty *pr;
+    JSObject *getter;
+
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return false;
+    p = JS_VALUE_GET_OBJ(obj);
+    if (p->class_id != JS_CLASS_ARRAY ||
+        JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_ARRAY]) != JS_TAG_OBJECT ||
+        JS_VALUE_GET_TAG(ctx->array_ctor) != JS_TAG_OBJECT)
+        return false;
+    proto = JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_ARRAY]);
+    if (p->shape->proto != proto ||
+        find_own_property1(p, JS_ATOM_constructor))
+        return false;
+    ctor = JS_VALUE_GET_OBJ(ctx->array_ctor);
+    prs = find_own_property(&pr, proto, JS_ATOM_constructor);
+    if (!prs || (prs->flags & JS_PROP_TMASK) ||
+        JS_VALUE_GET_TAG(pr->u.value) != JS_TAG_OBJECT ||
+        JS_VALUE_GET_OBJ(pr->u.value) != ctor)
+        return false;
+    prs = find_own_property(&pr, ctor, JS_ATOM_Symbol_species);
+    if (!prs || (prs->flags & JS_PROP_TMASK) != JS_PROP_GETSET)
+        return false;
+    getter = pr->u.getset.getter;
+    return getter && getter->class_id == JS_CLASS_C_FUNCTION &&
+        getter->u.cfunc.cproto == JS_CFUNC_getter &&
+        getter->u.cfunc.c_function.getter == js_get_this;
+}
+
 static JSValue JS_ArraySpeciesCreate(JSContext *ctx, JSValueConst obj,
                                      JSValueConst len_val)
 {
@@ -40607,6 +40939,9 @@ static JSValue JS_ArraySpeciesCreate(JSContext *ctx, JSValueConst obj,
     int res;
     JSContext *realm;
 
+    /* dasher: a plain array makes a plain array */
+    if (js_array_species_is_array(ctx, obj))
+        return js_array_constructor(ctx, JS_UNDEFINED, 1, &len_val);
     res = js_is_array(ctx, obj);
     if (res < 0)
         return JS_EXCEPTION;
@@ -40801,6 +41136,32 @@ static JSValue js_array_concat(JSContext *ctx, JSValueConst this_val,
             if (n + len > MAX_SAFE_INTEGER) {
                 JS_ThrowTypeError(ctx, "Array loo long");
                 goto exception;
+            }
+            /* dasher: a fast array, its length matching its elements, goes
+               at the end of a fast result in one copy. Reading and
+               defining its elements one by one would run no code. */
+            if (JS_VALUE_GET_TAG(e) == JS_TAG_OBJECT &&
+                JS_VALUE_GET_TAG(arr) == JS_TAG_OBJECT) {
+                JSObject *pe = JS_VALUE_GET_OBJ(e), *pa = JS_VALUE_GET_OBJ(arr);
+                if (pe->class_id == JS_CLASS_ARRAY && pe->fast_array &&
+                    len == pe->u.array.count &&
+                    pa != pe && pa->class_id == JS_CLASS_ARRAY &&
+                    pa->fast_array && pa->extensible &&
+                    pa->u.array.count == n &&
+                    JS_VALUE_GET_TAG(pa->prop[0].u.value) == JS_TAG_INT &&
+                    JS_VALUE_GET_INT(pa->prop[0].u.value) == n &&
+                    (get_shape_prop(pa->shape)->flags & JS_PROP_WRITABLE) &&
+                    n + len <= INT32_MAX) {
+                    if (n + len > pa->u.array.u1.size &&
+                        expand_fast_array(ctx, pa, n + len))
+                        goto exception;
+                    for (k = 0; k < len; k++)
+                        pa->u.array.u.values[n + k] = js_dup(pe->u.array.u.values[k]);
+                    n += len;
+                    pa->u.array.count = n;
+                    pa->prop[0].u.value = js_int32(n);
+                    continue;
+                }
             }
             for (k = 0; k < len; k++, n++) {
                 res = JS_TryGetPropertyInt64(ctx, e, k, &val);
