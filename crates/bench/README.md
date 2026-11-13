@@ -185,9 +185,38 @@ Set `DASHER_REPLAY_LOG` as well to have every request the replay answers
 (or refuses) printed to stderr as `replay: hit|miss <method> <url>`, to
 count a page's requests.
 
+With `DASHER_EAGER_JS` set, a `replay` build compiles every function with
+its script instead of on its first call (see
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)),
+so one build can be measured both ways.
+
 Compare CPU time (user plus system), not wall time: under the virtual clock
 a page's wall time is its CPU time plus fixed waits. Run each page three
-times and take the median. Runs of one build agree to about 1%.
+times and take the median. Runs of one build agree to about 1%. On a
+machine that is busy with other work they agree much less, so alternate
+the two builds page by page rather than running one after the other.
+
+Page output is not byte-for-byte the same from one run to the next, even
+on one build: pages put timestamps and random IDs into it, and some insert
+styles in an order that varies. Compare the element count, the count of
+each tag, the link count and the visible text with digits masked.
+
+### The parse-only corpus
+
+How fast the engine compiles scripts is measured on the scripts of the
+recorded pages, compiled without being run. Every response whose
+`content-type` is JavaScript is a script (`*.meta` holds the headers and
+`*.body` the bytes). Copy those bodies into one directory, drop
+duplicates, and run
+
+```sh
+cargo run --profile profiling -p dasher-js --example compile_corpus -- corpus/
+```
+
+It compiles each file as a classic script, or as a module if that fails
+(imports resolve to empty modules), in a page's runtime, and prints the
+bytes compiled, the CPU time it took, the rate in MB/s and how much of the
+JS heap the compiled scripts hold.
 
 ### What it showed
 
@@ -230,6 +259,7 @@ Each change was also measured on its own, against the build without it:
 | `stack` written when first read | −3% (−14% on one page) | none | macOS |
 | bracket lookahead answers remembered by the parser | −5% (−4% on Linux) | none | macOS and Linux |
 | closures and `arguments` made from a known shape, regexp searches run by dasher, `Map` hash mixed (together) | −4% (−8% on one page) | none | macOS |
+| functions compiled on their first call, not with their script (16 heavy pages) | +3% | −8% (−22% on one page) | Linux |
 
 Before the allocator change, a quarter to over a third of CPU time on
 the heavy pages was inside `malloc`, `free` and `malloc_usable_size`
@@ -535,13 +565,13 @@ was busy, so absolute figures run a little high):
 | benchmark | dasher ns/op | audit: dasher ns | audit: Lightpanda ns | dasher ÷ Lightpanda |
 | --- | ---: | ---: | ---: | ---: |
 | getElementById | 69,377 | 61,465 | 270 | 227.6× |
-| getComputedStyle | 40,009 | 19,815 | 70 | 283.1× |
-| classList.contains | 5,878 | 3,505 | 130 | 27.0× |
-| style.setProperty | 5,671 | 3,432 | 303 | 11.3× |
+| getComputedStyle | 282 | 19,815 | 70 | 4.0× |
+| classList.contains | 190 | 3,505 | 130 | 1.5× |
+| style.setProperty | 753 | 3,432 | 303 | 2.5× |
 | add+removeEventListener | 3,480 | 2,165 | 220 | 9.8× |
-| clientWidth | 2,406 | 1,685 | 50 | 33.7× |
+| clientWidth | 107 | 1,685 | 50 | 2.1× |
 | append+removeChild | 1,934 | 1,315 | 220 | 6.0× |
-| dataset.x | 1,894 | 1,198 | 137 | 8.7× |
+| dataset.x | 276 | 1,198 | 137 | 2.0× |
 | setAttribute | 1,231 | 865 | 170 | 5.1× |
 | attributes.length | 1,319 | 798 | 70 | 11.4× |
 | getAttribute | 715 | 465 | 120 | 3.9× |
@@ -555,7 +585,7 @@ was busy, so absolute figures run a little high):
 | innerText | 374 | 215 | 220 | 1.0× |
 | createElement | 1,607 | 915 | 470 | 1.9× |
 | document.cookie | 503 | 165 | 320 | 0.5× |
-| getBoundingClientRect | 2,236 | 1,615 | 24,770 | 0.1× |
+| getBoundingClientRect | 1,095 | 1,615 | 24,770 | 0.04× |
 | querySelectorAll(#id) | 116,395 | | | |
 | querySelectorAll(.class) | 171,475 | | | |
 | querySelectorAll(tag) | 269,684 | | | |
@@ -572,6 +602,26 @@ nothing costs about 78 ns in this loop: 51 ns for the loop and the lookup
 through four prototypes (an own data property is 40 ns), and 27 ns for
 QuickJS calling a C function as a getter. The members' own work is the
 rest, 0 to 20 ns.
+
+Inline style, `classList`, `dataset`, `getComputedStyle` and the layout
+getters are native since DAS-42 (see `crates/js/src/dom/host.rs`). Before,
+getComputedStyle was 40,009 ns here, classList.contains 5,878,
+style.setProperty 5,671, clientWidth 2,406, dataset.x 1,894 and
+getBoundingClientRect 2,236. Where the time goes now:
+
+- `getComputedStyle(el).display` is the native function returning the
+  element's cached computed style (88 ns), then the property read, which
+  QuickJS asks the object's exotic `get_own_property` for: converting the
+  key, checking the prototype chain, finding the inline declaration and
+  resolving the default (about 200 ns). Visibility (`:visible`, which walks
+  the ancestors) and boxes are cached until the document next changes.
+- `style.setProperty` includes building the value string in the loop
+  (about 90 ns) and `el.style` (about 90 ns). Of the rest, much is the
+  attribute write shared with `setAttribute` (mutation records, custom
+  element reactions).
+- clientWidth (107 ns) and dataset.x (276 ns, a property answered by the
+  exotic method: one attribute lookup) are near the floor of a native
+  getter described above.
 
 ### DOM indexes and selector plans
 

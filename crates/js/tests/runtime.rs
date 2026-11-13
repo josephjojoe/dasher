@@ -449,3 +449,79 @@ fn map_and_set_keys_keep_their_order_and_identity() {
     );
     assert!(js.errors().is_empty());
 }
+
+/// Most functions are compiled on their first call rather than with their
+/// script (see `PATCHES.md`). Closures, `with`, direct eval, `arguments`,
+/// default parameters, classes and private names, `super`, `new.target`,
+/// strict mode, generators, async functions, function properties and text
+/// and stack positions must all come out as when every function is
+/// compiled with its script. The expected values are what the engine gives
+/// that way.
+#[test]
+fn functions_compiled_on_first_call_behave_as_compiled_with_their_script() {
+    let js = runtime();
+    js.run_script(include_str!("fixtures/lazy.js"), "lazy.js")
+        .unwrap();
+    assert_eq!(
+        js.eval_json("lazy").unwrap().as_deref(),
+        Some(
+            r#"{"closures":"top,a,b,c,later","shadowing":"outer:block","loops":[0,1,2],"tdz":["ReferenceError","set"],"constant":"TypeError","inBlock":"seen","named":[120,"undefined"],"withAround":"from with","withInside":["local!","o?"],"eval":["made","qq","r","snumber","top"],"args":[2,null,"changed","x","outerouter:inner",3],"classes":[42,"Derived>Base2","Base2",["private method","private getter",true,false],10,"Base1",[2,3]],"newTarget":[true,false],"objects":["obj>proto","proto","set"],"strict":[true,"object",true],"classStrict":[true,"TypeError","undefined"],"generators":[1,2,3],"properties":[2,"lengths","AsyncFunction","GeneratorFunction","","function lengths(a, b, c = 1, d) {}","function  spaced ( x,y ) { /* c */ return x; }"],"control":["done","try0"],"iife":["z!",false],"constructed":[3,"function anonymous(a,b\n) {\nreturn a + b\n}"],"stack":"    at each (lazy.js:157:48)\n    at map (native)\n    at deeper (lazy.js:157:20)\n    at <eval> (lazy.js:160:7)\n","async":"async"}"#
+        )
+    );
+    assert!(js.errors().is_empty());
+}
+
+/// A syntax error anywhere in a script stops all of it, including one in a
+/// function that is never called and so never compiled in full.
+#[test]
+fn syntax_errors_in_functions_not_yet_compiled_stop_the_script() {
+    let js = runtime();
+    for source in [
+        "ran = true; function f() { return function () { return 1 +; }; }",
+        "ran = true; var f = () => { let x; let x; };",
+        "ran = true; var o = { m() { 'use strict'; with (o) {} } };",
+        "ran = true; var f = function (a, a) { 'use strict'; };",
+        "ran = true; var f = async function () { function g() { await 1; } };",
+        "ran = true; var f = function () { class A { m() { return this.#missing; } } };",
+        "ran = true; var f = function () { return () => { break; }; };",
+    ] {
+        js.run_script("var ran = false;", "init.js").unwrap();
+        let err = js.run_script(source, "bad.js").unwrap_err();
+        assert!(
+            err.message.starts_with("SyntaxError"),
+            "{source}: {}",
+            err.message
+        );
+        assert_eq!(
+            js.eval_json("ran").unwrap().as_deref(),
+            Some("false"),
+            "{source}"
+        );
+    }
+    js.take_errors();
+}
+
+/// A function compiled on its first call sees the variables around it as
+/// they are when it is called, however deeply it is nested and whichever
+/// of the functions around it were compiled late too.
+#[test]
+fn late_compiled_functions_share_variables_with_the_functions_around_them() {
+    let js = runtime();
+    js.run_script(
+        "var counter = (function () {\n\
+           let n = 0;\n\
+           function bump() { return ++n; }\n\
+           return { bump, read: () => n, reset: function () { n = 0; }, \
+                    nested() { return function () { return () => bump() + n; }; } };\n\
+         })();\n\
+         counter.bump(); counter.bump();",
+        "counter.js",
+    )
+    .unwrap();
+    assert_eq!(
+        js.eval_json("[counter.read(), counter.nested()()(), counter.read(), (counter.reset(), counter.read())]")
+            .unwrap()
+            .as_deref(),
+        Some("[2,6,3,0]")
+    );
+}
