@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use dasher_dom::{Document, DocumentParser, Name, NodeId, ParseOptions, ParseStep, ShadowRoots};
 use dasher_js::{
-    DocumentInfo, DocumentWrite, EventTarget, JsRuntime, PendingOperation, ReadyState,
+    DocumentInfo, DocumentWrite, EventTarget, HeldNode, JsRuntime, PendingOperation, ReadyState,
     ResourceLimit, RunLimits, RunOutcome, RuntimeOptions, ScriptError, WindowOptions,
 };
 use dasher_net::{HeaderMap, Request, ResourceType, Response, Session, StatusCode, Url};
@@ -226,7 +226,6 @@ impl Page {
         let referrer = referrer.map(String::from).unwrap_or_default();
         let mut loaded = page.run_load(response, referrer).await;
         page.js.set_document_write(DocumentWrite::Insert);
-        page.js.hold_detached_nodes(false);
         if loaded.is_ok() {
             loaded = page.await_refresh().await;
         }
@@ -392,9 +391,9 @@ impl Page {
         let body = BodyReader::start(response);
         let mut wait = Wait::new(Some(body));
 
+        // The parser keeps ids of open elements across script runs; the
+        // runtime holds those nodes at each `with_parser` call.
         self.js.set_document(Document::new());
-        // The parser holds ids of open elements across script runs.
-        self.js.hold_detached_nodes(true);
         self.js.set_document_write(DocumentWrite::Ignore);
         self.js.set_ready_state(ReadyState::Loading);
 
@@ -457,7 +456,6 @@ impl Page {
         self.js.with_parser(&mut parser, |p, doc| p.finish(doc));
         drop(parser);
         self.js.upgrade_custom_elements();
-        self.js.hold_detached_nodes(false);
         self.preload_links(true);
         self.find_refresh();
 
@@ -557,6 +555,9 @@ impl Page {
         if self.deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(Stop::Halted);
         }
+        // Script may remove the element before it runs (or while the parser
+        // waits for it); it still runs.
+        let hold = self.js.hold_node(script);
         let document_url = self.document_url();
         let (element, base) = self.js.with_document_mut(|doc| {
             let element = ScriptElement::read(doc, script);
@@ -581,7 +582,7 @@ impl Page {
                     Order::Deferred
                 };
                 let operation = self.js.task_sender().begin_operation();
-                self.prepare_module(script, &element, &base, order, operation);
+                self.prepare_module(hold, &element, &base, order, operation);
                 return self.check_navigation();
             }
             Some(ScriptType::ImportMap) => {
@@ -608,7 +609,7 @@ impl Page {
         let operation = self.js.task_sender().begin_operation();
         let id = self
             .scripts
-            .fetch(&self.session, script, params, order, operation);
+            .fetch(&self.session, hold, params, order, operation);
         if order == Order::Blocking {
             self.spin(wait, Until::Script(id)).await?;
             self.js.set_document_write(DocumentWrite::Capture);
@@ -655,7 +656,7 @@ impl Page {
     /// Starts loading a module script's graph and files it under `order`.
     fn prepare_module(
         &mut self,
-        script: NodeId,
+        hold: HeldNode,
         element: &ScriptElement,
         base: &Url,
         order: Order,
@@ -664,7 +665,7 @@ impl Page {
         let credentials = element.module_credentials();
         let (graph, external) = match element.src.as_deref() {
             Some(src) => {
-                let Some(url) = self.script_url(script, src, base) else {
+                let Some(url) = self.script_url(hold.node(), src, base) else {
                     return;
                 };
                 (self.js.fetch_module_graph(url.as_str(), credentials), true)
@@ -676,8 +677,7 @@ impl Page {
                 (graph, false)
             }
         };
-        self.scripts
-            .module(script, graph, external, order, operation);
+        self.scripts.module(hold, graph, external, order, operation);
     }
 
     /// Registers an inline import map. External ones are not supported, by
@@ -754,7 +754,7 @@ impl Page {
             };
             match prepared.script_type {
                 Some(ScriptType::Module) => {
-                    self.prepare_module(element, &prepared, &base, order, script.operation);
+                    self.prepare_module(script.hold, &prepared, &base, order, script.operation);
                     continue;
                 }
                 Some(ScriptType::ImportMap) => {
@@ -769,7 +769,7 @@ impl Page {
             };
             let params = FetchParams::new(&prepared, url, &document_url, self.encoding);
             self.scripts
-                .fetch(&self.session, element, params, order, script.operation);
+                .fetch(&self.session, script.hold, params, order, script.operation);
         }
     }
 

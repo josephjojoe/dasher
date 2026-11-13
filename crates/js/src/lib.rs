@@ -266,8 +266,10 @@
 //!   parser-executed script runs, and ignore it from async scripts;
 //! - [`set_document_info`](JsRuntime::set_document_info) for
 //!   `document.characterSet`, `contentType` and `referrer`;
-//! - [`hold_detached_nodes`](JsRuntime::hold_detached_nodes), which keeps
-//!   node ids the parser still uses valid while scripts change the tree;
+//! - [`hold_node`](JsRuntime::hold_node), which keeps a node id the host
+//!   keeps across script runs (a script element waiting to run) valid while
+//!   scripts change the tree. [`with_parser`](JsRuntime::with_parser) holds
+//!   the nodes the parser still uses the same way, by itself;
 //! - the module graph functions (see [ES modules](#es-modules)),
 //!   [`register_import_map`](JsRuntime::register_import_map) and
 //!   [`link_inserted`](JsRuntime::link_inserted) for parser-inserted
@@ -369,7 +371,7 @@ mod window;
 
 pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
-pub use dom::DomActivity;
+pub use dom::{DomActivity, HeldNode};
 pub use error::{ErrorKind, ScriptError};
 pub use evaluate::{Evaluation, PendingEvaluation};
 pub use event_loop::{DEFAULT_FRAME_INTERVAL, LoopHandle, Stopped, Task};
