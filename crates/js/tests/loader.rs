@@ -281,21 +281,32 @@ fn empty_inline_scripts_run_once_they_get_text() {
 
 #[test]
 fn held_nodes_survive_garbage_collection() {
-    let js = page("<div id=box><p>text</p></div>");
+    let js = page("<div id=box><p>text</p></div><div id=other><p>gone</p></div>");
     let boxed = js.with_document(|doc| doc.get_element_by_id(doc.root(), "box").unwrap());
     let before = js.with_document(Document::len);
 
-    js.hold_detached_nodes(true);
-    js.run_script("document.getElementById('box').remove();", "test.js")
-        .unwrap();
+    // Holding the `<p>` keeps its whole tree, the removed `#box`.
+    let p = js.with_document(|doc| doc.first_child(boxed).unwrap());
+    let hold = js.hold_node(p);
+    let again = js.hold_node(p);
+    js.run_script(
+        "document.getElementById('box').remove(); document.getElementById('other').remove();",
+        "test.js",
+    )
+    .unwrap();
     js.run_gc();
     js.with_document(|doc| {
         assert!(doc.is_html(boxed, Name::DIV));
         assert_eq!(doc.text_content(boxed).as_deref(), Some("text"));
-        assert_eq!(doc.len(), before);
+        // What is not held goes as usual.
+        assert_eq!(doc.len(), before - 3);
     });
 
-    js.hold_detached_nodes(false);
+    // Until the last hold goes.
+    drop(hold);
     js.run_gc();
     assert_eq!(js.with_document(Document::len), before - 3);
+    drop(again);
+    js.run_gc();
+    assert_eq!(js.with_document(Document::len), before - 6);
 }

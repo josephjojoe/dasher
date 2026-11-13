@@ -224,6 +224,11 @@ impl Document {
         node
     }
 
+    /// Whether `id`'s slot is free: released and not reused since.
+    pub(crate) fn is_released(&self, id: NodeId) -> bool {
+        matches!(self.nodes[id.index()].data, NodeData::Free)
+    }
+
     pub(crate) fn node_mut(&mut self, id: NodeId) -> &mut Node {
         let node = &mut self.nodes[id.index()];
         assert!(

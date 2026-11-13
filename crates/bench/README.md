@@ -520,6 +520,16 @@ mix of work. Lightpanda does real layout, which is why its
 | URL parsing | 2,948 | 1,482 | 2.0× | 0.62 | 0.23 | 2.7× |
 | new Function | 3,619 | 1,066 | 3.4× | 0.20 | 0.04 | 5.0× |
 
+Since the baseline, DAS-39 moved Intl formatting and URL parsing into Rust
+(`crates/js/src/intl/`, `crates/js/src/urls.rs`). The same machine, with
+both builds and Node measured side by side and 9 runs each (the machine
+was busy, so absolute figures run a little high):
+
+| benchmark | before ns/op | after ns/op | Node `--jitless` ns/op | after ÷ Node |
+| --- | ---: | ---: | ---: | ---: |
+| Date and Intl formatting | 48,317 | 3,033 | 2,633 | 1.2× |
+| URL parsing | 2,942 | 1,630 | 1,558 | 1.0× |
+
 | benchmark | dasher ns/op | audit: dasher ns | audit: Lightpanda ns | dasher ÷ Lightpanda |
 | --- | ---: | ---: | ---: | ---: |
 | getElementById | 69,377 | 61,465 | 270 | 227.6× |
@@ -603,6 +613,43 @@ run-to-run noise (±0.5 MiB). There is no class or tag index and no
 ancestor filter: a tree walk costs about 10 ns per element, and an index
 would cost every page memory for the few that query that way.
 
+### Native events
+
+Events are native since DAS-44 (see `crates/js/src/events/`): listener
+storage, `Event` objects and dispatch are Rust, and the event path is
+walked on node ids. On this machine, median of 5 runs, against
+Lightpanda's nightly (1.1.0-nightly.12116) timed on the same loops with
+[`micro/lightpanda.py`](micro/lightpanda.py):
+
+| benchmark | before (main at `c13aea4`) | after | Lightpanda | after ÷ Lightpanda |
+| --- | ---: | ---: | ---: | ---: |
+| add+removeEventListener | 3,378 | 235 | 233 | 1.0× |
+| dispatchEvent, bubbling 3 levels | 19,073 | 1,369 | 1,734 | 0.8× |
+| tagName (for scale) | 97.3 | 95.3 | 72 | 1.3× |
+
+The other DOM rows did not move beyond noise.
+
+The dispatch loop makes a bubbling `Event` and dispatches it at a span
+whose listener is three levels up, on the body: seven targets on the path
+(span, `#target`, `main`, body, html, document, window), one of them with
+a listener. Firing an event no listener could hear, as the host does for
+`load`, `DOMContentLoaded`, script `load` and `error` or
+`readystatechange` on most pages, makes no event object and no wrappers
+and runs no JS: the path is checked for listeners, handlers and handler
+attributes first.
+
+`micro/lightpanda.py` serves the micro-benchmark page and loops to a
+Lightpanda binary and reports ns per op the way `dasher-bench micro` does,
+from the process CPU time of `lightpanda fetch` with and without a loop:
+
+```sh
+python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
+    "add+removeEventListener=500000" "dispatchEvent, bubbling 3 levels=200000"
+```
+
+Its tagName figure (72 ns here, 60 in the audit) puts this machine about
+1.2 times slower than the audit's for Lightpanda.
+
 ## Per-page limits
 
 Each page has two hard limits. Going over either one stops the page and
@@ -621,4 +668,8 @@ down a process that is serving other jobs.
   the default caps a runaway document at roughly 65 MiB. That is far beyond
   real pages, which rarely pass 100,000 nodes. Fragment parsing and deep
   clones stop early once over the limit, so a single
-  `innerHTML = hugeString` cannot overshoot it by much.
+  `innerHTML = hugeString` cannot overshoot it by much. The limit counts
+  live nodes, and removed nodes are freed as soon as script can no longer
+  reach them, also while the page is still parsing, so a page that keeps
+  rewriting the same few nodes (a ticker, a list re-rendered) stays flat
+  however long it runs (`crates/js/tests/churn.rs`).

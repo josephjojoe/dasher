@@ -865,29 +865,6 @@
     return flat;
   }
 
-  // Event retargeting: the target an event's listeners at `node` see, when
-  // it was dispatched at `target` inside a shadow tree.
-  // https://dom.spec.whatwg.org/#retarget
-  function retargetTo(target, node) {
-    for (;;) {
-      if (!(target instanceof Node)) return target;
-      const root = N.rootNode(target);
-      const host = N.shadowHost(root);
-      if (host === null) return target;
-      if (node instanceof Node && isShadowIncludingInclusiveAncestor(root, node)) return target;
-      target = host;
-    }
-  }
-
-  function isShadowIncludingInclusiveAncestor(ancestor, node) {
-    for (;;) {
-      if (N.contains(ancestor, node)) return true;
-      const host = N.shadowHost(N.rootNode(node));
-      if (host === null) return false;
-      node = host;
-    }
-  }
-
   // ---------------------------------------------------------------------
   // Attributes: Attr and NamedNodeMap.
 
@@ -895,7 +872,7 @@
   // an element's attribute, made on demand (so not identity-stable).
   class Attr extends Node {
     static create(owner, name, ns, value) {
-      const attr = Object.create(Attr.prototype);
+      const attr = internals.createTarget(Attr.prototype);
       new AttrState(attr, owner, name, ns, value);
       return attr;
     }
@@ -2044,8 +2021,7 @@
   // Attribute reflection helpers for HTML element interfaces.
 
   function resolveURL(url) {
-    const parts = internals.urlParse(url, internals.baseURL());
-    return parts === undefined ? url : parts[internals.URL_PARTS.HREF];
+    return internals.urlHref(url, internals.baseURL()) ?? url;
   }
 
   // spec: { prop: type } or { prop: [type, attr, extra] }. Types: 'string',
@@ -2436,8 +2412,7 @@
     get href() {
       const v = N.getAttr(this, 'href');
       if (v === null) return internals.documentURL();
-      const parts = internals.urlParse(v, internals.documentURL());
-      return parts === undefined ? v : parts[internals.URL_PARTS.HREF];
+      return internals.urlHref(v, internals.documentURL()) ?? v;
     },
     set href(v) { N.setAttr(this, 'href', str(v)); },
   });
@@ -3307,20 +3282,9 @@
     return null;
   }
 
-  internals.handlerAttribute = (target, type) => {
-    let el;
-    if (target === globalThis) {
-      if (!WINDOW_HANDLER_TYPES.has(type)) return null;
-      el = N.docPart(2);
-      if (el === null || !isBodyLike(el)) return null;
-    } else if (target instanceof Element && handlerTarget(target, type) === target) {
-      el = target;
-    } else {
-      return null;
-    }
-    const source = N.getAttr(el, 'on' + type);
-    return source === null ? null : [el, source];
-  };
+  // Which content attributes set handlers, for the native lookup of an
+  // attribute an element was made with (see src/events/dispatch.rs).
+  internals.handlerTypes([...WINDOW_HANDLER_TYPES], [...ELEMENT_HANDLER_TYPES]);
 
   // Elements whose form owner is on a handler's scope chain.
   const FORM_ASSOCIATED = [
@@ -4576,36 +4540,9 @@
   // ---------------------------------------------------------------------
   // Hooks for the other glue and the page loader.
 
-  internals.eventParent = (target, event) => {
-    if (!(target instanceof Node) || target instanceof Attr) return null;
-    const parent = N.nav(target, 0);
-    if (parent !== null) return parent;
-    if (target === documentNode) return event.type === 'load' ? null : globalThis;
-    // Composed events leave a shadow tree for its host, as do events that
-    // came into it through a slot.
-    if (N.nodeType(target) !== 11) return null;
-    const origin = event.target;
-    if (event.composed || !(origin instanceof Node) || N.rootNode(origin) !== target) return N.shadowHost(target);
-    return null;
-  };
-  // A slotted node's event path goes through its slot.
-  const eventParentOf = internals.eventParent;
-  internals.eventParent = (target, event) => {
-    if (N.hasShadowRoots() && target instanceof Node && N.nodeType(target) !== 11) {
-      const parent = N.nav(target, 0);
-      if (parent !== null && N.nodeType(parent) === 1 && N.shadowRoot(parent) !== null) {
-        const slot = findSlot(target, false);
-        if (slot !== null) return slot;
-      }
-    }
-    return eventParentOf(target, event);
-  };
-  // The targets listeners along `path` see, or null if they all see the
-  // original target, as they do unless it is in a shadow tree.
-  internals.retarget = (target, path) => {
-    if (!(target instanceof Node) || N.shadowHost(N.rootNode(target)) === null) return null;
-    return path.map((node) => retargetTo(target, node));
-  };
+  // A slotted node's event path goes through its slot (the rest of the
+  // path is worked out natively, see src/events/dispatch.rs).
+  internals.slotFor = (node) => findSlot(node, false);
   internals.scrollTarget = () => documentNode;
 
   // For XMLHttpRequest's responseXML: a document parsed from a response,
@@ -4622,8 +4559,8 @@
       base.version = v;
       base.url = url;
       const href = N.baseHref();
-      const parts = href === null || href === undefined ? undefined : internals.urlParse(href, url);
-      base.href = parts === undefined ? url : parts[internals.URL_PARTS.HREF];
+      const resolved = href === null || href === undefined ? undefined : internals.urlHref(href, url);
+      base.href = resolved ?? url;
     }
     return base.href;
   };
