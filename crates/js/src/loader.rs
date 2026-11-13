@@ -14,6 +14,7 @@ use rquickjs::{Ctx, Function, JsLifetime, Object, Value};
 
 use crate::dom::{self, HeldNode};
 use crate::error::ScriptError;
+use crate::events::{self, HostTarget};
 use crate::modules;
 use crate::remote::{PendingOperation, TaskSender};
 use crate::runtime::{JsRuntime, Shared, eval_options};
@@ -130,7 +131,6 @@ pub(crate) struct LoaderHooks<'js> {
     upgrade_custom_elements: Function<'js>,
     body_inserted: Function<'js>,
     fire: Function<'js>,
-    document: Value<'js>,
 }
 
 // SAFETY: `LoaderHooks` only holds values bound to `'js`, and `Changed` is the
@@ -149,7 +149,6 @@ impl<'js> LoaderHooks<'js> {
             upgrade_custom_elements: hooks.get("upgradeCustomElements")?,
             body_inserted: hooks.get("bodyInserted")?,
             fire: hooks.get("fire")?,
-            document: hooks.get("document")?,
         })
     }
 
@@ -157,13 +156,6 @@ impl<'js> LoaderHooks<'js> {
         ctx.userdata::<LoaderHooks<'js>>()
             .map(|h| h.clone())
             .ok_or(rquickjs::Error::Unknown)
-    }
-
-    /// Fires a trusted `event` that neither bubbles nor can be canceled at
-    /// `target` (null for the window).
-    pub(crate) fn fire_simple(&self, target: Value<'js>, event: &str) -> rquickjs::Result<()> {
-        self.fire.call::<_, bool>((target, event, false, false))?;
-        Ok(())
     }
 }
 
@@ -284,6 +276,10 @@ impl JsRuntime {
     /// by a microtask checkpoint. `pageshow` and `pagehide` are
     /// `PageTransitionEvent`s; everything else is a plain `Event`. Returns
     /// whether no listener canceled it.
+    ///
+    /// When no listener could hear the event (none for its type on its
+    /// path, nor a handler attribute that would set one), nothing runs: no
+    /// event object is made and there is no task.
     pub fn fire_event(
         &self,
         target: EventTarget,
@@ -291,28 +287,30 @@ impl JsRuntime {
         bubbles: bool,
         cancelable: bool,
     ) -> bool {
+        let target = match target {
+            EventTarget::Window => HostTarget::Window,
+            EventTarget::Document => HostTarget::Node(self.shared().dom.doc().root()),
+            EventTarget::Node(id) => HostTarget::Node(id),
+        };
+        if !self.with(|ctx| events::reaches(&ctx, target, event)) {
+            return true;
+        }
         let mut not_canceled = true;
         let _ = self.run_task(|ctx| {
-            let hooks = LoaderHooks::get(ctx)?;
-            let target = self.event_target(ctx, &hooks, target)?;
-            not_canceled = hooks.fire.call((target, event, bubbles, cancelable))?;
+            not_canceled = if event == "pageshow" || event == "pagehide" {
+                let hooks = LoaderHooks::get(ctx)?;
+                let target = match target {
+                    HostTarget::Window => Value::new_null(ctx.clone()),
+                    HostTarget::Node(id) => dom::wrap(ctx, &self.shared().dom, id)?.into_value(),
+                };
+                hooks.fire.call((target, event, bubbles, cancelable))?
+            } else {
+                events::fire(ctx, target, event, bubbles, cancelable)?
+            };
             Ok(())
         });
         self.perform_microtask_checkpoint();
         not_canceled
-    }
-
-    fn event_target<'js>(
-        &self,
-        ctx: &Ctx<'js>,
-        hooks: &LoaderHooks<'js>,
-        target: EventTarget,
-    ) -> rquickjs::Result<Value<'js>> {
-        Ok(match target {
-            EventTarget::Window => Value::new_null(ctx.clone()),
-            EventTarget::Document => hooks.document.clone(),
-            EventTarget::Node(id) => dom::wrap(ctx, &self.shared().dom, id)?.into_value(),
-        })
     }
 
     /// Runs the classic script `source` for the script element `element`,

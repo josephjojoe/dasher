@@ -58,6 +58,7 @@ use super::style::{
     lower_name, serialize, style_attribute,
 };
 use super::wrapper::{Extra, Node, NodeWrapper};
+use crate::native_data::NativeData;
 
 type Res<T> = std::result::Result<T, Thrown>;
 
@@ -355,8 +356,7 @@ pub(super) fn install<'js>(obj: &Object<'js>) -> Result<()> {
          supported: Option<Vec<String>>|
          -> Result<Value<'js>> {
             let raw_ctx = ctx.as_raw().as_ptr();
-            // SAFETY: the context's opaque is the live `Members`, if set.
-            let members = unsafe { qjs::JS_GetContextOpaque(raw_ctx).cast::<Members>().as_ref() };
+            let members = NativeData::of_ctx(&ctx).and_then(NativeData::members);
             let members = members.ok_or(rquickjs::Error::Unknown)?;
             let wrapper = el.borrow();
             let kind = HostKind::Tokens(Tokens {
@@ -987,8 +987,8 @@ unsafe fn host_in<'a>(
     obj: qjs::JSValue,
     class: HostClass,
 ) -> Option<std::result::Result<(&'a Members, &'a Host, NodeId), ()>> {
-    // SAFETY: the context's opaque is null or the live `Members`.
-    let members = unsafe { qjs::JS_GetContextOpaque(ctx).cast::<Members>().as_ref() }?;
+    // SAFETY: as for the function.
+    let members = unsafe { NativeData::of(ctx) }.and_then(NativeData::members)?;
     // SAFETY: as for the function.
     let host = unsafe { members.hosts.get(obj, class) }?;
     Some(match host.wrapper().id() {

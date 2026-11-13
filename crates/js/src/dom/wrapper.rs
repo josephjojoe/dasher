@@ -14,6 +14,7 @@ use rquickjs::{Class, Ctx, Function, JsLifetime, Object, Result, Value, qjs};
 use super::host::Hosts;
 use super::members::{self, Members};
 use super::{DomState, any_in_tree_except, group_root, owner};
+use crate::events::Listeners;
 
 /// A node wrapper object.
 pub(crate) type Node<'js> = Class<'js, NodeWrapper<'js>>;
@@ -33,6 +34,15 @@ pub(crate) struct NodeWrapper<'js> {
     /// (`el.style`, `el.classList`...), made on first use. Traced, so they
     /// live as long as the wrapper, and they hold the wrapper in turn.
     extras: RefCell<Option<Box<[Option<Value<'js>>; Extra::COUNT]>>>,
+    /// The node's event listeners (see the `events` module). The wrapper
+    /// reports them to the GC, so they live as long as its group.
+    listeners: Listeners<'js>,
+}
+
+impl<'js> NodeWrapper<'js> {
+    pub(crate) fn listeners(&self) -> &Listeners<'js> {
+        &self.listeners
+    }
 }
 
 /// The slots of [`NodeWrapper`]'s extras.
@@ -107,6 +117,7 @@ impl<'js> Trace<'js> for NodeWrapper<'js> {
                 v.trace(tracer);
             }
         }
+        self.listeners.trace(tracer);
     }
 }
 
@@ -259,6 +270,7 @@ fn create<'js>(dom: &Rc<DomState>, id: NodeId, proto: Object<'js>) -> Result<Nod
         next: RefCell::new(None),
         prev: RefCell::new(None),
         extras: RefCell::new(None),
+        listeners: Listeners::default(),
     };
     let node = Class::instance_proto(wrapper, proto)?;
     dom.wrappers.insert(id, node.as_raw());
@@ -333,6 +345,13 @@ fn node_at(index: usize) -> NodeId {
 }
 
 impl DomState {
+    /// The live wrapper object of `id`, if there is one, borrowed from the
+    /// cache: it stays valid only until JS or the GC next runs.
+    #[inline]
+    pub(crate) fn wrapper_raw(&self, id: NodeId) -> Option<qjs::JSValue> {
+        self.wrappers.get(id)
+    }
+
     /// The live wrapper of `id`, if there is one.
     pub(crate) fn cached<'js>(&self, ctx: &Ctx<'js>, id: NodeId) -> Option<Node<'js>> {
         let raw = self.wrappers.get(id)?;

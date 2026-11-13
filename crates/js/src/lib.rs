@@ -33,14 +33,17 @@
 //! whose output is captured (see [`JsRuntime::take_console`]). `Date` reads
 //! the same page clock as `performance.now()`.
 //!
-//! DOM events are implemented in JS glue evaluated after the prelude:
-//! `EventTarget`, `Event`, `CustomEvent`, `ErrorEvent`,
-//! `PromiseRejectionEvent`, `DOMException`, `AbortController` and
-//! `AbortSignal`. Each glue file (listed in order in
-//! `src/glue.rs`) receives the host functions and a shared `internals`
-//! object for the glue that follows it. `internals` provides trusted event
-//! dispatch, `on*` attributes, abort hooks, task queueing, URL parsing,
-//! structured cloning and the document URL.
+//! DOM events are native: `EventTarget` and `Event` are QuickJS C
+//! constructors whose instances keep their state in Rust, listeners are
+//! stored in Rust per target, and dispatch (event path, shadow DOM
+//! retargeting, phases, `on*` handlers) runs in Rust (see `src/events/`).
+//! The JS glue evaluated after the prelude builds `CustomEvent`,
+//! `ErrorEvent`, `PromiseRejectionEvent`, `DOMException`,
+//! `AbortController` and `AbortSignal` on them. Each glue file (listed in
+//! order in `src/glue.rs`) receives the host functions and a shared
+//! `internals` object for the glue that follows it. `internals` provides
+//! trusted event dispatch, `on*` attributes, abort hooks, task queueing,
+//! URL parsing, structured cloning and the document URL.
 //!
 //! ```
 //! use std::time::Duration;
@@ -347,6 +350,7 @@ mod encoding;
 mod error;
 mod evaluate;
 mod event_loop;
+mod events;
 mod glue;
 mod heap;
 mod intl;
@@ -355,6 +359,7 @@ mod loader;
 mod log;
 mod media;
 mod modules;
+mod native_data;
 mod net;
 mod random;
 #[doc(hidden)]
