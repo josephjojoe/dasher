@@ -95,6 +95,11 @@ impl Attr {
     pub fn value(&self) -> &str {
         &self.value
     }
+
+    /// Whether this is an `id` attribute: local name `id`, no namespace.
+    pub(crate) fn is_id(&self) -> bool {
+        self.local == Name::ID && self.ns == AttrNs::NONE
+    }
 }
 
 /// Index of an attribute's (namespace, prefix) pair in its document's table.

@@ -74,6 +74,15 @@
 //!   inline `display: none` or `visibility: hidden`, closed `<dialog>`s and
 //!   `<details>`, `<input type=hidden>`).
 //!
+//! # Speed
+//!
+//! A query doesn't always walk the whole tree: a selector with an `#id`
+//! starts from the element with that id, through dasher-dom's id index,
+//! and a selector of one compound (`li`, `.item`) skips the combinator
+//! machinery. The `plan` module says which queries do what, and
+//! `tests/plan.rs` checks every plan against matching each element.
+//! `examples/query_timing.rs` times queries without the JS bindings.
+//!
 //! [`SelectorList::query_all_deep`] also looks into shadow trees, for the
 //! host's own queries; a page's `querySelector` never does.
 //!
@@ -85,10 +94,11 @@
 mod error;
 mod matching;
 mod parser;
+mod plan;
 mod selector;
 mod tokenizer;
 
-use dasher_dom::{Descendants, Document, NodeId, ShadowIncluding};
+use dasher_dom::{Document, NodeId, ShadowIncluding};
 
 pub use error::SelectorError;
 pub use selector::SelectorList;
@@ -139,7 +149,7 @@ impl SelectorList {
     }
 
     /// `querySelector`: the first descendant element of `root`, in tree
-    /// order, that matches.
+    /// order, that matches. It stops at the first match.
     pub fn query_first(&self, doc: &Document, root: NodeId) -> Option<NodeId> {
         self.query_all(doc, root).next()
     }
@@ -151,11 +161,15 @@ impl SelectorList {
     /// document). As in browsers, the rest of the selector is not confined
     /// to `root`'s subtree: `div.querySelectorAll("body p")` finds the `p`s
     /// in the `div` even though `body` is outside it.
+    ///
+    /// A selector with an `#id` starts from the element with that id (see
+    /// the `plan` module) instead of walking the whole of `root`.
     pub fn query_all<'a>(&'a self, doc: &'a Document, root: NodeId) -> QueryAll<'a> {
+        let cx = Context::new(doc, Some(root));
         QueryAll {
-            cx: Context::new(doc, Some(root)),
-            list: self,
-            nodes: doc.descendants(root),
+            nodes: plan::source(self, &cx, root),
+            test: plan::test(self, doc),
+            cx,
         }
     }
 
@@ -205,8 +219,8 @@ impl Iterator for QueryAllDeep<'_> {
 /// The matches of [`SelectorList::query_all`], in tree order.
 pub struct QueryAll<'a> {
     cx: Context<'a>,
-    list: &'a SelectorList,
-    nodes: Descendants<'a>,
+    test: plan::Test<'a>,
+    nodes: plan::Source<'a>,
 }
 
 impl Iterator for QueryAll<'_> {
@@ -216,7 +230,7 @@ impl Iterator for QueryAll<'_> {
         let doc = self.cx.doc;
         self.nodes
             .by_ref()
-            .find(|&n| doc.is_element(n) && self.cx.matches_list(self.list, n))
+            .find(|&n| doc.is_element(n) && self.test.matches(&self.cx, n))
     }
 }
 

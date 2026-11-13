@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::error::DomError;
+use crate::ids::IdIndex;
 use crate::name::{Name, Names};
 use compact_str::CompactString;
 
@@ -53,6 +54,8 @@ pub struct Document {
     node_limit: usize,
     /// Whether the document has held more than `node_limit` nodes.
     over_node_limit: bool,
+    /// Every element with an `id`, by value. See the `ids` module.
+    pub(crate) ids: IdIndex,
 }
 
 impl Default for Document {
@@ -88,6 +91,7 @@ impl Document {
             attr_namespaces: vec![(Name::EMPTY, Name::EMPTY)],
             node_limit: usize::MAX,
             over_node_limit: false,
+            ids: IdIndex::default(),
         }
     }
 
@@ -257,6 +261,7 @@ impl Document {
             if self.node(n).flags & flags::HAS_PREFIX != 0 {
                 self.prefixes.remove(&n);
             }
+            self.unindex_id(n);
             let slot = &mut self.nodes[n.index()];
             *slot = Node::new(NodeData::Free);
             slot.next_sibling = self.free_head;
@@ -308,6 +313,7 @@ impl Document {
         attrs: Box<[Attr]>,
     ) -> NodeId {
         let id = self.alloc(NodeData::Element(Element { local, ns, attrs }));
+        self.index_id(id);
         if ns == Name::NS_HTML && local == Name::TEMPLATE {
             let contents = self.alloc(NodeData::Fragment);
             self.template_contents.insert(id, contents);
@@ -596,7 +602,7 @@ impl Document {
     /// If `id` is not an element.
     pub fn set_attribute(&mut self, id: NodeId, qualified_name: &str, value: &str) {
         match self.attr_index(id, qualified_name) {
-            Some(i) => self.element_mut(id).attrs[i].value = value.into(),
+            Some(i) => self.set_attr_value_at(id, i, value),
             None => {
                 let local = self.intern(qualified_name);
                 self.push_attr(id, Name::EMPTY, Name::EMPTY, local, value);
@@ -626,7 +632,7 @@ impl Document {
 
     fn set_or_push_attr(&mut self, id: NodeId, ns: Name, prefix: Name, local: Name, value: &str) {
         match self.attr_index_ns(id, ns, local) {
-            Some(i) => self.element_mut(id).attrs[i].value = value.into(),
+            Some(i) => self.set_attr_value_at(id, i, value),
             None => self.push_attr(id, ns, prefix, local, value),
         }
     }
@@ -660,11 +666,52 @@ impl Document {
 
     fn push_attr(&mut self, id: NodeId, ns: Name, prefix: Name, local: Name, value: &str) {
         let attr = self.new_attr(ns, prefix, local, value);
+        let is_id = attr.is_id();
+        if is_id {
+            self.unindex_id(id);
+        }
         let e = self.element_mut(id);
         let mut attrs = std::mem::take(&mut e.attrs).into_vec();
         attrs.reserve_exact(1);
         attrs.push(attr);
         e.attrs = attrs.into_boxed_slice();
+        if is_id {
+            self.index_id(id);
+        }
+    }
+
+    fn set_attr_value_at(&mut self, id: NodeId, i: usize, value: &str) {
+        let is_id = self.attrs(id)[i].is_id();
+        if is_id {
+            if self.attrs(id)[i].value == value {
+                return;
+            }
+            self.unindex_id(id);
+        }
+        self.element_mut(id).attrs[i].value = value.into();
+        if is_id {
+            self.index_id(id);
+        }
+    }
+
+    /// Adds `id` to the id index under its `id` attribute, if it has one.
+    /// Every attribute change that can change [`element_id`](Self::element_id)
+    /// takes the element out of the index first and puts it back after.
+    fn index_id(&mut self, id: NodeId) {
+        if let Some(NodeData::Element(e)) = self.nodes.get(id.index()).map(|n| &n.data) {
+            if let Some(a) = e.attrs.iter().find(|a| a.is_id()) {
+                self.ids.insert(&a.value, id);
+            }
+        }
+    }
+
+    /// Takes `id` out of the id index, if it is in it.
+    fn unindex_id(&mut self, id: NodeId) {
+        if let Some(NodeData::Element(e)) = self.nodes.get(id.index()).map(|n| &n.data) {
+            if let Some(a) = e.attrs.iter().find(|a| a.is_id()) {
+                self.ids.remove(&a.value, id);
+            }
+        }
     }
 
     /// Removes the first attribute with this qualified name. Returns whether
@@ -692,10 +739,17 @@ impl Document {
     }
 
     fn remove_attr_at(&mut self, id: NodeId, i: usize) {
+        let is_id = self.attrs(id)[i].is_id();
+        if is_id {
+            self.unindex_id(id);
+        }
         let e = self.element_mut(id);
         let mut attrs = std::mem::take(&mut e.attrs).into_vec();
         attrs.remove(i);
         e.attrs = attrs.into_boxed_slice();
+        if is_id {
+            self.index_id(id);
+        }
     }
 
     /// The element's `id` attribute.
@@ -714,10 +768,20 @@ impl Document {
     /// Whether the element's `class` attribute contains `class`. Matching is
     /// ASCII case-insensitive in quirks mode, as for selectors.
     pub fn has_class(&self, id: NodeId, class: &str) -> bool {
+        let Some(value) = self.attribute_named(id, Name::CLASS) else {
+            return false;
+        };
+        let (value, class) = (value.as_bytes(), class.as_bytes());
+        if class.is_empty() || value.len() < class.len() {
+            return false;
+        }
+        // Bytes rather than chars: ASCII whitespace never occurs inside a
+        // multi-byte UTF-8 sequence.
+        let mut tokens = value.split(|&b| is_ascii_whitespace(char::from(b)));
         if self.quirks_mode == QuirksMode::Quirks {
-            self.classes(id).any(|c| c.eq_ignore_ascii_case(class))
+            tokens.any(|c| c.eq_ignore_ascii_case(class))
         } else {
-            self.classes(id).any(|c| c == class)
+            tokens.any(|c| c == class)
         }
     }
 
