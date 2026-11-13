@@ -454,7 +454,6 @@ was busy, so absolute figures run a little high):
 | classList.contains | 5,878 | 3,505 | 130 | 27.0× |
 | style.setProperty | 5,671 | 3,432 | 303 | 11.3× |
 | add+removeEventListener | 3,480 | 2,165 | 220 | 9.8× |
-| dispatchEvent, bubbling 3 levels | 19,073 | | | |
 | clientWidth | 2,406 | 1,685 | 50 | 33.7× |
 | append+removeChild | 1,934 | 1,315 | 220 | 6.0× |
 | dataset.x | 1,894 | 1,198 | 137 | 8.7× |
