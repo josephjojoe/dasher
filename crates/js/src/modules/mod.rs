@@ -148,6 +148,9 @@ pub(crate) struct ModuleState {
     /// Modulepreload links already handled, which the parser and scripts
     /// may both report.
     preload_links: RefCell<HashSet<NodeId>>,
+    /// Holds on the links whose module is being fetched, so they are still
+    /// there to get their `load` or `error` event if script removes them.
+    preload_holds: RefCell<HashMap<NodeId, dom::HeldNode>>,
 }
 
 impl ModuleState {
@@ -613,6 +616,8 @@ fn finish_preload(ctx: &Ctx<'_>, id: u32, link: NodeId) -> rquickjs::Result<()> 
         "error"
     };
     let target = dom::wrap(ctx, &shared.dom, link)?;
+    // The wrapper keeps the link alive from here on.
+    shared.modules.preload_holds.borrow_mut().remove(&link);
     LoaderHooks::get(ctx)?.fire_simple(target.into_value(), event)
 }
 
@@ -859,6 +864,11 @@ fn link_connected(shared: &Rc<Shared>, link: NodeId) {
         return;
     };
     let credentials = credentials_for(cross_origin.as_deref());
+    shared
+        .modules
+        .preload_holds
+        .borrow_mut()
+        .insert(link, dom::HeldNode::new(&shared.dom, link));
     start_graph(
         shared,
         String::from(url),

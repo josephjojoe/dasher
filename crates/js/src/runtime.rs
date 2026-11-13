@@ -798,6 +798,8 @@ impl Drop for JsRuntime {
         self.shared.event_loop.clear();
         self.shared.net.abort_all();
         self.shared.modules.abort_all();
+        // The DOM may outlive the engine (in a `HeldNode`).
+        self.shared.dom.set_runtime(std::ptr::null_mut());
     }
 }
 

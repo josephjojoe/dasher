@@ -285,4 +285,8 @@ down a process that is serving other jobs.
   the default caps a runaway document at roughly 65 MiB. That is far beyond
   real pages, which rarely pass 100,000 nodes. Fragment parsing and deep
   clones stop early once over the limit, so a single
-  `innerHTML = hugeString` cannot overshoot it by much.
+  `innerHTML = hugeString` cannot overshoot it by much. The limit counts
+  live nodes, and removed nodes are freed as soon as script can no longer
+  reach them, also while the page is still parsing, so a page that keeps
+  rewriting the same few nodes (a ticker, a list re-rendered) stays flat
+  however long it runs (`crates/js/tests/churn.rs`).
