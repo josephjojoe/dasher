@@ -1486,6 +1486,27 @@ JSValue JS_DupValueRT(JSRuntime *rt, JSValueConst v)
     return js_dup(v);
 }
 
+/* dasher: this file releases values through JS_FreeValue and
+   JS_FreeValueRT, which are exported. The library is built with -fPIC, so
+   the compiler may not inline exported functions into their callers, and
+   every release was a call, even of a number or undefined. Here the
+   reference count test is inlined at each caller in this file and only
+   freeing the value is a call. The exported functions stay as they were,
+   defined below with their names in parentheses. */
+static no_inline void js_free_value_rt(JSRuntime *rt, JSValue v);
+
+static inline void js_free_value_inline(JSRuntime *rt, JSValue v)
+{
+    if (JS_VALUE_HAS_REF_COUNT(v)) {
+        JSRefCountHeader *p = (JSRefCountHeader *)JS_VALUE_GET_PTR(v);
+        if (--p->ref_count <= 0)
+            js_free_value_rt(rt, v);
+    }
+}
+
+#define JS_FreeValueRT(rt, v) js_free_value_inline(rt, v)
+#define JS_FreeValue(ctx, v) js_free_value_inline((ctx)->rt, v)
+
 static void js_trigger_gc(JSRuntime *rt, size_t size)
 {
     bool force_gc;
@@ -1599,6 +1620,19 @@ void *js_realloc_rt(JSRuntime *rt, void *ptr, size_t size)
 
     s->malloc_size += rt->mf.js_malloc_usable_size(ptr) - old_size;
     return ptr;
+}
+
+/* dasher: lets the embedder call its allocator directly instead of through
+   the functions the runtime was created with. `mf` and `opaque` must manage
+   the same blocks as the ones they replace: blocks allocated before the
+   call are freed, resized and measured through the new functions. */
+void JS_SetMallocFunctions(JSRuntime *rt, const JSMallocFunctions *mf,
+                           void *opaque)
+{
+    rt->mf = *mf;
+    if (!rt->mf.js_malloc_usable_size)
+        rt->mf.js_malloc_usable_size = js_malloc_usable_size_unknown;
+    rt->malloc_state.opaque = opaque;
 }
 
 size_t js_malloc_usable_size_rt(JSRuntime *rt, const void *ptr)
@@ -2669,6 +2703,28 @@ static inline bool __JS_AtomIsConst(JSAtom v)
     return (int32_t)v < JS_ATOM_END;
 }
 
+/* dasher: as for JS_FreeValue above, the exported atom reference functions
+   are inlined at callers in this file. */
+static void __JS_FreeAtom(JSRuntime *rt, uint32_t i);
+
+static inline JSAtom js_dup_atom_inline(JSRuntime *rt, JSAtom v)
+{
+    if (!__JS_AtomIsConst(v))
+        rt->atom_array[v]->header.ref_count++;
+    return v;
+}
+
+static inline void js_free_atom_inline(JSRuntime *rt, JSAtom v)
+{
+    if (!__JS_AtomIsConst(v))
+        __JS_FreeAtom(rt, v);
+}
+
+#define JS_DupAtomRT(rt, v) js_dup_atom_inline(rt, v)
+#define JS_DupAtom(ctx, v) js_dup_atom_inline((ctx)->rt, v)
+#define JS_FreeAtomRT(rt, v) js_free_atom_inline(rt, v)
+#define JS_FreeAtom(ctx, v) js_free_atom_inline((ctx)->rt, v)
+
 static inline bool __JS_AtomIsTaggedInt(JSAtom v)
 {
     return (v & JS_ATOM_TAG_INT) != 0;
@@ -2878,7 +2934,7 @@ static int JS_InitAtoms(JSRuntime *rt)
     return 0;
 }
 
-JSAtom JS_DupAtomRT(JSRuntime *rt, JSAtom v)
+JSAtom (JS_DupAtomRT)(JSRuntime *rt, JSAtom v)
 {
     JSAtomStruct *p;
 
@@ -2889,7 +2945,7 @@ JSAtom JS_DupAtomRT(JSRuntime *rt, JSAtom v)
     return v;
 }
 
-JSAtom JS_DupAtom(JSContext *ctx, JSAtom v)
+JSAtom (JS_DupAtom)(JSContext *ctx, JSAtom v)
 {
     JSRuntime *rt;
     JSAtomStruct *p;
@@ -3491,13 +3547,13 @@ static int JS_AtomIsNumericIndex(JSContext *ctx, JSAtom atom)
     return true;
 }
 
-void JS_FreeAtom(JSContext *ctx, JSAtom v)
+void (JS_FreeAtom)(JSContext *ctx, JSAtom v)
 {
     if (!__JS_AtomIsConst(v))
         __JS_FreeAtom(ctx->rt, v);
 }
 
-void JS_FreeAtomRT(JSRuntime *rt, JSAtom v)
+void (JS_FreeAtomRT)(JSRuntime *rt, JSAtom v)
 {
     if (!__JS_AtomIsConst(v))
         __JS_FreeAtom(rt, v);
@@ -6093,7 +6149,7 @@ static void js_free_value_rt(JSRuntime *rt, JSValue v)
     }
 }
 
-void JS_FreeValueRT(JSRuntime *rt, JSValue v)
+void (JS_FreeValueRT)(JSRuntime *rt, JSValue v)
 {
     if (JS_VALUE_HAS_REF_COUNT(v)) {
         JSRefCountHeader *p = (JSRefCountHeader *)JS_VALUE_GET_PTR(v);
@@ -6103,7 +6159,7 @@ void JS_FreeValueRT(JSRuntime *rt, JSValue v)
     }
 }
 
-void JS_FreeValue(JSContext *ctx, JSValue v)
+void (JS_FreeValue)(JSContext *ctx, JSValue v)
 {
     JS_FreeValueRT(ctx->rt, v);
 }

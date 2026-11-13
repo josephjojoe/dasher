@@ -13,9 +13,11 @@ use std::rc::Rc;
 
 use rquickjs::Runtime;
 
-/// Heap accounting shared between the allocator and the runtime.
-#[derive(Debug)]
+/// The heap and its accounting, shared between the allocator and the
+/// runtime.
 pub(crate) struct HeapState {
+    #[cfg(unix)]
+    slab: imp::Slab,
     used: Cell<usize>,
     limit: usize,
     refused: Cell<bool>,
@@ -25,9 +27,20 @@ pub(crate) struct HeapState {
     exhausted: Cell<bool>,
 }
 
+impl std::fmt::Debug for HeapState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeapState")
+            .field("used", &self.used)
+            .field("limit", &self.limit)
+            .finish_non_exhaustive()
+    }
+}
+
 impl HeapState {
     fn new(limit: Option<usize>) -> Self {
         Self {
+            #[cfg(unix)]
+            slab: imp::Slab::new(),
             used: Cell::new(0),
             limit: limit.filter(|&l| l > 0).unwrap_or(usize::MAX),
             refused: Cell::new(false),
@@ -88,106 +101,223 @@ pub(crate) fn new_runtime(limit: Option<usize>) -> rquickjs::Result<(Runtime, Rc
     Ok((runtime, state))
 }
 
+/// Has the runtime of `ctx` call its heap directly, past `rquickjs`'s
+/// allocator wrappers: one call per allocation and free instead of three.
+/// `state` must be the one [`new_runtime`] returned with that runtime.
+pub(crate) fn attach(ctx: &rquickjs::Ctx<'_>, state: &Rc<HeapState>) {
+    imp::attach(ctx, state);
+}
+
 #[cfg(unix)]
 mod imp {
+    use std::cell::UnsafeCell;
+    use std::ffi::c_void;
     use std::ptr;
     use std::rc::Rc;
 
-    use rquickjs::Runtime;
     use rquickjs::allocator::Allocator;
+    use rquickjs::{Ctx, Runtime, qjs};
 
     use super::HeapState;
+    use crate::slab::{self, SlabHeap};
 
     /// The JS heap on dasher's slab allocator, with the limit in front.
-    struct SlabAllocator {
-        heap: crate::slab::SlabHeap,
-        state: Rc<HeapState>,
+    pub(crate) struct Slab(UnsafeCell<SlabHeap>);
+
+    impl Slab {
+        pub(super) fn new() -> Self {
+            Self(UnsafeCell::new(SlabHeap::new()))
+        }
     }
 
-    impl SlabAllocator {
+    impl HeapState {
+        /// The heap. Only these methods reach it, and none calls back into
+        /// QuickJS or another of them while using it, so a `&mut` made from
+        /// this pointer is never aliased. The state belongs to the runtime's
+        /// thread.
+        #[inline]
+        fn heap(&self) -> *mut SlabHeap {
+            self.slab.0.get()
+        }
+
         #[inline]
         fn track(&self, ptr: *mut u8) -> *mut u8 {
             if !ptr.is_null() {
                 // SAFETY: `ptr` was just returned by the heap.
-                let size = unsafe { crate::slab::usable_size(ptr) };
-                self.state.used.set(self.state.used.get() + size);
+                let size = unsafe { slab::usable_size(ptr) };
+                self.used.set(self.used.get() + size);
             }
             ptr
         }
-    }
 
-    // SAFETY: every pointer handed out comes from `heap`, and is freed,
-    // resized and measured only through it.
-    unsafe impl Allocator for SlabAllocator {
-        fn alloc(&mut self, size: usize) -> *mut u8 {
-            if !self.state.admit(size) {
+        #[inline]
+        fn alloc(&self, size: usize) -> *mut u8 {
+            if !self.admit(size) {
                 return ptr::null_mut();
             }
-            let ptr = self.heap.alloc(size);
+            // SAFETY: see `heap`.
+            let ptr = unsafe { (*self.heap()).alloc(size) };
             self.track(ptr)
         }
 
-        fn calloc(&mut self, count: usize, size: usize) -> *mut u8 {
+        #[inline]
+        fn calloc(&self, count: usize, size: usize) -> *mut u8 {
             let Some(total) = count.checked_mul(size) else {
                 return ptr::null_mut();
             };
-            if !self.state.admit(total) {
-                return ptr::null_mut();
-            }
-            let ptr = self.heap.alloc(total);
+            let ptr = self.alloc(total);
             if !ptr.is_null() {
                 // SAFETY: a fresh block of at least `total` bytes.
                 unsafe { ptr::write_bytes(ptr, 0, total) };
             }
-            self.track(ptr)
+            ptr
         }
 
-        unsafe fn dealloc(&mut self, ptr: *mut u8) {
+        /// # Safety
+        ///
+        /// `ptr` is null or a live block of this heap, not used again.
+        #[inline]
+        unsafe fn dealloc(&self, ptr: *mut u8) {
             if ptr.is_null() {
                 return;
             }
-            // SAFETY: the caller passes a live pointer from this allocator,
-            // which is not used again after this call.
+            // SAFETY: per the contract.
             unsafe {
-                let size = crate::slab::usable_size(ptr);
-                self.state
-                    .used
-                    .set(self.state.used.get().saturating_sub(size));
-                self.heap.free(ptr);
+                let size = slab::usable_size(ptr);
+                self.used.set(self.used.get().saturating_sub(size));
+                (*self.heap()).free(ptr);
             }
         }
 
-        unsafe fn realloc(&mut self, ptr: *mut u8, new_size: usize) -> *mut u8 {
+        /// # Safety
+        ///
+        /// `ptr` is null or a live block of this heap; on success it is not
+        /// used again.
+        #[inline]
+        unsafe fn realloc(&self, ptr: *mut u8, new_size: usize) -> *mut u8 {
             if ptr.is_null() {
                 return self.alloc(new_size);
             }
-            // SAFETY: the caller passes a live pointer from this allocator.
-            let old_size = unsafe { crate::slab::usable_size(ptr) };
-            if new_size > old_size && !self.state.admit(new_size - old_size) {
+            // SAFETY: the caller passes a live pointer from this heap.
+            let old_size = unsafe { slab::usable_size(ptr) };
+            if new_size > old_size && !self.admit(new_size - old_size) {
                 return ptr::null_mut();
             }
-            // SAFETY: as above; on success the old pointer is no longer used.
-            let new = unsafe { self.heap.realloc(ptr, new_size.max(1)) };
+            // SAFETY: as above.
+            let new = unsafe { (*self.heap()).realloc(ptr, new_size.max(1)) };
             if new.is_null() {
                 return ptr::null_mut();
             }
-            self.state
-                .used
-                .set(self.state.used.get().saturating_sub(old_size));
+            self.used.set(self.used.get().saturating_sub(old_size));
             self.track(new)
+        }
+    }
+
+    /// The allocator the runtime is created with. It serves the runtime's
+    /// first blocks; [`attach`] then points QuickJS straight at the same
+    /// heap, past `rquickjs`'s boxed `dyn Allocator` and its wrappers.
+    struct SlabAllocator(Rc<HeapState>);
+
+    // SAFETY: every pointer handed out comes from the state's heap, and is
+    // freed, resized and measured only through it.
+    unsafe impl Allocator for SlabAllocator {
+        fn alloc(&mut self, size: usize) -> *mut u8 {
+            self.0.alloc(size)
+        }
+
+        fn calloc(&mut self, count: usize, size: usize) -> *mut u8 {
+            self.0.calloc(count, size)
+        }
+
+        unsafe fn dealloc(&mut self, ptr: *mut u8) {
+            // SAFETY: per the trait's contract.
+            unsafe { self.0.dealloc(ptr) }
+        }
+
+        unsafe fn realloc(&mut self, ptr: *mut u8, new_size: usize) -> *mut u8 {
+            // SAFETY: per the trait's contract.
+            unsafe { self.0.realloc(ptr, new_size) }
         }
 
         unsafe fn usable_size(ptr: *mut u8) -> usize {
             // SAFETY: the caller passes a live pointer from this allocator.
-            unsafe { crate::slab::usable_size(ptr) }
+            unsafe { slab::usable_size(ptr) }
         }
     }
 
     pub(super) fn new_runtime(state: &Rc<HeapState>) -> rquickjs::Result<Runtime> {
-        Runtime::new_with_alloc(SlabAllocator {
-            heap: crate::slab::SlabHeap::new(),
-            state: Rc::clone(state),
-        })
+        Runtime::new_with_alloc(SlabAllocator(Rc::clone(state)))
+    }
+
+    // The functions QuickJS calls directly once attached. `opaque` is the
+    // runtime's `HeapState`.
+
+    unsafe extern "C" fn js_calloc(
+        opaque: *mut c_void,
+        count: qjs::size_t,
+        size: qjs::size_t,
+    ) -> *mut c_void {
+        // SAFETY: `attach` set `opaque` to a state that outlives the runtime.
+        let state = unsafe { &*opaque.cast::<HeapState>() };
+        state.calloc(count as usize, size as usize).cast()
+    }
+
+    unsafe extern "C" fn js_malloc(opaque: *mut c_void, size: qjs::size_t) -> *mut c_void {
+        // SAFETY: as in `js_calloc`.
+        let state = unsafe { &*opaque.cast::<HeapState>() };
+        state.alloc(size as usize).cast()
+    }
+
+    unsafe extern "C" fn js_free(opaque: *mut c_void, ptr: *mut c_void) {
+        // SAFETY: as in `js_calloc`; QuickJS frees only its live blocks.
+        unsafe { (*opaque.cast::<HeapState>()).dealloc(ptr.cast()) }
+    }
+
+    unsafe extern "C" fn js_realloc(
+        opaque: *mut c_void,
+        ptr: *mut c_void,
+        size: qjs::size_t,
+    ) -> *mut c_void {
+        // SAFETY: as in `js_free`.
+        unsafe { (*opaque.cast::<HeapState>()).realloc(ptr.cast(), size as usize) }.cast()
+    }
+
+    unsafe extern "C" fn js_malloc_usable_size(ptr: *const c_void) -> qjs::size_t {
+        if ptr.is_null() {
+            return 0;
+        }
+        // SAFETY: QuickJS measures only its live blocks.
+        unsafe { slab::usable_size(ptr.cast()) as qjs::size_t }
+    }
+
+    static FUNCTIONS: qjs::JSMallocFunctions = qjs::JSMallocFunctions {
+        js_calloc: Some(js_calloc),
+        js_malloc: Some(js_malloc),
+        js_free: Some(js_free),
+        js_realloc: Some(js_realloc),
+        js_malloc_usable_size: Some(js_malloc_usable_size),
+    };
+
+    unsafe extern "C" {
+        // dasher's addition to QuickJS (vendor/rquickjs-sys/PATCHES.md).
+        fn JS_SetMallocFunctions(
+            rt: *mut qjs::JSRuntime,
+            mf: *const qjs::JSMallocFunctions,
+            opaque: *mut c_void,
+        );
+    }
+
+    /// Has QuickJS call the heap directly from here on. Every allocation
+    /// already goes to `state`'s heap, so blocks made before keep working.
+    pub(super) fn attach(ctx: &Ctx<'_>, state: &Rc<HeapState>) {
+        // SAFETY: `ctx` is live, so its runtime is. The functions manage the
+        // same heap as the allocator the runtime was made with, and `state`
+        // outlives the runtime: that allocator holds a reference to it until
+        // the runtime is freed.
+        unsafe {
+            let rt = qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
+            JS_SetMallocFunctions(rt, &FUNCTIONS, Rc::as_ptr(state).cast_mut().cast());
+        }
     }
 }
 
@@ -209,6 +339,8 @@ mod imp {
         }
         Ok(runtime)
     }
+
+    pub(super) fn attach(_ctx: &rquickjs::Ctx<'_>, _state: &Rc<HeapState>) {}
 }
 
 #[cfg(test)]
