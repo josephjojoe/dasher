@@ -372,7 +372,9 @@ where two are given). A page **kept its text** when its visible words
 those `babeb38` produced, counted with repeats. Three pages crashed
 (`use of a released node`, a separate bug in reclaiming script elements
 a page removes before the loader is done with them; the change makes it
-show more often) and count as lost in every run of this change. Six
+show more often) and count as lost in every run of this change. With
+main merged, which fixes it, they load and settle (cnet.com 1.7 CPU s,
+expedia.com 0.16, hotels.com 0.4), as do huffpost.com and zdnet.com. Six
 more sites (washingtonpost.com, bestbuy.com and costco.com would not
 load, huffpost.com, zdnet.com and ign.com crashed in `babeb38`) are not
 in the 142.
