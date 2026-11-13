@@ -33,6 +33,56 @@ fn server() -> FixtureServer {
                  </script><p id=after>never parsed</p>",
             )
         })
+        .route("/churns-while-loading", |_| {
+            // Ten times the node limit made and dropped while the parser is
+            // still going, then a ticker rewriting a list.
+            FixtureResponse::html(
+                "<!doctype html><div id=outer><p id=clock></p><script>
+                   const clock = document.getElementById('clock');
+                   for (let i = 0; i < 50000; i++) clock.textContent = 'tick ' + i;
+                 </script><ul id=list></ul><script>
+                   const list = document.getElementById('list');
+                   let n = 0;
+                   setInterval(() => {
+                     for (let i = 0; i < 1000; i++, n++) {
+                       list.innerHTML = '<li>' + n + '</li><li><b>' + n + '</b></li>';
+                     }
+                   }, 10);
+                 </script><p id=after>parsed</p></div>",
+            )
+        })
+        .route("/removed-scripts", |_| {
+            // Scripts removed, with nothing left referring to them, before
+            // they run: they still run, as in browsers, while churn frees
+            // whatever is garbage.
+            FixtureResponse::html(
+                "<!doctype html><head><script defer src=/ran.js?defer></script>
+                 <script async src=/ran.js?async></script></head><body><p id=clock></p><script>
+                   for (const s of document.querySelectorAll('script[src]')) s.remove();
+                   {
+                     const s = document.createElement('script');
+                     s.src = '/ran.js?inserted';
+                     document.head.append(s);
+                     s.remove();
+                   }
+                   // Wrapped garbage, so the cycle collector runs and takes
+                   // the removed scripts' wrappers too.
+                   const clock = document.getElementById('clock');
+                   for (let i = 0; i < 20000; i++) clock.replaceChildren(document.createElement('b'));
+                 </script>",
+            )
+        })
+        .route("/ran.js", |req| {
+            let which = req.query.clone().unwrap_or_default();
+            FixtureResponse::ok(
+                "text/javascript",
+                format!(
+                    "(globalThis.ran ||= []).push('{which}');
+                     for (let i = 0; i < 20000; i++) clock.replaceChildren(document.createElement('i'));"
+                )
+                .into_bytes(),
+            )
+        })
         .route("/leaks-later", |_| {
             FixtureResponse::html(
                 "<!doctype html><script>
@@ -71,8 +121,24 @@ fn options() -> PageOptions {
 }
 
 async fn load(server: &FixtureServer, path: &str) -> Result<Page, LoadError> {
+    load_with(server, path, options()).await
+}
+
+async fn load_with(
+    server: &FixtureServer,
+    path: &str,
+    options: PageOptions,
+) -> Result<Page, LoadError> {
     let session = Client::builder().build().unwrap().session();
-    Page::load(&session, &server.url(path), options()).await
+    Page::load(&session, &server.url(path), options).await
+}
+
+/// For pages that churn for a while, which takes seconds in debug builds.
+fn patient() -> PageOptions {
+    PageOptions {
+        timeout: Some(Duration::from_secs(60)),
+        ..options()
+    }
 }
 
 #[tokio::test]
@@ -147,4 +213,46 @@ async fn scrolling_past_the_node_limit_ends_auto_scroll() {
         AutoScrollStop::LimitExceeded(ResourceLimit::DomNodes { limit: NODES })
     );
     assert!(report.scrolls < 20, "{report:?}");
+}
+
+#[tokio::test]
+async fn churn_while_loading_and_after_stays_within_the_limit() {
+    let server = server();
+    let mut page = load_with(&server, "/churns-while-loading", patient())
+        .await
+        .unwrap();
+    assert_eq!(page.js().limit_exceeded(), None);
+    assert_eq!(
+        page.js()
+            .eval_json("document.getElementById('after').textContent")
+            .unwrap(),
+        Some("\"parsed\"".into())
+    );
+    // Ticks until 20,000 lists have come and gone: twelve times the node
+    // limit in elements and text.
+    let outcome = page
+        .settle(&SettleOptions {
+            network_idle: None,
+            dom_quiet: None,
+            selector: None,
+            predicate: Some("n >= 20000".into()),
+            timeout: Duration::from_secs(120),
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, SettleOutcome::Settled);
+    assert_eq!(page.js().limit_exceeded(), None);
+}
+
+#[tokio::test]
+async fn removed_scripts_still_run_while_the_page_churns() {
+    let server = server();
+    let page = load_with(&server, "/removed-scripts", patient())
+        .await
+        .unwrap();
+    assert_eq!(page.js().limit_exceeded(), None);
+    assert_eq!(
+        page.js().eval_json("ran.sort().join()").unwrap(),
+        Some("\"async,defer,inserted\"".into())
+    );
 }
