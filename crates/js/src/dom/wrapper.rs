@@ -13,6 +13,7 @@ use rquickjs::{Class, Ctx, Function, JsLifetime, Object, Result, Value, qjs};
 
 use super::members::{self, Members};
 use super::{DomState, any_in_tree_except, group_root, owner};
+use crate::events::Listeners;
 
 /// A node wrapper object.
 pub(crate) type Node<'js> = Class<'js, NodeWrapper<'js>>;
@@ -28,6 +29,15 @@ pub(crate) struct NodeWrapper<'js> {
     /// freed by reference counting alone.
     next: RefCell<Option<Node<'js>>>,
     prev: RefCell<Option<Node<'js>>>,
+    /// The node's event listeners (see the `events` module). The wrapper
+    /// reports them to the GC, so they live as long as its group.
+    listeners: Listeners<'js>,
+}
+
+impl<'js> NodeWrapper<'js> {
+    pub(crate) fn listeners(&self) -> &Listeners<'js> {
+        &self.listeners
+    }
 }
 
 impl NodeWrapper<'_> {
@@ -66,6 +76,7 @@ impl<'js> Trace<'js> for NodeWrapper<'js> {
         if let Ok(prev) = self.prev.try_borrow() {
             prev.trace(tracer);
         }
+        self.listeners.trace(tracer);
     }
 }
 
@@ -211,6 +222,7 @@ fn create<'js>(dom: &Rc<DomState>, id: NodeId, proto: Object<'js>) -> Result<Nod
         stale: Cell::new(false),
         next: RefCell::new(None),
         prev: RefCell::new(None),
+        listeners: Listeners::default(),
     };
     let node = Class::instance_proto(wrapper, proto)?;
     dom.wrappers.insert(id, node.as_raw());
@@ -285,6 +297,13 @@ fn node_at(index: usize) -> NodeId {
 }
 
 impl DomState {
+    /// The live wrapper object of `id`, if there is one, borrowed from the
+    /// cache: it stays valid only until JS or the GC next runs.
+    #[inline]
+    pub(crate) fn wrapper_raw(&self, id: NodeId) -> Option<qjs::JSValue> {
+        self.wrappers.get(id)
+    }
+
     /// The live wrapper of `id`, if there is one.
     pub(crate) fn cached<'js>(&self, ctx: &Ctx<'js>, id: NodeId) -> Option<Node<'js>> {
         let raw = self.wrappers.get(id)?;
@@ -464,8 +483,9 @@ pub(crate) enum Move {
     WholeTree,
     /// A fragment that is the root of its own tree moves its children.
     Fragment,
-    /// Anything else: find the wrappers under the moved nodes.
-    Walk,
+    /// Anything else: find the wrappers under the moved nodes. The node
+    /// leaves the rest of its tree, rooted at `from`, behind.
+    Walk { from: NodeId },
 }
 
 /// Works out, before `node` is inserted under `parent`, how the insertion
@@ -475,7 +495,7 @@ pub(crate) fn plan_insert(doc: &Document, parent: NodeId, node: NodeId) -> Move 
     if old == group_root(doc, parent) {
         Move::SameTree
     } else if old != node {
-        Move::Walk
+        Move::Walk { from: old }
     } else if doc.kind(node) == NodeKind::DocumentFragment {
         Move::Fragment
     } else {
@@ -497,8 +517,15 @@ pub(crate) fn after_insert<'js>(
     dom.inserted(doc, node);
     let whole = match plan {
         Move::SameTree => return,
-        Move::WholeTree | Move::Fragment => dom.cached(ctx, node),
-        Move::Walk => None,
+        Move::WholeTree => dom.cached(ctx, node),
+        Move::Fragment => {
+            dom.left_behind(doc, node);
+            dom.cached(ctx, node)
+        }
+        Move::Walk { from } => {
+            dom.left_behind(doc, from);
+            None
+        }
     };
     let anchor_at = |dom: &DomState| {
         dom.cached(ctx, parent)
@@ -531,7 +558,8 @@ pub(crate) fn after_insert<'js>(
 }
 
 /// Regroups wrappers after the subtree at `root` was detached from `from`.
-/// If nothing in it has a wrapper, it is queued to be freed.
+/// If nothing in it has a wrapper, it is queued to be freed; so is the
+/// tree it left, if that is detached too.
 pub(crate) fn after_remove(
     ctx: &Ctx<'_>,
     dom: &DomState,
@@ -540,6 +568,7 @@ pub(crate) fn after_remove(
     from: NodeId,
 ) {
     dom.removed_from(doc, root, from);
+    dom.left_behind(doc, from);
     let wrappers = wrapped_under(ctx, dom, doc, &[root]);
     let Some((first, rest)) = wrappers.split_first() else {
         dom.add_candidate(root);

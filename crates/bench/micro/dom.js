@@ -46,6 +46,18 @@ bench("add+removeEventListener", 5e4, function (n) {
   }
 });
 
+// A bubbling event from the span in #target to a listener on the body,
+// three levels up (span, #target, main, body), making the event each time.
+bench("dispatchEvent, bubbling 3 levels", 5e4, function (n) {
+  const span = target().firstChild;
+  let heard = 0;
+  document.body.addEventListener("ping", function () {
+    heard++;
+  });
+  for (let i = 0; i < n; i++) span.dispatchEvent(new Event("ping", { bubbles: true }));
+  sink = heard;
+});
+
 bench("clientWidth", 5e4, function (n) {
   const el = target();
   for (let i = 0; i < n; i++) sink = el.clientWidth;

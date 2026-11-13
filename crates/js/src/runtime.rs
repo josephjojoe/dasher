@@ -23,6 +23,7 @@ use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::glue;
 use crate::heap::{self, HeapState};
+use crate::intl;
 use crate::limits::{DEFAULT_MAX_DOM_NODES, ResourceLimit};
 use crate::loader::{self, LoaderHooks, LoaderState};
 use crate::log::BoundedLog;
@@ -289,7 +290,19 @@ impl Shared {
                     (error, None)
                 } else {
                     let error = error_from_value(ctx, value.clone(), ErrorKind::Uncaught);
-                    (error, Some(value))
+                    // Or it allocates the InternalError but not its "out of
+                    // memory" message: where the heap fills up decides which.
+                    if error.kind == ErrorKind::Uncaught
+                        && error.message == "InternalError"
+                        && self.heap.take_refused()
+                    {
+                        (
+                            ScriptError::new(ErrorKind::OutOfMemory, "out of memory"),
+                            None,
+                        )
+                    } else {
+                        (error, Some(value))
+                    }
                 }
             }
             rquickjs::Error::Allocation => (
@@ -798,6 +811,8 @@ impl Drop for JsRuntime {
         self.shared.event_loop.clear();
         self.shared.net.abort_all();
         self.shared.modules.abort_all();
+        // The DOM may outlive the engine (in a `HeldNode`).
+        self.shared.dom.set_runtime(std::ptr::null_mut());
     }
 }
 
@@ -807,7 +822,9 @@ fn install<'js>(
     shared: &Rc<Shared>,
     options: &RuntimeOptions,
 ) -> rquickjs::Result<()> {
+    crate::native_data::NativeData::install(ctx)?;
     let native = Object::new(ctx.clone())?;
+    crate::events::install(ctx, &native, shared)?;
 
     let s = Rc::clone(shared);
     native.set(
@@ -829,6 +846,7 @@ fn install<'js>(
     net::install(ctx, &native, shared)?;
     encoding::install(ctx, &native)?;
     urls::install(ctx, &native)?;
+    intl::install(ctx, &native)?;
     random::install(ctx, &native)?;
     window::install(ctx, &native, shared, &options.window)?;
     dom::install(ctx, &native, shared)?;
