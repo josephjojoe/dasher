@@ -279,8 +279,9 @@ that would never finish costs a few CPU seconds rather than a core until
 When one runs out, the job answers `200` with the page as it stood and
 `budget_exhausted` naming the budget. Extraction still runs: the budgets
 are lifted once loading is over. `requestIdleCallback` work never holds a
-page open. On 142 recorded real sites, the budgets took the CPU time of a
-sample from 844 s to about 200 s; see `crates/bench/README.md`.
+page open. On 142 recorded real sites, the budgets and the network-idle
+default took the sample's CPU time from 844 s to 220–229 s, with no page
+running to the time limit; see `crates/bench/README.md`.
 
 ## Security
 
