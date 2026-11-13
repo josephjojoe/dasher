@@ -142,6 +142,27 @@ fn per_node_memory_cost() {
     );
     drop(doc);
 
+    // The id index: elements with a unique `id`, against the same
+    // elements with the value in another attribute.
+    let build = |attr: &str| {
+        let mut doc = Document::new();
+        let root = doc.create_element("div");
+        for i in 0..N {
+            let e = doc.create_element("a");
+            doc.set_attribute(e, attr, &format!("i{i}"));
+            doc.append_child(root, e).unwrap();
+        }
+        doc.shrink_to_fit();
+        doc
+    };
+    let (doc, with_title, _) = measure(|| build("title"));
+    drop(doc);
+    let (doc, with_id, _) = measure(|| build("id"));
+    let per_id = (with_id - with_title) as f64 / N as f64;
+    println!("  id index:                 {per_id:6.1} B/id");
+    assert!(per_id <= 20.0, "the id index costs {per_id} B per id");
+    drop(doc);
+
     // A parsed, indented listing page: what a scrape actually builds,
     // including the whitespace text nodes real markup is full of.
     let mut html =

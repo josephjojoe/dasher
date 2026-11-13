@@ -8,7 +8,6 @@
   'use strict';
 
   const defineProperty = Object.defineProperty;
-  const ReflectApply = Reflect.apply;
 
   // Streams (streams.js). Reading one of the stream globals, or a body as
   // a stream (fetch.js, through `internals.streams`), loads them.
@@ -38,7 +37,7 @@
   // Intl, and the built-in methods ECMA-402 makes locale-sensitive
   // (intl.js). Reading `Intl` or calling one of the methods loads it.
   let intl;
-  const loadIntl = () => intl ??= native.loadGlue('dasher:intl')(native, internals);
+  const loadIntl = () => intl ??= native.loadGlue('dasher:intl')(native.intlNatives(), internals);
   const setIntl = (value) => {
     defineProperty(globalThis, 'Intl', { value, writable: true, configurable: true });
   };
@@ -55,11 +54,15 @@
     [Date, 'toLocaleDateString'], [Date, 'toLocaleTimeString'], [String, 'localeCompare']];
   for (const [ctor, name] of methods) {
     const key = ctor.name;
+    // intl.js's version takes the receiver first. None of them takes more
+    // than three arguments.
+    let impl;
     const method = {
-      [name]() {
-        return ReflectApply(loadIntl()[key][name], this, arguments);
+      [name](a, b, c) {
+        return (impl ??= loadIntl()[key][name])(this, a, b, c);
       },
     }[name];
+    defineProperty(method, 'length', { value: 0 });
     defineProperty(ctor.prototype, name, { value: method, writable: true, configurable: true });
   }
 })
