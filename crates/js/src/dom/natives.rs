@@ -6,6 +6,7 @@
 //! Every change to the tree goes through the mutation functions here, which
 //! keep the wrapper groups in step (see the `dom` module docs).
 
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use dasher_dom::{AdjacentPosition, Document, DomError, Name, NodeId, NodeKind, QuirksMode};
@@ -92,7 +93,7 @@ fn wrap_all<'js>(ctx: &Ctx<'js>, dom: &Rc<DomState>, ids: &[NodeId]) -> Result<V
 
 /// Whether an element name is acceptable to `createElement`: the XML
 /// `Name` rules, loosely (non-ASCII characters are all allowed).
-fn valid_element_name(name: &str) -> bool {
+pub(super) fn valid_element_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -104,7 +105,7 @@ fn valid_element_name(name: &str) -> bool {
 }
 
 /// Whether a name is acceptable to `setAttribute`.
-fn valid_attribute_name(name: &str) -> bool {
+pub(super) fn valid_attribute_name(name: &str) -> bool {
     !name.is_empty()
         && !name.chars().any(|c| {
             matches!(
@@ -115,12 +116,12 @@ fn valid_attribute_name(name: &str) -> bool {
 }
 
 /// Lower-cases `name` if `id` is an HTML element, as attribute and tag name
-/// lookups do in HTML documents.
-fn html_lower(doc: &Document, id: NodeId, name: &str) -> String {
-    if doc.namespace(id) == Some(Name::NS_HTML) {
-        name.to_ascii_lowercase()
+/// lookups do in HTML documents. Only copies a name that has upper case.
+pub(super) fn html_lower<'a>(doc: &Document, id: NodeId, name: &'a str) -> Cow<'a, str> {
+    if doc.namespace(id) == Some(Name::NS_HTML) && name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
     } else {
-        name.to_owned()
+        Cow::Borrowed(name)
     }
 }
 
@@ -270,7 +271,7 @@ fn insert_into(
 }
 
 /// `parent.insertBefore(node, before)`. Returns the scripts it connected.
-fn insert(
+pub(super) fn insert(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     parent: NodeId,
@@ -287,7 +288,7 @@ fn insert(
 }
 
 /// Detaches `node` from its parent, if it has one.
-fn detach(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId) -> Result<()> {
+pub(super) fn detach(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         let Some((parent, prev, next)) = place(&doc, node) else {
@@ -319,7 +320,7 @@ fn remove_children(
     old
 }
 
-fn replace_child(
+pub(super) fn replace_child(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     parent: NodeId,
@@ -375,7 +376,7 @@ fn replace_child(
 }
 
 /// `replaceChildren`: replaces all of `parent`'s children with `node`.
-fn replace_all(
+pub(super) fn replace_all(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     parent: NodeId,
@@ -403,7 +404,7 @@ fn replace_all(
     result.map_err(|e| dom_error(ctx, e))
 }
 
-fn set_text_content(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, text: &str) -> Result<()> {
+pub(super) fn set_text_content(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, text: &str) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         match doc.kind(node) {
@@ -438,7 +439,7 @@ fn set_data(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, data: &str) -> Resu
     deliver(ctx, dom)
 }
 
-fn set_inner_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -> Result<()> {
+pub(super) fn set_inner_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         let target = doc.template_contents(node).unwrap_or(node);
@@ -502,6 +503,14 @@ fn insert_adjacent_html(
     };
     deliver(ctx, dom)?;
     result.map_err(|e| dom_error(ctx, e))
+}
+
+/// A copy of `n` (with its descendants if `deep`), which belongs to `n`'s
+/// node document.
+pub(super) fn clone_into_owner(dom: &DomState, doc: &mut Document, n: NodeId, deep: bool) -> NodeId {
+    let copy = doc.clone_node(n, deep);
+    dom.set_owner(doc, copy, dom.owner_document(doc, n));
+    copy
 }
 
 /// `Node.normalize()`: drops empty text nodes and merges runs of adjacent
@@ -572,36 +581,59 @@ fn attr_by_qualified_name<'d>(
     })
 }
 
-fn set_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str, value: &str) -> Result<()> {
+pub(super) fn set_attr(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    n: NodeId,
+    name: &str,
+    value: &str,
+) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         let name = html_lower(&doc, n, name);
-        let (ns, local, old) = match attr_by_qualified_name(&doc, n, &name) {
-            Some((ns, local, old)) => (ns, local.to_owned(), Some(old.to_owned())),
-            None => (Name::EMPTY, name.clone(), None),
+        // What a custom element's `attributeChangedCallback` gets, copied
+        // only for custom elements; a mutation record copies what it needs.
+        let reaction = {
+            let found = attr_by_qualified_name(&doc, n, &name);
+            let (ns, local, old) = match found {
+                Some((ns, local, old)) => (ns, local, Some(old)),
+                None => (Name::EMPTY, &*name, None),
+            };
+            dom.attribute(&doc, n, ns, local, old);
+            dom.is_custom(n)
+                .then(|| (ns, local.to_owned(), old.map(str::to_owned)))
         };
-        dom.attribute(&doc, n, ns, &local, old.as_deref());
         doc.set_attribute(n, &name, value);
         dom.bump();
-        dom.ce_attribute(&doc, n, ns, &local, old.as_deref(), Some(value));
+        if let Some((ns, local, old)) = reaction {
+            dom.ce_attribute(&doc, n, ns, &local, old.as_deref(), Some(value));
+        }
     }
     deliver(ctx, dom)
 }
 
-fn remove_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str) -> Result<bool> {
+pub(super) fn remove_attr(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    n: NodeId,
+    name: &str,
+) -> Result<bool> {
     let removed = {
         let mut doc = dom.doc_mut();
         let name = html_lower(&doc, n, name);
-        let found = attr_by_qualified_name(&doc, n, &name)
-            .map(|(ns, local, old)| (ns, local.to_owned(), old.to_owned()));
-        if let Some((ns, local, old)) = &found {
-            dom.attribute(&doc, n, *ns, local, Some(old));
-        }
+        let reaction = match attr_by_qualified_name(&doc, n, &name) {
+            None => return Ok(false),
+            Some((ns, local, old)) => {
+                dom.attribute(&doc, n, ns, local, Some(old));
+                dom.is_custom(n)
+                    .then(|| (ns, local.to_owned(), old.to_owned()))
+            }
+        };
         let removed = doc.remove_attribute(n, &name);
         if removed {
             dom.bump();
         }
-        if let Some((ns, local, old)) = &found {
+        if let Some((ns, local, old)) = &reaction {
             dom.ce_attribute(&doc, n, *ns, local, Some(old), None);
         }
         removed
@@ -610,7 +642,7 @@ fn remove_attr(ctx: &Ctx<'_>, dom: &Rc<DomState>, n: NodeId, name: &str) -> Resu
     Ok(removed)
 }
 
-fn set_attr_ns(
+pub(super) fn set_attr_ns(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     n: NodeId,
@@ -632,7 +664,7 @@ fn set_attr_ns(
     deliver(ctx, dom)
 }
 
-fn remove_attr_ns(
+pub(super) fn remove_attr_ns(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     n: NodeId,
@@ -1023,13 +1055,7 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "clone",
         move |ctx: Ctx<'js>, n: Node<'js>, deep: bool| -> Result<Node<'js>> {
             let n = id(&ctx, &n)?;
-            let copy = {
-                let mut doc = d.doc_mut();
-                let copy = doc.clone_node(n, deep);
-                // A copy belongs to the original's document.
-                d.set_owner(&doc, copy, d.owner_document(&doc, n));
-                copy
-            };
+            let copy = clone_into_owner(&d, &mut d.doc_mut(), n, deep);
             wrap(&ctx, &d, copy)
         },
     )?;

@@ -2048,6 +2048,9 @@
     return parts === undefined ? url : parts[internals.URL_PARTS.HREF];
   }
 
+  // The accessors reflect() defined, for N.init.
+  const reflected = [];
+
   // spec: { prop: type } or { prop: [type, attr, extra] }. Types: 'string',
   // 'url', 'bool', 'long', 'ulong', 'number', 'enum' (extra: [values,
   // missing, invalid]), 'nullable' (string or null).
@@ -2130,6 +2133,9 @@
           throw new Error('bad reflect type ' + type);
       }
       defineProperty(Ctor.prototype, prop, { get, set, enumerable: true, configurable: true });
+      // N.init makes the accessor native if it is still this one then (see
+      // "Reflected attributes" in dom/attrs.rs).
+      reflected.push([Ctor.prototype, prop, type, attrName, extra, get]);
     }
   }
 
@@ -4569,7 +4575,17 @@
       Element: Element.prototype,
       Document: Document.prototype,
       DocumentFragment: DocumentFragment.prototype,
+      DocumentType: DocumentType.prototype,
+      NodeList: NodeList.prototype,
     },
+    // Hooks of the native members: what to do with the scripts an
+    // insertion connected, and the base URL that reflected URLs resolve
+    // against.
+    hooks: {
+      connected: (scripts) => connected(scripts),
+      baseURL: () => internals.baseURL(),
+    },
+    reflected,
   }, (name, message) => domException(name, message));
   documentNode = N.document();
 
