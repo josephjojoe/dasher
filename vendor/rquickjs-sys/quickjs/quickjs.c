@@ -15645,14 +15645,15 @@ static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
         /* for fast arrays, we only store the number of elements */
         it->is_array = true;
         it->array_length = p->u.array.count;
-    } else if (js_shape_is_plain_strings(ctx, p)) {
+    } else if (p->shape->is_hashed && js_shape_is_plain_strings(ctx, p)) {
         /* dasher: the iterator takes the object's shape for its own, so
            its keys are the object's in order without adding each one.
            js_for_in_next() skips the slots that are deleted or not
            enumerable, as the key list would have left them out, and the
            values are null, as each key's would be. The iterator is never
            seen by scripts, so the prototype the shape names does not
-           matter. */
+           matter. Only a hashed shape can be shared: an unhashed one
+           belongs to its object alone. */
         JSObject *pe = JS_VALUE_GET_OBJ(enum_obj);
         JSShape *sh = p->shape;
         JSProperty *new_prop;
@@ -16321,7 +16322,11 @@ static int js_copy_data_properties_fast(JSContext *ctx, JSValueConst target,
     int i, pass, ret, n_sym = 0, n_enum = 0;
     bool plain = true; /* every key a string with an ordinary C_W_E value */
 
-    if (p->class_id != JS_CLASS_OBJECT || sh->has_small_array_index)
+    /* An unhashed shape belongs to its object alone and is changed in
+       place (add_property() asserts it has no other reference), so only
+       a hashed one can be held. */
+    if (p->class_id != JS_CLASS_OBJECT || sh->has_small_array_index ||
+        !sh->is_hashed)
         return 0;
     for(i = 0, prs = sh->prop; i < sh->prop_count; i++, prs++) {
         if (prs->atom == JS_ATOM_NULL)

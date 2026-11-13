@@ -61,6 +61,11 @@
     p(d({ ...protoed }) + ' | ' + d(Object.assign(Object.create(null), protoed)));
     const nullProtoSource = Object.assign(Object.create(null), { n: 1, m: 2 });
     p(d({ ...nullProtoSource }) + ' ' + Object.getPrototypeOf({ ...nullProtoSource }));
+    // A source whose shape is its own (after a delete) changes during the
+    // copy.
+    const ownShape = { a: 1, get g() { this.added = 'new'; delete this.c; return 'G'; }, c: 3, d: 4 };
+    delete ownShape.a;
+    p(d({ ...ownShape }) + ' | ' + d(Object.assign({}, ownShape)) + ' | ' + d(ownShape));
     const deleted = { a: 1, b: 2, c: 3 };
     delete deleted.b;
     p(d({ ...deleted }) + ' | ' + d(Object.assign({}, deleted)));

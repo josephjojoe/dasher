@@ -47,6 +47,13 @@
     const reshaped = { a: 1, b: 2, c: 3 };
     for (const k in reshaped) { seen3.push(k); Object.defineProperty(reshaped, 'b', { enumerable: false }); }
     p('made non-enumerable: ' + seen3.join());
+    // An object whose shape is its own (after a delete) gains and loses
+    // keys during the loop.
+    const own = { a: 1, b: 2, c: 3, d: 4 };
+    delete own.b;
+    const seen4 = [];
+    for (const k in own) { seen4.push(k); own['n' + k] = 1; delete own.d; }
+    p('own shape changed during for-in: ' + seen4.join() + ' / ' + Object.keys(own).join());
     const nested = { x: { y: 1 }, z: 2 };
     const pairs = [];
     for (const k in nested) for (const k2 in nested) pairs.push(k + k2);
