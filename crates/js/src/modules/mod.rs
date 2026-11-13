@@ -42,7 +42,7 @@ use url::Url;
 use crate::console::{ConsoleLevel, ConsoleMessage};
 use crate::data_url;
 use crate::dom;
-use crate::loader::LoaderHooks;
+use crate::events::{self, HostTarget};
 use crate::net::decode_utf8;
 use crate::remote::TaskSender;
 use crate::runtime::{JsRuntime, Shared, note_module_error};
@@ -612,7 +612,7 @@ fn finish_preload(ctx: &Ctx<'_>, id: u32, link: NodeId) -> rquickjs::Result<()> 
     } else {
         "error"
     };
-    crate::events::fire(ctx, crate::events::HostTarget::Node(link), event, false, false)?;
+    events::fire(ctx, HostTarget::Node(link), event, false, false)?;
     Ok(())
 }
 

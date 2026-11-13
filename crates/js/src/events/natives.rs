@@ -78,7 +78,8 @@ fn cfunc<'js>(
     Ok(unsafe { Value::from_raw(ctx.clone(), raw) })
 }
 
-const METHOD_FLAGS: c_int = (qjs::JS_PROP_CONFIGURABLE | qjs::JS_PROP_WRITABLE | qjs::JS_PROP_ENUMERABLE) as c_int;
+const METHOD_FLAGS: c_int =
+    (qjs::JS_PROP_CONFIGURABLE | qjs::JS_PROP_WRITABLE | qjs::JS_PROP_ENUMERABLE) as c_int;
 const ACCESSOR_FLAGS: c_int = (qjs::JS_PROP_CONFIGURABLE | qjs::JS_PROP_ENUMERABLE) as c_int;
 
 fn define_method<'js>(
@@ -266,7 +267,6 @@ impl<'js> EventsData<'js> {
     /// A new event object.
     pub(super) fn new_event(
         &self,
-        ctx: &Ctx<'js>,
         ty: TypeAtom<'js>,
         flags: u16,
         proto: Option<Object<'js>>,
@@ -546,7 +546,7 @@ unsafe extern "C" fn event_constructor(
             let ty = type_atom(ctx, args[0])?;
             let flags = init_flags(ctx, data, arg(args, 1))?;
             let proto = data.prototype_of(ctx, new_target, &data.event_proto)?;
-            data.new_event(ctx, ty, flags, Some(proto))
+            data.new_event(ty, flags, Some(proto))
         })
     }
 }
@@ -611,9 +611,16 @@ unsafe extern "C" fn event_member(
     // Plain reads go without making a `Ctx`.
     // SAFETY: QuickJS calls with the live context, and `this` is alive.
     if let Some(data) = unsafe { EventsData::of(ctx) }
+        // SAFETY: as above.
         && let Some(ev) = unsafe { data.event(ctx, this) }
     {
-        let b = |bits| if ev.has(bits) { qjs::JS_TRUE } else { qjs::JS_FALSE };
+        let b = |bits| {
+            if ev.has(bits) {
+                qjs::JS_TRUE
+            } else {
+                qjs::JS_FALSE
+            }
+        };
         match magic {
             4 => return qjs::JS_MKVAL(qjs::JS_TAG_INT, i32::from(ev.phase.get())),
             5 => return b(flag::BUBBLES),
@@ -621,7 +628,13 @@ unsafe extern "C" fn event_member(
             7 => return b(flag::COMPOSED),
             8 => return b(flag::CANCELED),
             9 => return b(flag::TRUSTED),
-            11 => return if ev.has(flag::CANCELED) { qjs::JS_FALSE } else { qjs::JS_TRUE },
+            11 => {
+                return if ev.has(flag::CANCELED) {
+                    qjs::JS_FALSE
+                } else {
+                    qjs::JS_TRUE
+                };
+            }
             12 => return b(flag::STOP),
             14 => {
                 ev.set(flag::STOP, true);
@@ -721,7 +734,11 @@ unsafe extern "C" fn event_setter(
 // -------------------------------------------------------------------------
 // Event handlers.
 
-fn handler_type<'js>(ctx: &Ctx<'js>, data: &EventsData<'js>, magic: c_int) -> Result<TypeAtom<'js>> {
+fn handler_type<'js>(
+    ctx: &Ctx<'js>,
+    data: &EventsData<'js>,
+    magic: c_int,
+) -> Result<TypeAtom<'js>> {
     let types = data.handler_types.borrow();
     let ty = usize::try_from(magic).ok().and_then(|i| types.get(i));
     ty.map(|t| TypeAtom::dup(ctx, t.raw()))
@@ -848,7 +865,7 @@ unsafe extern "C" fn fire(
             let ctor = arg(args, 3);
             let event = if is_nullish(ctor) {
                 let flags = init_flags(ctx, data, arg(args, 2))?;
-                data.new_event(ctx, ty, flags, None)?
+                data.new_event(ty, flags, None)?
             } else {
                 let mut argv = [ty.to_value(ctx), value(ctx, arg(args, 2))];
                 let mut raws = [argv[0].as_raw(), argv[1].as_raw()];
@@ -914,7 +931,14 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, data: &EventsData<'js>) -> Result<Obj
 
     let proto = &data.target_proto;
     define_method(ctx, proto, "addEventListener", add_event_listener, 2, 0)?;
-    define_method(ctx, proto, "removeEventListener", remove_event_listener, 2, 0)?;
+    define_method(
+        ctx,
+        proto,
+        "removeEventListener",
+        remove_event_listener,
+        2,
+        0,
+    )?;
     define_method(ctx, proto, "dispatchEvent", dispatch_event, 1, 0)?;
     let ctor = cfunc(ctx, target_constructor, "EventTarget", 0, 0, true)?;
     // SAFETY: live values.
@@ -942,8 +966,14 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, data: &EventsData<'js>) -> Result<Obj
     e.set("Event", ctor)?;
 
     e.set("fire", cfunc(ctx, fire, "fire", 4, 0, false)?)?;
-    e.set("listening", cfunc(ctx, listening, "listening", 2, 0, false)?)?;
-    e.set("dispatch", cfunc(ctx, dispatch_trusted, "dispatch", 2, 0, false)?)?;
+    e.set(
+        "listening",
+        cfunc(ctx, listening, "listening", 2, 0, false)?,
+    )?;
+    e.set(
+        "dispatch",
+        cfunc(ctx, dispatch_trusted, "dispatch", 2, 0, false)?,
+    )?;
 
     e.set(
         "isEvent",
@@ -961,34 +991,40 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, data: &EventsData<'js>) -> Result<Obj
     )?;
     e.set(
         "makeSignal",
-        Function::new(ctx.clone(), |ctx: Ctx<'js>, signal: Value<'js>| -> Result<()> {
-            let data = EventsData::get(&ctx).ok_or(rquickjs::Error::Unknown)?;
-            match target_arg(&ctx, data, &signal)? {
-                TargetRef::Object(t) => t.make_signal(),
-                _ => return Err(illegal(&ctx)),
-            }
-            Ok(())
-        })?,
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'js>, signal: Value<'js>| -> Result<()> {
+                let data = EventsData::get(&ctx).ok_or(rquickjs::Error::Unknown)?;
+                match target_arg(&ctx, data, &signal)? {
+                    TargetRef::Object(t) => t.make_signal(),
+                    _ => return Err(illegal(&ctx)),
+                }
+                Ok(())
+            },
+        )?,
     )?;
     e.set(
         "abortSignal",
-        Function::new(ctx.clone(), |ctx: Ctx<'js>, signal: Value<'js>| -> Result<()> {
-            let data = EventsData::get(&ctx).ok_or(rquickjs::Error::Unknown)?;
-            let TargetRef::Object(t) = target_arg(&ctx, data, &signal)? else {
-                return Err(illegal(&ctx));
-            };
-            let removals = t.abort();
-            for r in &removals {
-                let Some(listener) = r.listener.upgrade() else {
-                    continue;
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'js>, signal: Value<'js>| -> Result<()> {
+                let data = EventsData::get(&ctx).ok_or(rquickjs::Error::Unknown)?;
+                let TargetRef::Object(t) = target_arg(&ctx, data, &signal)? else {
+                    return Err(illegal(&ctx));
                 };
-                if let Ok(target) = target_arg(&ctx, data, &r.target) {
-                    data.listeners(target).remove(r.ty.raw(), &listener);
+                let removals = t.abort();
+                for r in &removals {
+                    let Some(listener) = r.listener.upgrade() else {
+                        continue;
+                    };
+                    if let Ok(target) = target_arg(&ctx, data, &r.target) {
+                        data.listeners(target).remove(r.ty.raw(), &listener);
+                    }
                 }
-            }
-            drop(removals);
-            Ok(())
-        })?,
+                drop(removals);
+                Ok(())
+            },
+        )?,
     )?;
     e.set(
         "existingHandler",
@@ -1093,17 +1129,20 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, data: &EventsData<'js>) -> Result<Obj
     )?;
     e.set(
         "setHooks",
-        Function::new(ctx.clone(), |ctx: Ctx<'js>, hooks: Object<'js>| -> Result<()> {
-            let data = EventsData::get(&ctx).ok_or(rquickjs::Error::Unknown)?;
-            let hooks = Hooks {
-                compile_handler: hooks.get("compileHandler")?,
-                slot_for: hooks.get("slotFor")?,
-                dom_exception: hooks.get("domException")?,
-                error_event: hooks.get("ErrorEvent")?,
-            };
-            drop(data.hooks.replace(Some(hooks)));
-            Ok(())
-        })?,
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'js>, hooks: Object<'js>| -> Result<()> {
+                let data = EventsData::get(&ctx).ok_or(rquickjs::Error::Unknown)?;
+                let hooks = Hooks {
+                    compile_handler: hooks.get("compileHandler")?,
+                    slot_for: hooks.get("slotFor")?,
+                    dom_exception: hooks.get("domException")?,
+                    error_event: hooks.get("ErrorEvent")?,
+                };
+                drop(data.hooks.replace(Some(hooks)));
+                Ok(())
+            },
+        )?,
     )?;
     Ok(e)
 }

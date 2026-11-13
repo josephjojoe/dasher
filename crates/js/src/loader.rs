@@ -154,8 +154,6 @@ impl<'js> LoaderHooks<'js> {
             .map(|h| h.clone())
             .ok_or(rquickjs::Error::Unknown)
     }
-
-
 }
 
 /// Adds the loader's host functions to `native` as `native.loader`.

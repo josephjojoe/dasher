@@ -30,6 +30,16 @@
 //! tree is still detached and unwrapped. Nodes are only ever released there,
 //! which is what makes the node ids queued in between safe to look at.
 //!
+//! # Events
+//!
+//! A node's event listeners live in its wrapper (`NodeWrapper::listeners`),
+//! which reports them to the GC with its ring links, so they live exactly
+//! as long as the wrapper group. Listeners, `Event` objects and dispatch
+//! are in the `events` module, which walks event paths on node ids and
+//! only wraps the nodes of a path once a listener could hear the event.
+//! Event targets that are not nodes use the same native members, so the
+//! pattern for them is in `events/natives.rs`.
+//!
 //! # Mutations
 //!
 //! Every change to the tree made from JS goes through [`DomState`]'s
@@ -70,7 +80,8 @@
 //! function behind every member (the entry's index is its magic number). It
 //! finds the `NodeWrapper` behind `this` from the object's opaque pointer
 //! and rquickjs's class id and vtable, which it learns from the document
-//! wrapper (`Members`, reached through the context's opaque pointer), so
+//! wrapper (`Members`, reached through the context's opaque pointer; see
+//! the `native_data` module for what else hangs off it), so
 //! there is no conversion, closure, `Rc` clone or hash lookup. Nodes come
 //! back through the wrapper table, and names (tag names, local names,
 //! namespaces) as atoms cached by name id, so the same string is never

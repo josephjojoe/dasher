@@ -247,9 +247,17 @@ impl<'js> Listeners<'js> {
             // SAFETY: `callback` is an argument of the running call; the
             // `Value` owns the new reference.
             let value = unsafe {
-                Value::from_raw(ctx.clone(), qjs::JS_DupValue(ctx.as_raw().as_ptr(), callback))
+                Value::from_raw(
+                    ctx.clone(),
+                    qjs::JS_DupValue(ctx.as_raw().as_ptr(), callback),
+                )
             };
-            let listener = Rc::new(Listener::new(Callback::Value(value), capture, once, passive));
+            let listener = Rc::new(Listener::new(
+                Callback::Value(value),
+                capture,
+                once,
+                passive,
+            ));
             Rc::make_mut(&mut entry.list).push(Rc::clone(&listener));
             Some(listener)
         })
@@ -297,15 +305,7 @@ impl<'js> Listeners<'js> {
     #[inline]
     pub(crate) fn has(&self, ty: qjs::JSAtom) -> bool {
         let types = self.types.borrow();
-        types
-            .iter()
-            .any(|e| e.ty.raw() == ty && !e.list.is_empty())
-    }
-
-    /// Whether there is no listener or handler record at all.
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.types.borrow().is_empty()
+        types.iter().any(|e| e.ty.raw() == ty && !e.list.is_empty())
     }
 
     pub(crate) fn handler_state(&self, ty: qjs::JSAtom) -> HandlerState {
@@ -324,16 +324,6 @@ impl<'js> Listeners<'js> {
             Slot::Active(l) => Some(Rc::clone(l)),
             _ => None,
         }
-    }
-
-    /// Notes that the handler for `ty` was looked at and is not set, so a
-    /// content attribute no longer sets it lazily.
-    pub(crate) fn set_handler_seen(&self, ctx: &Ctx<'js>, ty: qjs::JSAtom) {
-        self.with_entry(ty, Some(ctx), |entry| {
-            if matches!(entry.handler, Slot::Unseen) {
-                entry.handler = Slot::Inactive;
-            }
-        });
     }
 
     /// The handler for `ty`'s listener, made and added (first if `first`,

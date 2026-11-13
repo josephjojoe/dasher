@@ -19,9 +19,9 @@ use dasher_dom::{Document, Name, NodeId, NodeKind, ShadowRootMode};
 use rquickjs::{Class, Ctx, Exception, Function, Object, Result, Value, qjs};
 
 use super::DomState;
-use crate::native_data::NativeData;
 use super::natives::stale_node_error;
 use super::wrapper::{Node, NodeWrapper, wrap};
+use crate::native_data::NativeData;
 
 /// What `this` has to be for a member: a node wrapper of a kind that has
 /// the member's interface. Anything else throws `TypeError: Illegal

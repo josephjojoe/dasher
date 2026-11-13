@@ -302,7 +302,7 @@ pub(crate) fn fire<'js>(
     if cancelable {
         flags |= flag::CANCELABLE;
     }
-    let event = data.new_event(ctx, ty, flags, None)?;
+    let event = data.new_event(ty, flags, None)?;
     // SAFETY: `event` is a live event object.
     let ev = unsafe { data.event(raw, event.as_raw()) }.ok_or(rquickjs::Error::Unknown)?;
     dispatch(ctx, data, &target, &event, ev, true)
@@ -345,12 +345,7 @@ impl<'js> EventsData<'js> {
     }
 
     /// The slot `node`'s event path goes through, from `dom.js`.
-    fn slot_for(
-        &self,
-        ctx: &Ctx<'js>,
-        dom: &Rc<DomState>,
-        node: NodeId,
-    ) -> Result<Option<NodeId>> {
+    fn slot_for(&self, ctx: &Ctx<'js>, dom: &Rc<DomState>, node: NodeId) -> Result<Option<NodeId>> {
         let Some(hooks) = self.hooks() else {
             return Ok(None);
         };
@@ -614,7 +609,11 @@ pub(super) fn call<'js>(
 }
 
 /// `object[atom]`.
-pub(super) fn get<'js>(ctx: &Ctx<'js>, object: &Value<'js>, atom: qjs::JSAtom) -> Result<Value<'js>> {
+pub(super) fn get<'js>(
+    ctx: &Ctx<'js>,
+    object: &Value<'js>,
+    atom: qjs::JSAtom,
+) -> Result<Value<'js>> {
     // SAFETY: `object` is alive; the result is a new value, owned here.
     unsafe {
         let raw = qjs::JS_GetProperty(ctx.as_raw().as_ptr(), object.as_raw(), atom);

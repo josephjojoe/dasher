@@ -352,7 +352,8 @@ impl Layout {
         // reference, and the object outlives it as the caller promises.
         unsafe {
             let ctx = natives::ctx_of(ctx);
-            let value = Value::from_raw(ctx.clone(), qjs::JS_DupValue(ctx.as_raw().as_ptr(), value));
+            let value =
+                Value::from_raw(ctx.clone(), qjs::JS_DupValue(ctx.as_raw().as_ptr(), value));
             let class = Class::<T>::from_value(&value).ok()?;
             let ptr: *const T = &*class.borrow();
             Some(&*ptr)
@@ -478,15 +479,17 @@ impl<'js> EventsData<'js> {
         }
         // SAFETY: as for the function.
         unsafe {
-            if let Some(data) =
-                self.target_layout
-                    .get::<TargetData<'js>>(ctx, self.class_id, value)
+            if let Some(data) = self
+                .target_layout
+                .get::<TargetData<'js>>(ctx, self.class_id, value)
             {
                 return Some(TargetRef::Object(data));
             }
             let members = NativeData::of(ctx)?.members()?;
             let wrapper = members.wrapper(ctx, value)?;
-            Some(TargetRef::Node(&*(wrapper as *const NodeWrapper<'_>).cast()))
+            Some(TargetRef::Node(
+                &*(wrapper as *const NodeWrapper<'_>).cast(),
+            ))
         }
     }
 
@@ -529,7 +532,11 @@ impl<'js> EventsData<'js> {
 fn atom<'js>(ctx: &Ctx<'js>, s: &str) -> Result<TypeAtom<'js>> {
     // SAFETY: `ctx` is live, and the pointer and length are `s`'s.
     let raw = unsafe {
-        qjs::JS_NewAtomLen(ctx.as_raw().as_ptr(), s.as_ptr().cast(), s.len() as qjs::size_t)
+        qjs::JS_NewAtomLen(
+            ctx.as_raw().as_ptr(),
+            s.as_ptr().cast(),
+            s.len() as qjs::size_t,
+        )
     };
     if raw == qjs::JS_ATOM_NULL {
         return Err(rquickjs::Error::Exception);
@@ -601,4 +608,46 @@ pub(crate) fn install<'js>(
     let data = unsafe { &*ptr };
     let events = natives::install(ctx, data)?;
     native.set("events", events)
+}
+
+#[cfg(test)]
+mod tests {
+    use dasher_dom::Document;
+
+    use crate::{ClockMode, EventTarget, JsRuntime, RuntimeOptions};
+
+    /// The host firing an event nobody listens for makes no wrapper and no
+    /// event object, and runs no JS.
+    #[test]
+    fn firing_into_silence_costs_nothing() {
+        let js = JsRuntime::new(RuntimeOptions {
+            clock: ClockMode::Manual,
+            ..RuntimeOptions::default()
+        })
+        .unwrap();
+        js.set_document(Document::parse("<div><p><span id=s>x</span></p></div>"));
+        js.run_script("addEventListener('other', () => {});", "a.js")
+            .unwrap();
+        let span = js.with_document(|doc| doc.get_element_by_id(doc.root(), "s").unwrap());
+        let dom = std::rc::Rc::clone(&js.shared().dom);
+        let before = js.memory_allocated();
+        for ty in ["load", "error", "ping"] {
+            assert!(js.fire_event(EventTarget::Node(span), ty, true, false));
+        }
+        assert!(js.fire_event(EventTarget::Window, "load", false, false));
+        assert!(js.fire_event(EventTarget::Document, "DOMContentLoaded", true, false));
+        assert_eq!(js.memory_allocated(), before);
+        assert!(dom.wrapper_raw(span).is_none());
+
+        // A listener at the window hears a bubbling event from the span,
+        // which then gets its wrapper.
+        js.run_script("var heard = []; addEventListener('ping', (e) => heard.push(e.target.id, e.isTrusted));", "b.js")
+            .unwrap();
+        assert!(js.fire_event(EventTarget::Node(span), "ping", true, false));
+        assert!(dom.wrapper_raw(span).is_some());
+        assert_eq!(
+            js.eval_json("heard").unwrap().as_deref(),
+            Some(r#"["s",true]"#)
+        );
+    }
 }

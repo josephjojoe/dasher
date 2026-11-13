@@ -12,8 +12,8 @@ use rquickjs::function::Constructor;
 use rquickjs::{Class, Ctx, Function, JsLifetime, Object, Result, Value, qjs};
 
 use super::members::{self, Members};
-use crate::events::Listeners;
 use super::{DomState, any_in_tree_except, group_root, owner};
+use crate::events::Listeners;
 
 /// A node wrapper object.
 pub(crate) type Node<'js> = Class<'js, NodeWrapper<'js>>;

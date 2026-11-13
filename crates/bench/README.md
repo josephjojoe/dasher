@@ -444,6 +444,7 @@ mix of work. Lightpanda does real layout, which is why its
 | classList.contains | 5,878 | 3,505 | 130 | 27.0× |
 | style.setProperty | 5,671 | 3,432 | 303 | 11.3× |
 | add+removeEventListener | 3,480 | 2,165 | 220 | 9.8× |
+| dispatchEvent, bubbling 3 levels | 18,940 | | | |
 | clientWidth | 2,406 | 1,685 | 50 | 33.7× |
 | append+removeChild | 1,934 | 1,315 | 220 | 6.0× |
 | dataset.x | 1,894 | 1,198 | 137 | 8.7× |
@@ -477,6 +478,39 @@ nothing costs about 78 ns in this loop: 51 ns for the loop and the lookup
 through four prototypes (an own data property is 40 ns), and 27 ns for
 QuickJS calling a C function as a getter. The members' own work is the
 rest, 0 to 20 ns.
+
+Events are native since DAS-44 (see `crates/js/src/events/`): listener
+storage, `Event` objects and dispatch are Rust, and the event path is
+walked on node ids. On this machine, median of 5 runs, against
+Lightpanda's nightly (1.1.0-nightly.12116) timed on the same loops with
+[`micro/lightpanda.py`](micro/lightpanda.py):
+
+| benchmark | before (main at `281c8bd`) | after | Lightpanda | after ÷ Lightpanda |
+| --- | ---: | ---: | ---: | ---: |
+| add+removeEventListener | 3,378 | 300 | 233 | 1.3× |
+| dispatchEvent, bubbling 3 levels | 18,940 | 1,656 | 1,734 | 1.0× |
+| tagName (for scale) | | | 72 | |
+
+The dispatch loop makes a bubbling `Event` and dispatches it at a span
+whose listener is three levels up, on the body: seven targets on the path
+(span, `#target`, `main`, body, html, document, window), one of them with
+a listener. Firing an event no listener could hear, as the host does for
+`load`, `DOMContentLoaded`, script `load` and `error` or
+`readystatechange` on most pages, makes no event object and no wrappers
+and runs no JS: the path is checked for listeners, handlers and handler
+attributes first.
+
+`micro/lightpanda.py` serves the micro-benchmark page and loops to a
+Lightpanda binary and reports ns per op the way `dasher-bench micro` does,
+from the process CPU time of `lightpanda fetch` with and without a loop:
+
+```sh
+python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
+    "add+removeEventListener=500000" "dispatchEvent, bubbling 3 levels=200000"
+```
+
+Its tagName figure (72 ns here, 60 in the audit) puts this machine about
+1.2 times slower than the audit's for Lightpanda.
 
 ## Per-page limits
 
