@@ -195,7 +195,7 @@ impl<'w> Nodes<'w> {
 /// of `step` that is not among the arguments.
 fn viable_sibling(
     w: &Write<'_>,
-    nodes: &Nodes,
+    nodes: &Nodes<'_>,
     step: fn(&dasher_dom::Document, NodeId) -> Option<NodeId>,
 ) -> Option<NodeId> {
     let doc = w.dom.doc();

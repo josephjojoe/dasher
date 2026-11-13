@@ -188,13 +188,16 @@ fn is_loading_link(doc: &Document, node: NodeId) -> bool {
 
 /// The nodes `node` stands for when inserted: a fragment's children, or
 /// `node` itself.
-fn nodes_to_insert(doc: &Document, node: NodeId) -> Vec<NodeId> {
+fn nodes_to_insert(doc: &Document, node: NodeId) -> Moved {
     if doc.kind(node) == NodeKind::DocumentFragment {
         doc.children(node).collect()
     } else {
-        vec![node]
+        smallvec::smallvec![node]
     }
 }
+
+/// The nodes an insertion moves: one, unless a fragment's children.
+type Moved = smallvec::SmallVec<[NodeId; 1]>;
 
 /// Where a node is now: its parent and siblings, if it has a parent.
 type Place = (NodeId, Option<NodeId>, Option<NodeId>);
@@ -249,7 +252,7 @@ fn insert_into(
     node: NodeId,
     before: Option<NodeId>,
     record: bool,
-) -> std::result::Result<Vec<NodeId>, DomError> {
+) -> std::result::Result<Moved, DomError> {
     let plan = plan_insert(doc, parent, node);
     let moved = nodes_to_insert(doc, node);
     let old = place(doc, node);
@@ -393,10 +396,9 @@ pub(super) fn replace_all(
         dom.bump();
         let added = match node {
             Some(node) => insert_into(ctx, dom, &mut doc, parent, node, None, false),
-            None => Ok(Vec::new()),
+            None => Ok(Moved::new()),
         };
-        let none = Vec::new();
-        let inserted = added.as_ref().unwrap_or(&none);
+        let inserted: &[NodeId] = added.as_deref().unwrap_or(&[]);
         dom.child_list(&doc, parent, inserted, &removed, None, None);
         added.map(|moved| connected_scripts(&doc, &moved))
     };
