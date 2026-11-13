@@ -1,11 +1,13 @@
 //! The synthetic layout's raw material, and the hook that tells layout
 //! observers the document changed.
 //!
-//! Nothing is laid out. Where geometry matters (the `scrolled` layout mode,
+//! Nothing is laid out. Where geometry matters (the `viewport` visibility,
 //! `scrollIntoView`, `IntersectionObserver`), `dom.js` stacks the elements
 //! under `<body>` in document order, one line each, with every element
 //! spanning the lines of its descendants. [`lines`] gives an element's place
-//! in that stack.
+//! in that stack. The default `loaded` visibility stacks only what was
+//! inserted since the page was last revealed ([`loaded_lines`], from the
+//! document's insertion epochs; see [`JsRuntime::reveal`]).
 //!
 //! `IntersectionObserver` must look again whenever the tree changes. Rather
 //! than have every mutation call into JS, the event loop calls the layout
@@ -255,6 +257,25 @@ mod tests {
         // A new epoch counts all of it as seen.
         doc.begin_insertion_epoch();
         assert_eq!(loaded_lines(&doc, &[e]), [0, 0]);
+    }
+
+    #[test]
+    fn shadow_trees_take_lines_before_their_hosts_children() {
+        let mut doc =
+            Document::parse("<body><x-feed id=h><p id=light></p></x-feed><p id=after></p></body>");
+        let [host, light, after] = ["h", "light", "after"].map(|id| find(&doc, id));
+        let root = doc
+            .attach_shadow(host, dasher_dom::ShadowRootInit::open())
+            .unwrap();
+        doc.begin_insertion_epoch();
+        for _ in 0..3 {
+            let item = doc.create_element("li");
+            doc.append_child(root, item).unwrap();
+        }
+        assert_eq!(
+            loaded_lines(&doc, &[host, light, after]),
+            [0, 3, 3, 0, 3, 0]
+        );
     }
 
     #[test]

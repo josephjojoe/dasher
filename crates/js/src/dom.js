@@ -1602,7 +1602,7 @@
   }
 
   // An element's box relative to the viewport, as getBoundingClientRect()
-  // reports it. In the 'inView' layout boxes stay put when scrolling.
+  // reports it. Under 'all' and 'loaded' boxes stay put when scrolling.
   function clientBox(el) {
     const b = box(el);
     if (!SCROLLED || (b[2] === 0 && b[3] === 0)) return b;

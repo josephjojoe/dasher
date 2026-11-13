@@ -1,4 +1,4 @@
-// IntersectionObserver over the synthetic layout (see LayoutMode in
+// IntersectionObserver over the synthetic layout (see Visibility in
 // window.rs and the geometry section of dom.js).
 // https://w3c.github.io/IntersectionObserver/
 //

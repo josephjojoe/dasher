@@ -1,5 +1,5 @@
 //! Synthetic layout: element boxes, scrolling, scrollIntoView,
-//! IntersectionObserver and ResizeObserver, in both layout modes.
+//! IntersectionObserver and ResizeObserver, under each visibility policy.
 
 use dasher_dom::Document;
 use dasher_js::{ClockMode, JsRuntime, RuntimeOptions, Viewport, Visibility, WindowOptions};
@@ -71,6 +71,80 @@ fn in_view_boxes_stay_at_the_top() {
     // No limit on scrolling.
     run(&js, "scrollTo(0, 99999)");
     assert_eq!(eval(&js, "scrollY"), "99999");
+}
+
+#[test]
+fn loaded_keeps_what_was_there_in_view_and_appended_content_below() {
+    let js = page(Visibility::Loaded, LIST);
+    // Before the first reveal it is `All`.
+    fill(&js, 20);
+    run(&js, &format!("globalThis.rect = {RECT};"));
+    assert_eq!(
+        eval(
+            &js,
+            "[rect('a'), rect('last'), document.documentElement.scrollHeight]"
+        ),
+        "[[0,20],[0,20],200]"
+    );
+    // After it, twenty more divs in #filler take a line each and push
+    // what follows them down; what came before stays in view.
+    js.reveal();
+    fill(&js, 20);
+    assert_eq!(
+        eval(
+            &js,
+            "[rect('a'), rect('filler'), rect('last'), document.getElementById('last').offsetTop,
+              rect('hidden'), document.documentElement.scrollHeight]"
+        ),
+        // Two viewports of 100px, plus the 400px of new divs.
+        "[[0,20],[0,400],[400,20],400,[0,0],600]"
+    );
+    // Boxes stay put when the page scrolls itself, which stops at the
+    // bottom.
+    run(&js, "scrollTo(0, 99999)");
+    assert_eq!(eval(&js, "[scrollY, rect('last')[0]]"), "[500,400]");
+    // The next reveal brings it all back to the top.
+    js.reveal();
+    assert_eq!(
+        eval(&js, "[rect('last'), document.documentElement.scrollHeight]"),
+        "[[0,20],200]"
+    );
+}
+
+#[test]
+fn loaded_intersection_follows_what_was_appended() {
+    let js = page(Visibility::Loaded, LIST);
+    run(
+        &js,
+        "globalThis.seen = [];
+         new IntersectionObserver((entries) => {
+           for (const e of entries) seen.push(e.target.id + ':' + e.isIntersecting);
+         }).observe(document.getElementById('last'));",
+    );
+    assert_eq!(eval(&js, "seen"), r#"["last:true"]"#);
+    js.reveal();
+    // Four lines of new content still leave it in the 100px viewport; six
+    // push it out.
+    fill(&js, 4);
+    assert_eq!(eval(&js, "seen"), r#"["last:true"]"#);
+    fill(&js, 2);
+    assert_eq!(eval(&js, "seen"), r#"["last:true","last:false"]"#);
+    // An element appended after the reveal is out of view too.
+    run(
+        &js,
+        "{ const late = document.createElement('p'); late.id = 'late';
+           document.body.append(late);
+           new IntersectionObserver((entries) => seen.push('late:' + entries[0].isIntersecting))
+             .observe(late); }",
+    );
+    assert_eq!(eval(&js, "seen.at(-1)"), r#""late:false""#);
+    // Revealing counts all of it as seen.
+    js.reveal();
+    js.run_ready().unwrap();
+    assert_eq!(
+        eval(&js, "seen.slice(-2).sort()"),
+        r#"["last:true","late:true"]"#
+    );
 }
 
 #[test]

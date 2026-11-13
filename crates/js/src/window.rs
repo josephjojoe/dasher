@@ -90,10 +90,13 @@ pub enum Visibility {
     /// pushed down by it: a "load more" element moves below the fold once a
     /// viewport's worth of items has been appended above it, and the
     /// appended items themselves leave the viewport after its first
-    /// screenful. A loader can therefore append at most about a viewport of
-    /// content between reveals, however it checks for visibility. Scrolling
-    /// by the page itself moves the scroll position and fires `scroll`
-    /// events but brings nothing new into view.
+    /// screenful. The document is two viewports tall plus that stack, and
+    /// the window scrolls no further than its bottom, so a check against
+    /// `scrollY + innerHeight` turns false too. A loader can therefore
+    /// append only a viewport or two of content between reveals, however
+    /// it checks for visibility. Scrolling by the page itself moves the
+    /// scroll position and fires `scroll` events, but boxes stay put, so it
+    /// brings nothing new into view.
     #[default]
     Loaded,
     /// A real viewport: elements are only in view once scrolled to. The
