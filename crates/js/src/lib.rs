@@ -345,6 +345,7 @@ mod encoding;
 mod error;
 mod evaluate;
 mod event_loop;
+mod events;
 mod glue;
 mod heap;
 mod limits;
@@ -352,6 +353,7 @@ mod loader;
 mod log;
 mod media;
 mod modules;
+mod native_data;
 mod net;
 mod random;
 #[doc(hidden)]

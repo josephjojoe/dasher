@@ -107,7 +107,8 @@ use rquickjs::{Ctx, Function, Object};
 use crate::clock::Clock;
 use crate::runtime::{JsRuntime, Shared};
 
-pub(crate) use wrapper::{Node, wrap};
+pub(crate) use members::Members;
+pub(crate) use wrapper::{Node, NodeWrapper, wrap};
 
 /// How many parsed selectors are kept for reuse.
 const SELECTOR_CACHE_SIZE: usize = 64;

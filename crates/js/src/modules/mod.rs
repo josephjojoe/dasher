@@ -612,8 +612,8 @@ fn finish_preload(ctx: &Ctx<'_>, id: u32, link: NodeId) -> rquickjs::Result<()> 
     } else {
         "error"
     };
-    let target = dom::wrap(ctx, &shared.dom, link)?;
-    LoaderHooks::get(ctx)?.fire_simple(target.into_value(), event)
+    crate::events::fire(ctx, crate::events::HostTarget::Node(link), event, false, false)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
