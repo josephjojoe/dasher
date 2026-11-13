@@ -15523,6 +15523,49 @@ static JSValue js_build_mapped_arguments(JSContext *ctx, int argc,
     return JS_EXCEPTION;
 }
 
+/* dasher: true if 'p' is an ordinary object whose own properties are
+   all plain data properties with string keys that are not array indices
+   (deleted slots allowed). Its own keys in order are then just the
+   shape's, which is what for-in and Object.keys list. */
+static bool js_shape_is_plain_strings(JSContext *ctx, JSObject *p)
+{
+    JSShape *sh = p->shape;
+    JSShapeProperty *prs;
+    uint32_t idx;
+    int i;
+
+    if (p->class_id != JS_CLASS_OBJECT || sh->has_small_array_index)
+        return false;
+    for(i = 0, prs = sh->prop; i < sh->prop_count; i++, prs++) {
+        if (prs->atom == JS_ATOM_NULL)
+            continue;
+        if ((prs->flags & JS_PROP_TMASK) ||
+            JS_AtomGetKind(ctx, prs->atom) != JS_ATOM_KIND_STRING ||
+            JS_AtomIsArrayIndex(ctx, &idx, prs->atom))
+            return false;
+    }
+    return true;
+}
+
+/* dasher: true if 'p' certainly has no enumerable string-keyed own
+   property, judged from its shape alone; false if it may have one or is
+   exotic, which the general check then decides. */
+static bool js_shape_has_no_enumerable(JSContext *ctx, JSObject *p)
+{
+    JSShape *sh = p->shape;
+    JSShapeProperty *prs;
+    int i;
+
+    if (p->is_exotic)
+        return false;
+    for(i = 0, prs = sh->prop; i < sh->prop_count; i++, prs++) {
+        if (prs->atom != JS_ATOM_NULL && (prs->flags & JS_PROP_ENUMERABLE) &&
+            JS_AtomGetKind(ctx, prs->atom) == JS_ATOM_KIND_STRING)
+            return false;
+    }
+    return true;
+}
+
 static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
 {
     JSObject *p;
@@ -15565,13 +15608,18 @@ static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
             break;
         if (JS_IsException(obj1))
             goto fail;
-        if (JS_GetOwnPropertyNamesInternal(ctx, &tab_atom, &tab_atom_count,
-                                           JS_VALUE_GET_OBJ(obj1),
-                                           JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY)) {
-            JS_FreeValue(ctx, obj1);
-            goto fail;
+        /* dasher: an ordinary prototype is checked from its shape */
+        if (js_shape_has_no_enumerable(ctx, JS_VALUE_GET_OBJ(obj1))) {
+            tab_atom_count = 0;
+        } else {
+            if (JS_GetOwnPropertyNamesInternal(ctx, &tab_atom, &tab_atom_count,
+                                               JS_VALUE_GET_OBJ(obj1),
+                                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY)) {
+                JS_FreeValue(ctx, obj1);
+                goto fail;
+            }
+            js_free_prop_enum(ctx, tab_atom, tab_atom_count);
         }
-        js_free_prop_enum(ctx, tab_atom, tab_atom_count);
         if (tab_atom_count != 0) {
             JS_FreeValue(ctx, obj1);
             goto slow_path;
@@ -15597,6 +15645,27 @@ static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
         /* for fast arrays, we only store the number of elements */
         it->is_array = true;
         it->array_length = p->u.array.count;
+    } else if (js_shape_is_plain_strings(ctx, p)) {
+        /* dasher: the iterator takes the object's shape for its own, so
+           its keys are the object's in order without adding each one.
+           js_for_in_next() skips the slots that are deleted or not
+           enumerable, as the key list would have left them out, and the
+           values are null, as each key's would be. The iterator is never
+           seen by scripts, so the prototype the shape names does not
+           matter. */
+        JSObject *pe = JS_VALUE_GET_OBJ(enum_obj);
+        JSShape *sh = p->shape;
+        JSProperty *new_prop;
+        if (pe->shape->prop_size != sh->prop_size) {
+            new_prop = js_realloc(ctx, pe->prop, sizeof(new_prop[0]) * sh->prop_size);
+            if (!new_prop)
+                goto fail;
+            pe->prop = new_prop;
+        }
+        for(i = 0; i < sh->prop_count; i++)
+            pe->prop[i].u.value = JS_NULL;
+        js_free_shape(ctx->rt, pe->shape);
+        pe->shape = js_dup_shape(sh);
     } else {
     normal_case:
         if (JS_GetOwnPropertyNamesInternal(ctx, &tab_atom, &tab_atom_count, p,
@@ -15691,8 +15760,12 @@ static __exception int js_for_in_next(JSContext *ctx, JSValue *sp)
         // check if the property was deleted unless we're dealing with a proxy
         JSValue obj = it->obj;
         if (JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT) {
-            JSObject *p = JS_VALUE_GET_OBJ(obj);
-            if (p->class_id == JS_CLASS_PROXY)
+            JSObject *p1 = JS_VALUE_GET_OBJ(obj);
+            if (p1->class_id == JS_CLASS_PROXY)
+                break;
+            /* dasher: an object that still has the shape the iterator
+               took (see build_for_in_iterator) still has every key */
+            if (!it->is_array && p1->shape == p->shape)
                 break;
         }
         ret = JS_HasProperty(ctx, obj, prop);
@@ -39355,6 +39428,52 @@ static JSValue JS_GetOwnPropertyNames2(JSContext *ctx, JSValueConst obj1,
     if (JS_IsException(obj))
         return JS_EXCEPTION;
     p = JS_VALUE_GET_OBJ(obj);
+    /* dasher: the keys or values of an ordinary object of plain data
+       properties with string keys come straight from its shape, in its
+       order, into an array of the right size. Nothing the general path
+       does on the way can run code for such an object. */
+    if ((kind == JS_ITERATOR_KIND_KEY || kind == JS_ITERATOR_KIND_VALUE) &&
+        (flags & ~JS_GPN_ENUM_ONLY) == JS_GPN_STRING_MASK &&
+        js_shape_is_plain_strings(ctx, p)) {
+        JSShape *sh = p->shape;
+        JSObject *pr;
+        uint32_t n = 0;
+        for(i = 0; i < sh->prop_count; i++) {
+            if (sh->prop[i].atom != JS_ATOM_NULL &&
+                (!(flags & JS_GPN_ENUM_ONLY) ||
+                 (sh->prop[i].flags & JS_PROP_ENUMERABLE)))
+                n++;
+        }
+        r = JS_NewArray(ctx);
+        if (JS_IsException(r))
+            goto exception_fast;
+        pr = JS_VALUE_GET_OBJ(r);
+        if (n > 0 && expand_fast_array(ctx, pr, n))
+            goto exception_fast;
+        for(i = j = 0; i < sh->prop_count; i++) {
+            JSAtom atom = sh->prop[i].atom;
+            if (atom == JS_ATOM_NULL ||
+                ((flags & JS_GPN_ENUM_ONLY) &&
+                 !(sh->prop[i].flags & JS_PROP_ENUMERABLE)))
+                continue;
+            if (kind == JS_ITERATOR_KIND_KEY) {
+                val = JS_AtomToString(ctx, atom);
+                if (JS_IsException(val))
+                    goto exception_fast;
+            } else {
+                val = js_dup(p->prop[i].u.value);
+            }
+            pr->u.array.u.values[j++] = val;
+            pr->u.array.count = j;
+            pr->prop[0].u.value = js_int32(j);
+        }
+        JS_FreeValue(ctx, obj);
+        return r;
+    exception_fast:
+        JS_FreeValue(ctx, r);
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
     if (JS_GetOwnPropertyNamesInternal(ctx, &atoms, &len, p, flags & ~JS_GPN_ENUM_ONLY))
         goto exception;
     r = JS_NewArray(ctx);
