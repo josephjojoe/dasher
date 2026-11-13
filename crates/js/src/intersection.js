@@ -1,4 +1,4 @@
-// IntersectionObserver over the synthetic layout (see LayoutMode in
+// IntersectionObserver over the synthetic layout (see Visibility in
 // window.rs and the geometry section of dom.js).
 // https://w3c.github.io/IntersectionObserver/
 //
@@ -8,13 +8,16 @@
 // the standard says (on the first update, then whenever isIntersecting or
 // the crossed threshold changes) and delivered to the callback in a task.
 //
-// In the default 'inView' layout every rendered target intersects, with a
+// Under the 'all' visibility every rendered target intersects, with a
 // ratio of 1, except one that content inserted before it has pushed further
 // down the document: it counts as having left the viewport until the next
 // scroll. That makes "load more" sentinels fire again each time the page is
 // scrolled, as they do in a browser, where new content pushes them out of
-// view. In the 'scrolled' layout targets intersect when their stacked box
-// overlaps the root's (the viewport, grown by rootMargin).
+// view. Under 'loaded' and 'viewport' targets intersect when their box
+// overlaps the root's (the viewport, grown by rootMargin): under 'loaded'
+// a target is pushed out by the elements inserted before it since the last
+// reveal, and under 'viewport' by everything before it, less the scroll
+// position.
 (function (native, internals) {
   'use strict';
 
@@ -235,14 +238,17 @@
     for (const observer of observers) {
       for (const target of privates.get(observer).targets.keys()) targets.push(target);
     }
+    // Under 'loaded', the targets' boxes; under 'all', their lines, to
+    // tell which were pushed down. One walk of the document for all.
+    const linesOf = geometry.loaded ? N.loadedLines : N.layoutLines;
     let lines;
     try {
-      lines = N.layoutLines(targets);
+      lines = linesOf(targets);
     } catch (_) {
       // A target from a replaced document.
       lines = targets.flatMap((t) => {
         try {
-          return N.layoutLines([t]);
+          return linesOf([t]);
         } catch (_) {
           return [-1, 0];
         }
@@ -262,11 +268,12 @@
         if (visible && rootElement !== null) {
           visible = rootElement !== target && geometry.contains(rootElement, target);
         }
-        const box = visible ? geometry.clientBox(target) : [0, 0, 0, 0];
+        let box = [0, 0, 0, 0];
+        if (visible) box = geometry.loaded ? geometry.loadedBox(lines, 2 * (i - 1)) : geometry.clientBox(target);
         let isIntersecting = false;
         let ratio = 0;
         let hit = [0, 0, 0, 0];
-        if (visible && geometry.scrolled) {
+        if (visible && (geometry.scrolled || geometry.loaded)) {
           const x0 = Math.max(box[0], root[0]);
           const y0 = Math.max(box[1], root[1]);
           const x1 = Math.min(box[0] + box[2], root[0] + root[2]);
