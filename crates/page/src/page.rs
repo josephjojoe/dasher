@@ -478,6 +478,10 @@ impl Page {
             .fire_event(EventTarget::Window, "load", false, false);
         self.js
             .fire_event(EventTarget::Window, "pageshow", false, false);
+        // Under the default visibility, the document as it stands now is
+        // what is in view; what the page appends from here on is below the
+        // fold until auto-scroll reveals it.
+        self.js.reveal();
         self.js.set_document_write(DocumentWrite::Insert);
         self.check_navigation()?;
         // Scripts may have inserted one.

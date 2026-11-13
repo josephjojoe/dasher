@@ -1520,34 +1520,49 @@
   }
 
   // ---------------------------------------------------------------------
-  // Geometry. Nothing is laid out (see LayoutMode in window.rs): every
+  // Geometry. Nothing is laid out (see Visibility in window.rs): every
   // rendered element is a box as wide as the viewport, hidden ones are
-  // empty. In the default 'inView' layout each box is one 20px line at the
-  // top of the viewport, so anything gated on visibility counts as visible
-  // and in view. In the 'scrolled' layout the elements under <body> are
-  // stacked in document order, a line each, every element spanning its
-  // descendants (N.layoutLines), and boxes move as the page scrolls. Either
-  // way the root element is as tall as the content, at least the viewport.
+  // empty. Under 'all' each box is one 20px line at the top of the
+  // viewport, so anything gated on visibility counts as visible and in
+  // view. Under the default 'loaded' the same holds for what the document
+  // held at the last reveal (the load event, then each auto-scroll), but
+  // elements inserted since take a line each in a stack from the top
+  // (N.loadedLines), pushing what follows them down and out of view once
+  // they fill a viewport. Boxes stay put when scrolling under both. Under
+  // 'viewport' the elements under <body> are stacked in document order, a
+  // line each, every element spanning its descendants (N.layoutLines), and
+  // boxes move as the page scrolls. Either way the root element is as tall
+  // as the content, at least the viewport.
   //
   // internals.elementBox gives an element's [x, y, width, height] in
   // document coordinates; replace it to change all of this.
 
   const LINE = 20;
-  const SCROLLED = env.layout === 'scrolled';
-  const ROOT_BOX = { version: -1, height: 0 };
+  const SCROLLED = env.visibility === 'viewport';
+  const LOADED = env.visibility === 'loaded';
+  const ROOT_BOX = { version: -1, epoch: -1, height: 0 };
 
+  // Under 'loaded' the document is two viewports tall, plus the stack of
+  // what was inserted since the last reveal: tall enough to scroll (and so
+  // get scroll events), but short enough that a page checking positions
+  // against scrollY + innerHeight sees new content leave the viewport.
   function rootHeight() {
     const v = N.version();
-    if (ROOT_BOX.version !== v) {
+    const epoch = LOADED ? N.insertionEpoch() : 0;
+    if (ROOT_BOX.version !== v || ROOT_BOX.epoch !== epoch) {
       ROOT_BOX.version = v;
-      let lines;
+      ROOT_BOX.epoch = epoch;
+      let height;
       if (SCROLLED) {
         const body = N.docPart(2);
-        lines = body === null ? 0 : N.layoutLines([body])[1];
+        height = (body === null ? 0 : N.layoutLines([body])[1]) * LINE;
+      } else if (LOADED) {
+        const body = N.docPart(2);
+        height = 2 * env.height + (body === null ? 0 : Math.max(0, N.loadedLines([body])[1])) * LINE;
       } else {
-        lines = N.count(documentNode, 'body *');
+        height = N.count(documentNode, 'body *') * LINE;
       }
-      ROOT_BOX.height = Math.max(env.height, lines * LINE);
+      ROOT_BOX.height = Math.max(env.height, height);
     }
     return ROOT_BOX.height;
   }
@@ -1573,11 +1588,19 @@
     if (SCROLLED) {
       const stacked = stackedBox(el);
       if (stacked !== null) return [0, stacked[0], env.width, stacked[1]];
+    } else if (LOADED) {
+      return loadedBox(N.loadedLines([el]), 0);
     }
     return [0, 0, env.width, LINE];
   }
+
+  // The 'loaded' box for the [line, lines] pair at lines[i]: at least a
+  // line tall, so elements that take no room in the stack are not empty.
+  function loadedBox(lines, i) {
+    return [0, Math.max(0, lines[i]) * LINE, env.width, Math.max(1, lines[i + 1]) * LINE];
+  }
   internals.elementBox = defaultElementBox;
-  if (SCROLLED) {
+  if (SCROLLED || LOADED) {
     internals.scrollLimit = () => [0, Math.max(0, rootHeight() - env.height)];
   }
 
@@ -1586,7 +1609,7 @@
   }
 
   // An element's box relative to the viewport, as getBoundingClientRect()
-  // reports it. In the 'inView' layout boxes stay put when scrolling.
+  // reports it. Under 'all' and 'loaded' boxes stay put when scrolling.
   function clientBox(el) {
     const b = box(el);
     if (!SCROLLED || (b[2] === 0 && b[3] === 0)) return b;
@@ -4608,6 +4631,8 @@
   // For IntersectionObserver.
   internals.geometry = {
     scrolled: SCROLLED,
+    loaded: LOADED,
+    loadedBox,
     rendered,
     clientBox,
     isElement: (value) => value instanceof Element,

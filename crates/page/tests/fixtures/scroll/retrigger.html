@@ -1,0 +1,38 @@
+<!doctype html>
+<title>A loader that triggers itself</title>
+<ul id="feed"></ul>
+<div class="loading-more">Loading more…</div>
+<footer><p>About</p><p>Contact</p></footer>
+<script>
+  // The shape of a news site's "more stories" loader: after each batch it
+  // checks again whether its "loading more" element is still near the
+  // viewport, and if so loads the next batch at once. In a browser the
+  // batch pushes that element below the fold, which ends the chain until
+  // the reader scrolls. The feed here never runs out.
+  const feed = document.getElementById('feed');
+  const more = document.querySelector('.loading-more');
+  let page = 0;
+  let loading = false;
+
+  function check() {
+    if (loading) return;
+    const top = more.getBoundingClientRect().top;
+    if (top - 200 <= window.scrollY + window.innerHeight) loadMore();
+  }
+
+  async function loadMore() {
+    loading = true;
+    const items = await (await fetch('/api/feed?page=' + page)).json();
+    page++;
+    for (const text of items) {
+      const li = document.createElement('li');
+      li.textContent = text;
+      feed.append(li);
+    }
+    loading = false;
+    check();
+  }
+
+  addEventListener('scroll', check);
+  check();
+</script>

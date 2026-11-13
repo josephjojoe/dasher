@@ -828,6 +828,20 @@ fn install_core<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
             Ok(layout::lines(&d.doc(), &ids))
         },
     )?;
+    let d = Rc::clone(dom);
+    def(obj, "insertionEpoch", move || d.doc().insertion_epoch())?;
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "loadedLines",
+        move |ctx: Ctx<'js>, nodes: Array<'js>| -> Result<Vec<i32>> {
+            let ids = nodes
+                .iter::<Node<'js>>()
+                .map(|n| n.and_then(|n| id(&ctx, &n)))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(layout::loaded_lines(&d.doc(), &ids))
+        },
+    )?;
     def(
         obj,
         "setMutationHook",

@@ -244,6 +244,7 @@ fn browser(job: &Job, options: &RunOptions) -> dasher::Result<Browser> {
     if job.realtime {
         builder = builder.clock(ClockMode::Realtime);
     }
+    builder = builder.visibility(job.visibility.into());
     builder.build()
 }
 
