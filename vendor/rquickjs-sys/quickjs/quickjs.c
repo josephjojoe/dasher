@@ -41500,6 +41500,23 @@ static JSValue js_typed_array___speciesCreate(JSContext *ctx,
                                               JSValueConst this_val,
                                               int argc, JSValueConst *argv);
 
+/* dasher: defines element 'idx' of 'arr' as JS_CreateProperty would when
+   'arr' is an extensible fast array whose elements end at 'idx': it is
+   added in place. Returns 1 if done ('val' taken), 0 if the general path
+   must do it ('val' kept), -1 on exception ('val' freed). */
+static int js_array_append_fast(JSContext *ctx, JSValueConst arr,
+                                int64_t idx, JSValue val)
+{
+    JSObject *p;
+    if (JS_VALUE_GET_TAG(arr) != JS_TAG_OBJECT)
+        return 0;
+    p = JS_VALUE_GET_OBJ(arr);
+    if (p->class_id != JS_CLASS_ARRAY || !p->fast_array || !p->extensible ||
+        idx != p->u.array.count || idx >= INT32_MAX)
+        return 0;
+    return add_fast_array_element(ctx, p, val, JS_PROP_THROW) < 0 ? -1 : 1;
+}
+
 static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv, int special)
 {
@@ -41543,6 +41560,15 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
         ret = JS_ArraySpeciesCreate(ctx, obj, js_int64(len));
         if (JS_IsException(ret))
             goto exception;
+        /* dasher: room for every element at once, for a plain result of
+           a modest length; the length itself is already set */
+        if (len > 0 && len <= 65536 && JS_VALUE_GET_TAG(ret) == JS_TAG_OBJECT) {
+            JSObject *pr = JS_VALUE_GET_OBJ(ret);
+            if (pr->class_id == JS_CLASS_ARRAY && pr->fast_array &&
+                pr->u.array.count == 0 && pr->u.array.u1.size < len &&
+                expand_fast_array(ctx, pr, len))
+                goto exception;
+        }
         break;
     case special_filter:
         ret = JS_ArraySpeciesCreate(ctx, obj, js_int32(0));
@@ -41600,9 +41626,15 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
                 }
                 break;
             case special_map:
-                if (JS_DefinePropertyValueInt64(ctx, ret, k, res,
-                                                JS_PROP_C_W_E | JS_PROP_THROW) < 0)
-                    goto exception;
+                {
+                    int r = js_array_append_fast(ctx, ret, k, res); /* dasher */
+                    if (r < 0)
+                        goto exception;
+                    if (r == 0 &&
+                        JS_DefinePropertyValueInt64(ctx, ret, k, res,
+                                                    JS_PROP_C_W_E | JS_PROP_THROW) < 0)
+                        goto exception;
+                }
                 break;
             case special_map | special_TA:
                 if (JS_SetPropertyValue(ctx, ret, js_int32(k), res, JS_PROP_THROW) < 0)
@@ -41611,9 +41643,15 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
             case special_filter:
             case special_filter | special_TA:
                 if (JS_ToBoolFree(ctx, res)) {
-                    if (JS_DefinePropertyValueInt64(ctx, ret, n++, js_dup(val),
+                    JSValue v = js_dup(val);
+                    int r = js_array_append_fast(ctx, ret, n, v); /* dasher */
+                    if (r < 0)
+                        goto exception;
+                    if (r == 0 &&
+                        JS_DefinePropertyValueInt64(ctx, ret, n, v,
                                                     JS_PROP_C_W_E | JS_PROP_THROW) < 0)
                         goto exception;
+                    n++;
                 }
                 break;
             default:

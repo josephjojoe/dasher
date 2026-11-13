@@ -45,6 +45,15 @@
     const notSpread = [8, 9]; notSpread[Symbol.isConcatSpreadable] = false;
     const c1 = [].concat.apply([], parts), c2 = [0].concat(sparse, longer, spreadable, notSpread, 'str', 5);
     p([c1.join(), c1.length, c2.length, JSON.stringify(c2), 1 in c2, Array.isArray(c1)].join(' '));
+    const src = [1, 2, 3];
+    const grown = src.map((v, i, a) => { if (i === 0) a.push(99); return v * 2; });
+    const holes = [1, , 3].map((v) => v * 10);
+    const bigMap = Array.from({ length: 70000 }, () => 1).map((v, i) => i);
+    let thrown = 'none';
+    try { [1, 2, 3].map((v) => { if (v === 2) throw new Error('stop'); return v; }); } catch (e) { thrown = e.message; }
+    p([grown.join(), grown.length, JSON.stringify(holes), holes.length, 1 in holes, bigMap.length, bigMap[69999],
+      [1, 2, 3, 4].filter((v, i, a) => { if (i === 0) a.pop(); return v % 2; }).join(), [, 1, , 2].filter(() => true).join(),
+      Array.prototype.map.call({ length: 2, 0: 'a', 1: 'b' }, (v) => v + v).join(), Array.prototype.filter.call('abc', (c) => c !== 'b').join(), thrown].join(' '));
     class MyArray extends Array {}
     const mine = MyArray.from([1, 2]);
     p([mine.concat([3]) instanceof MyArray, mine.map((v) => v) instanceof MyArray, [1, 2].map((v) => v * 2).join(),
