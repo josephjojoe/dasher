@@ -253,10 +253,15 @@ number: `OP_object_site` at the start and `OP_object_site_end` at the
 end, through the temporary opcodes `object_start` and `object_end`
 (new opcodes go after all others in `quickjs-opcode.h`, so no opcode is
 renumbered and the precompiled builtins stay valid). The first time a
-site's literal ends, the shape of its object is noted in
-`JSFunctionBytecode.object_shapes`, if it is a hashed shape with
-Object.prototype and only configurable, writable, enumerable data
-properties. After that `OP_object_site` allocates the object with that
+site's literal ends, `OP_object_site_end` rewrites itself into
+`OP_object_site_note`; the second time, the shape of its object is
+noted in `JSFunctionBytecode.object_shapes`, if it is a hashed shape
+with Object.prototype and only configurable, writable, enumerable data
+properties. Most literal sites of a large bundle run once, and noting
+the shape at the first end (a table slot and a shape kept for each)
+cost 3 to 4 MiB of peak RSS on zillow.com; the table's count sits in
+what was padding, so each function's bytecode grows by 8 bytes, the
+table pointer. After that `OP_object_site` allocates the object with that
 shape and every value undefined, and `OP_define_field` stores into a
 property that is already there and is configurable, writable and
 enumerable, which is all a definition with those attributes does to it.
