@@ -26,6 +26,8 @@ memchr = "2"
 # Already linked for TLS by dasher-net; used here for crypto.subtle.digest.
 ring = { version = "0.17", default-features = false }
 rquickjs.workspace = true
+# The nodes an insertion moves, usually one, without allocating.
+smallvec = "1"
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 url = "2"
 # Already linked for Content-Encoding by dasher-net; compresses the script

@@ -3,7 +3,8 @@
 use std::time::{Duration, Instant};
 
 use dasher_js::{
-    ClockMode, JsRuntime, NavigationKind, NavigationRequest, RunLimits, RunOutcome, RuntimeOptions,
+    Budget, ClockMode, JsRuntime, NavigationKind, NavigationRequest, RunLimits, RunOutcome,
+    RuntimeOptions, WorkLimits, thread_cpu_time,
 };
 
 fn runtime(clock: ClockMode) -> JsRuntime {
@@ -282,4 +283,134 @@ async fn senders_outliving_the_runtime_are_harmless() {
     drop(js);
     sender.send(|ctx| ctx.eval::<(), _>("1"));
     op.complete(|ctx| ctx.eval::<(), _>("1"));
+}
+
+#[tokio::test]
+async fn the_skip_limit_turns_an_endless_timer_into_real_time_waiting() {
+    let js = runtime(ClockMode::Virtual);
+    js.run_script("var ticks = 0; setInterval(() => ticks++, 100);", "a.js")
+        .unwrap();
+    js.set_skip_limit(Some(js.skipped() + ms(1000)));
+    // Skips ten ticks' worth at once, then waits for each in real time.
+    let started = Instant::now();
+    let cpu = thread_cpu_time();
+    let until = js.now() + ms(1300);
+    assert_eq!(
+        js.run(RunLimits::until(until)).await,
+        RunOutcome::ReachedTime
+    );
+    let took = started.elapsed();
+    assert!(took >= ms(250) && took < ms(1500), "{took:?}");
+    assert!(thread_cpu_time() - cpu < ms(200));
+    assert_eq!(js.skip_left(), Some(Duration::ZERO));
+    let ticks: u32 = json(&js, "ticks").parse().unwrap();
+    assert!((11..=14).contains(&ticks), "{ticks}");
+
+    // Lifted, it skips again.
+    js.set_skip_limit(None);
+    let started = Instant::now();
+    let until = js.now() + Duration::from_secs(60);
+    assert_eq!(
+        js.run(RunLimits::until(until)).await,
+        RunOutcome::ReachedTime
+    );
+    assert!(started.elapsed() < ms(500));
+}
+
+#[tokio::test]
+async fn under_the_manual_clock_the_skip_limit_ends_the_run() {
+    let js = runtime(ClockMode::Manual);
+    js.run_script("setInterval(() => {}, 100);", "a.js")
+        .unwrap();
+    js.set_skip_limit(Some(ms(250)));
+    assert_eq!(
+        js.run(RunLimits::default()).await,
+        RunOutcome::BudgetExhausted(Budget::PageTime)
+    );
+    assert_eq!(js.now(), ms(250));
+}
+
+#[tokio::test]
+async fn idle_callbacks_run_as_time_passes_but_do_not_keep_the_page_busy() {
+    let js = runtime(ClockMode::Virtual);
+    js.run_script(
+        r#"
+        var idle = 0, timer = false;
+        (function again() { requestIdleCallback(() => { idle++; again(); }); })();
+        setTimeout(() => timer = true, 1000);
+        "#,
+        "a.js",
+    )
+    .unwrap();
+    assert!(!js.is_idle());
+    let started = Instant::now();
+    assert_eq!(js.run(RunLimits::default()).await, RunOutcome::Idle);
+    assert!(started.elapsed() < ms(500), "{:?}", started.elapsed());
+    assert_eq!(json(&js, "timer"), "true");
+    // One right away, then one per 50 ms idle period until the timer.
+    let idle: u32 = json(&js, "idle").parse().unwrap();
+    assert!((19..=22).contains(&idle), "{idle}");
+    assert!(js.is_idle());
+    assert_eq!(js.pending_timers(), 0);
+
+    // Page time moved on by the host still runs them.
+    js.advance(ms(500)).unwrap();
+    let more: u32 = json(&js, "idle").parse().unwrap();
+    assert_eq!(more, idle + 10);
+}
+
+#[tokio::test]
+async fn a_promise_waiting_on_an_idle_callback_still_settles() {
+    let js = runtime(ClockMode::Virtual);
+    js.run_script(
+        "var done = false; new Promise((r) => requestIdleCallback(r)).then(() => done = true);",
+        "a.js",
+    )
+    .unwrap();
+    assert_eq!(
+        js.run(RunLimits::until(js.now() + ms(50))).await,
+        RunOutcome::Idle
+    );
+    assert_eq!(json(&js, "done"), "true");
+}
+
+#[tokio::test]
+async fn the_cpu_limit_stops_a_busy_page_until_lifted() {
+    let js = runtime(ClockMode::Virtual);
+    js.run_script(
+        r#"
+        var runs = 0;
+        (function work() {
+            runs++;
+            const end = Date.now() + 5;
+            while (Date.now() < end) {}
+            setTimeout(work, 0);
+        })();
+        "#,
+        "a.js",
+    )
+    .unwrap();
+    js.set_work_limits(WorkLimits::from_now(Some(ms(100)), None, 0));
+    let started = Instant::now();
+    assert_eq!(
+        js.run(RunLimits::default()).await,
+        RunOutcome::BudgetExhausted(Budget::Cpu)
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(js.budget_exhausted(), Some(Budget::Cpu));
+    // No more JS meanwhile; lifting the limits lets it run again.
+    assert!(js.eval_json("runs").is_err());
+    js.set_work_limits(WorkLimits::default());
+    let runs: u32 = json(&js, "runs").parse().unwrap();
+    assert!((5..=100).contains(&runs), "{runs}");
+}
+
+#[tokio::test]
+async fn a_script_looping_forever_is_stopped_by_the_cpu_limit() {
+    let js = runtime(ClockMode::Virtual);
+    js.set_work_limits(WorkLimits::from_now(Some(ms(50)), None, 0));
+    let started = Instant::now();
+    assert!(js.run_script("for (;;) {}", "a.js").is_err());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(js.budget_exhausted(), Some(Budget::Cpu));
 }

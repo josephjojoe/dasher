@@ -15,6 +15,7 @@ use rquickjs::{
 };
 use url::Url;
 
+use crate::budget::{Budget, BudgetState, WorkLimits};
 use crate::clock::ClockMode;
 use crate::console::{self, ConsoleMessage};
 use crate::dom::{self, DomState};
@@ -133,6 +134,7 @@ impl InterruptHandle {
 /// exposes to JS. It holds no JS values, so it may outlive the context.
 pub(crate) struct Shared {
     deadline: Cell<Option<Instant>>,
+    budget: BudgetState,
     pub(crate) remote: Arc<Remote>,
     /// Set when the interrupt handler stopped JS since the last `begin`.
     interrupted: Cell<bool>,
@@ -164,6 +166,7 @@ impl Shared {
         );
         Self {
             deadline: Cell::new(None),
+            budget: BudgetState::default(),
             remote: Arc::default(),
             interrupted: Cell::new(false),
             heap,
@@ -201,8 +204,17 @@ impl Shared {
         } else if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
             Some(Stopped::DeadlineExceeded)
         } else {
-            None
+            self.budget_exhausted().map(Stopped::BudgetExhausted)
         }
+    }
+
+    /// The work budget that ran out, if one has.
+    pub(crate) fn budget_exhausted(&self) -> Option<Budget> {
+        self.budget.check(|| {
+            self.net
+                .session()
+                .map_or(0, |s| s.activity().requests_started())
+        })
     }
 
     fn should_interrupt(&self) -> bool {
@@ -808,6 +820,52 @@ impl JsRuntime {
     /// The current deadline, if any.
     pub fn deadline(&self) -> Option<Instant> {
         self.shared.deadline.get()
+    }
+
+    /// Sets how much work the page may do before it is stopped, as a
+    /// deadline does: once the thread's CPU time or the session's request
+    /// count passes its limit, running JS is interrupted and no more JS is
+    /// started, and [`run`](Self::run) returns
+    /// [`RunOutcome::BudgetExhausted`](crate::RunOutcome::BudgetExhausted).
+    /// Setting the limits again (to [`WorkLimits::default`] for none)
+    /// lets the page run again.
+    pub fn set_work_limits(&self, limits: WorkLimits) {
+        self.shared.budget.set(limits);
+    }
+
+    /// The current work limits.
+    pub fn work_limits(&self) -> WorkLimits {
+        self.shared.budget.limits()
+    }
+
+    /// The work budget that has run out, if one has: [`Budget::Cpu`] or
+    /// [`Budget::Requests`]. The page runs no JS until the limits are set
+    /// again.
+    pub fn budget_exhausted(&self) -> Option<Budget> {
+        self.shared.budget_exhausted()
+    }
+
+    /// How much page time the event loop has skipped in all, jumping
+    /// ahead to timers in [`ClockMode::Virtual`] or through
+    /// [`advance`](Self::advance): how far page time is ahead of the wall
+    /// clock.
+    pub fn skipped(&self) -> Duration {
+        self.event_loop().clock.skipped()
+    }
+
+    /// Caps [`skipped`](Self::skipped) at `limit`. Once page time has
+    /// skipped that much, the event loop stops jumping ahead and waits for
+    /// timers in real time, as in [`ClockMode::Realtime`], so that a page
+    /// running a timer forever cannot keep the CPU busy; `advance` moves
+    /// page time no further. `None` lifts the cap.
+    pub fn set_skip_limit(&self, limit: Option<Duration>) {
+        self.event_loop().clock.set_skip_limit(limit);
+    }
+
+    /// How much more page time may be skipped, if a
+    /// [skip limit](Self::set_skip_limit) is set.
+    pub fn skip_left(&self) -> Option<Duration> {
+        self.event_loop().clock.skip_left()
     }
 
     /// A handle that interrupts this runtime from any thread.

@@ -25,7 +25,18 @@
 //! or driven with [`run`](JsRuntime::run) under Tokio, which waits for
 //! timers and for work posted from other threads through a [`TaskSender`].
 //! [`ClockMode::Virtual`] lets the loop skip idle gaps so long timers do not
-//! hold up a page that is settling.
+//! hold up a page that is settling. [`JsRuntime::set_skip_limit`] caps how
+//! far it may skip, so a timer that fires forever cannot become a busy
+//! loop; past the cap the loop waits for timers in real time.
+//! `requestIdleCallback` callbacks run as they come due, but do not keep
+//! the loop going: with nothing else left, [`run`](JsRuntime::run) is
+//! idle.
+//!
+//! [`JsRuntime::set_work_limits`] bounds the work a page does, by the CPU
+//! time of its thread ([`thread_cpu_time`]) and the requests its session
+//! has started. Once over either, the page stops as it does at a deadline,
+//! and [`JsRuntime::budget_exhausted`] says which [`Budget`] ran out,
+//! until the limits are set again.
 //!
 //! Page scripts get `setTimeout`, `setInterval`, `clearTimeout`,
 //! `clearInterval`, `queueMicrotask`, `requestAnimationFrame`,
@@ -342,6 +353,7 @@
 //! # }
 //! ```
 
+mod budget;
 mod clock;
 mod console;
 mod data_url;
@@ -375,6 +387,7 @@ mod timers;
 mod urls;
 mod window;
 
+pub use budget::{Budget, WorkLimits, thread_cpu_time};
 pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
 pub use dom::{DomActivity, HeldNode};

@@ -38,7 +38,7 @@ breaks fails the run instead of looking cheap.
 Each page loads in a fresh child process, so its peak RSS is its own. The
 child builds a `Browser` and calls `dasher::precompile()`, as a service
 would at start-up. Then it loads the page with the default `goto` (load
-event, then 500 ms each of network idle and DOM quiet), plus auto-scroll
+event, then 500 ms of network idle), plus auto-scroll
 for `feed`. Finally it serializes the HTML.
 
 - **time to settle**: wall time of that `goto`. Under the default virtual
@@ -377,6 +377,91 @@ What it showed:
   rerun of `loaded` and `all`, four runs each, gave the same CPU on
   zillow.com and 2% more on theverge.com, within the spread of either.
 
+### Bounded page loads
+
+An audit of `babeb38` found most of a sample's CPU time going to a few
+pages that ran to the time limit at full CPU. Their DOM changes on a
+timer forever, so the default wait (then network idle plus DOM quiet)
+never held, and the virtual clock, skipping from one tick to the next,
+turned 20 ms of work a second into a busy loop. Three budgets now bound
+every load (see the main README): **page time** spent waiting for quiet
+(5 s; skipped time, and real time the page sits idle, but not time
+running scripts or waiting on the network), **CPU** (10 s) and
+**requests** (1000). When one runs out the page is returned as it
+stands, with `budget_exhausted` saying which. `requestIdleCallback` work
+no longer holds a page open. While settling, the event loop now hands
+control back once page time passes the next look, even if work is
+always due, and a page with work due does not count as quiet.
+
+142 sites were recorded on 2026-11-13 with `babeb38` (`-t 60`, the
+default wait) and replayed on an aarch64 Linux profiling build, 6 at a
+time, with other work sharing the 8 cores. The `babeb38` column is that
+build; the others are `babeb38` plus this change, one run each (two
+where two are given). A page **kept its text** when its visible words
+(outside `script`, `style`, `svg` and `template`) include at least 90% of
+those `babeb38` produced, counted with repeats. Three pages crashed
+(`use of a released node`, a separate bug in reclaiming script elements
+a page removes before the loader is done with them; the change makes it
+show more often) and count as lost in every run of this change. With
+main merged, which fixes it, they load and settle (cnet.com 1.7 CPU s,
+expedia.com 0.16, hotels.com 0.4), as do huffpost.com and zdnet.com. Six
+more sites (washingtonpost.com, bestbuy.com and costco.com would not
+load, huffpost.com, zdnet.com and ign.com crashed in `babeb38`) are not
+in the 142.
+
+| wait, page-time budget | CPU, all 142 | text kept | timed out | ended by a budget |
+| --- | ---: | ---: | ---: | --- |
+| `babeb38`, settled, no budgets | 844.2 s | (142) | 12 | |
+| settled, 3 s | 211.8 s | 137 | 0 | page time 28, CPU 2 |
+| settled, 5 s | 234.3, 237.1 s | 136, 134 | 0 | page time 22–25, CPU 2–3, requests 0–1 |
+| settled, 10 s | 248.2 s | 137 | 0 | page time 18, CPU 3 |
+| **network idle, 5 s (the new default)** | **219.8, 229.1 s** | **138, 137** | **0** | **page time 10–15, CPU 2–3** |
+
+The ticket left a choice: change the default wait to network idle, or
+keep `settled` and give up DOM quiet once the budget is spent (which is
+what `settled` with a page-time budget does). Network idle kept as much
+text or more for less CPU, so it is the default now; `--wait settled`,
+`"wait": "settled"` and `SettleOptions::dom_quiet` still wait for both.
+The difference is small, within the run-to-run spread of about two pages
+on rotating content (soundcloud.com's front page changes as it plays).
+Network idle loses some text on two pages that render after the network
+goes quiet (cnbc.com, airbnb.com in one run of two); `settled` loses it on
+the same two. An earlier version that counted all real page time,
+running scripts included, cost 180, 206 and 241 s at 2, 5 and 10 s and
+kept 128, 132 and 136 pages. It cut heavy pages short whenever the
+machine was busy, which tied the budget to the speed of the machine.
+
+The pages that spun, CPU seconds, median of 3 runs, 4 at a time. The
+`babeb38` runs are lower than 60 s because the machine was shared, which
+held each spinning page below a full core; the ratios hold.
+
+| page | `babeb38` | this change | with main merged (DAS-31's `loaded` visibility and others) | ended by |
+| --- | ---: | ---: | ---: | --- |
+| soundcloud.com | 26.21 (timed out) | 2.65 | 2.36 | settled |
+| cloudflare.com | 22.80 (timed out) | 0.85 | 0.77 | settled |
+| engadget.com | 30.18 (timed out) | 4.98 | 1.64 | requests, then settled once `loaded` stops its loader |
+| salesforce.com | 30.70 (timed out) | 10.01 | 10.01 | CPU budget |
+| archive.org | 28.68 (timed out) | 3.74 | 0.17 | page time or CPU, then settled |
+| figma.com | 25.43 (timed out) | 2.19 | 2.35 | settled |
+| microsoft.com/en-us | 0.06 | 0.07 | 0.06 | settled (not a spinner in this recording) |
+
+On the full corpus, run 6 at a time with nothing else, the other pages
+that had spun (hubspot.com, docker.com, samsung.com, twilio.com, hp.com,
+squarespace.com, 45 to 51 s each) took 1.3 to 3.5 s, except hubspot.com
+at the 10 s CPU budget.
+
+Two pages still end on the CPU budget, and neither is a timer problem.
+salesforce.com runs one task that never yields, inside Google Tag
+Manager's macro interpreter (`gtm.js`, recursing through `to` and
+`evaluate`). hubspot.com spends its time in a MutationObserver callback
+that copies huge NodeLists over and over. In both, the time goes to the
+page's own scripts, which only the CPU budget bounds. Most of the
+1000-request budget is headroom: the heaviest page that settled made 409
+requests (nytimes.com). Wall time is not compared: with six pages
+replaying at once, contention more than doubled it on heavy pages. Run
+one at a time, wall times matched `babeb38` or beat it (bloomberg.com
+9.5 s against 10.8 s, dell.com 4.2 against 5.4).
+
 ## Micro-benchmarks
 
 `dasher-bench micro` times small fixed loops of one language operation or
@@ -616,6 +701,119 @@ python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
 
 Its tagName figure (72 ns here, 60 in the audit) puts this machine about
 1.2 times slower than the audit's for Lightpanda.
+
+### Language fast paths
+
+DAS-36 added the fast paths in
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)
+("Fast paths for calls, object creation, copying, iteration and async",
+and "`i++` on a `let` stays an int add"). Same machine and build settings
+as the baseline; before is `main` at `6a9393e` with the engine source of
+`cfa9030`, after is the change, run back to back, median of 5 runs, on a
+machine under load from other builds. Node is the `--jitless` column of
+the baseline table.
+
+| benchmark | before ns/op | after ns/op | | after ÷ Node |
+| --- | ---: | ---: | ---: | ---: |
+| function call | 57.7 | 46.3 | 1.25× | 1.5× |
+| create+call closure | 186 | 158 | 1.18× | 1.6× |
+| integer loop | 36.0 | 25.1 | 1.43× | 1.6× |
+| object literal | 267 | 111 | 2.41× | 3.4× |
+| spread and Object.assign | 904 | 524 | 1.73× | 3.6× |
+| destructuring and rest/spread | 1,284 | 877 | 1.46× | 2.6× |
+| apply and arguments | 391 | 301 | 1.30× | 2.3× |
+| map/filter/reduce | 2,247 | 1,696 | 1.32× | 2.5× |
+| concat.apply | 865 | 518 | 1.67× | 2.6× |
+| Map/Set | 284 | 224 | 1.27× | 2.2× |
+| class instantiation | 288 | 276 | 1.04× | 2.9× |
+| promise chain | 1,383 | 1,082 | 1.28× | 3.7× |
+| async/await | 817 | 329 | 2.48× | 2.4× |
+| for-in and Object.keys | 1,317 | 552 | 2.39× | 3.2× |
+| tagName (a native getter) | 99.9 | 82.5 | 1.21× | |
+| nodeType (a native getter) | 89.3 | 73.2 | 1.22× | |
+
+Every other language row moved by 2 to 27%, from the cheaper `i++` and
+C calls in their loops, and the DOM rows by 0 to 26%: a native getter or
+method is now called without entering the interpreter. The aim was 1.3
+times V8 without its JIT, and these stay 1.5 to 3.7 times. What is left
+is mostly allocation and freeing of each object, property access through
+the prototype chain (`this.x = …` in a constructor, a method looked up
+on a prototype; DAS-32's inline caches) and garbage collection (the
+promise chain keeps 100,000 promises alive; DAS-46).
+
+The thirteen heavy recorded pages ([Real pages](#real-pages)), the same
+two builds, five runs of each alternating, median CPU seconds and peak
+RSS:
+
+| page | CPU before | after | | peak RSS before | after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| theverge.com | 6.92 s | 6.43 s | −7.1% | 162.7 MiB | 162.1 MiB |
+| techcrunch.com | 5.59 | 5.23 | −6.4% | 96.2 | 97.4 |
+| wired.com | 5.12 | 4.82 | −5.9% | 188.9 | 190.2 |
+| yahoo.com | 4.61 | 4.02 | −12.8% | 80.7 | 81.6 |
+| cloud.google.com | 3.80 | 3.56 | −6.3% | 76.8 | 75.9 |
+| zillow.com | 2.89 | 2.75 | −4.8% | 113.2 | 114.3 |
+| airbnb.com | 2.57 | 2.41 | −6.2% | 124.8 | 125.5 |
+| bbc.com/news | 1.95 | 1.75 | −10.3% | 51.2 | 52.6 |
+| nytimes.com | 1.88 | 1.86 | −1.1% | 123.1 | 120.0 |
+| timesofindia | 1.09 | 1.03 | −5.5% | 52.2 | 52.3 |
+| github.com | 1.01 | 0.99 | −2.0% | 53.4 | 53.8 |
+| espn.com | 0.68 | 0.66 | −2.9% | 53.3 | 53.1 |
+| edition.cnn.com | 0.59 | 0.59 | 0% | 75.2 | 75.4 |
+| **all thirteen** | **38.70 s** | **36.10 s** | **−6.7%** | **1252 MiB** | **1254 MiB** |
+
+Every page rendered the same number of elements with both builds, apart
+from cloud.google.com, whose count varies from run to run with either.
+cloud.google.com's CPU time also falls into two modes, about 2.6 and 3.6
+s, from run to run, so its row says little. Peak RSS moved within the
+run-to-run spread of 1 to 3 MiB. A first version, which kept the shape
+of every object literal site from its first run, cost zillow.com 3 to 4
+MiB; sites now keep a shape only from their second run.
+
+### Native attributes, edits, queries and lists
+
+DAS-43 made the attribute, tree-edit, query and live-collection members
+native members (see "Native members" in `crates/js/src/dom.rs`), and the
+live `NodeList`, `HTMLCollection` and `NamedNodeMap` native exotic objects
+instead of a `Proxy` over a native object. `main` at `914ea5a` against the
+change, run back to back on the same machine (Graviton4, load average
+about 11), median of 5 runs. The Lightpanda column is the nightly
+`1.1.0-nightly.12116` on the same machine, timing the same loops on the
+same page in its own `performance.now()` loop (best of 5, wall time), so it
+compares roughly: dasher's figures include its interpreter's ~30 ns loop.
+
+| benchmark | before ns/op | after ns/op | | Lightpanda ns/op | after ÷ Lightpanda |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| append+removeChild | 1,935 | 569 | 3.4× | 208 | 2.7× |
+| setAttribute | 1,236 | 256 | 4.8× | 258 | 1.0× |
+| attributes.length | 1,335 | 149 | 9.0× | 96 | 1.6× |
+| getAttribute | 709 | 170 | 4.2× | 125 | 1.4× |
+| matches(tag) | 617 | 157 | 3.9× | 91 | 1.7× |
+| querySelector(tag) | 685 | 172 | 4.0× | 122 | 1.4× |
+| createElement | 1,656 | 567 | 2.9× | 737 | 0.8× |
+| getElementById | 534 | 195 | 2.7× | 435 | 0.4× |
+| querySelectorAll(#id) | 1,155 | 476 | 2.4× | 1,000 | 0.5× |
+| querySelectorAll(.class) | 132,812 | 108,931 | 1.2× | 59,975 | 1.8× |
+| querySelectorAll(tag) | 194,597 | 108,614 | 1.8× | | |
+| children | 369 | 94 | 3.9× | 446 | 0.2× |
+| children[i] | 626 | 78 | 8.0× | 78 | 1.0× |
+| hidden | 309 | 101 | 3.1× | 49 | 2.1× |
+| a.href | 1,453 | 1,424 | 1.0× | 887 | 1.6× |
+
+The other DOM rows did not move beyond noise. Against the audit's
+Lightpanda figures, scaled by this machine's ratio to the audit's
+(1,935 / 1,315 for append+removeChild), every row of the ticket is within
+2×; against Lightpanda measured here, append+removeChild is not (2.7×).
+What is left of it is mostly bookkeeping around the tree edit, which
+itself costs ~75 ns in dasher-dom: regrouping wrapper rings (each link is
+an rquickjs `Node`, so every clone and drop is two reference counts and
+every borrow three calls into QuickJS), and counting the change as DOM
+activity (an ancestor walk and a clock read) on both calls. Ring links as
+raw object pointers would take most of the first; that needs marking raw
+values from `Trace`, which rquickjs does not expose. `a.href` pays for
+`internals.baseURL()` (JS) and a `Url::join` per read.
+
+New loops: `children[i]`, `hidden` and `a.href`.
 
 ## Per-page limits
 

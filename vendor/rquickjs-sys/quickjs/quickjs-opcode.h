@@ -291,6 +291,10 @@ def(get_array_el_opt_chain, 1, 2, 1, none) /* emitted in phase 1, removed in pha
 def( set_class_name, 5, 1, 1, u32) /* emitted in phase 1, removed in phase 2 */
 
 def(     source_loc, 9, 0, 0, u32x2) /* emitted in phase 1, removed in phase 3 */
+/* dasher: an object literal and its end, emitted in phase 1 and turned
+   into object or object_site and object_site_end in phase 3 */
+def(   object_start, 3, 0, 1, u16)
+def(     object_end, 3, 1, 1, u16)
 
 DEF(    push_minus1, 1, 0, 1, none_int)
 DEF(         push_0, 1, 0, 1, none_int)
@@ -365,6 +369,14 @@ DEF(   is_undefined, 1, 1, 1, none)
 DEF(        is_null, 1, 1, 1, none)
 DEF(typeof_is_undefined, 1, 1, 1, none)
 DEF( typeof_is_function, 1, 1, 1, none)
+
+/* dasher: appended here so that no other opcode is renumbered (the
+   precompiled builtins hold bytecode). An object literal whose keys are
+   all fixed names: object_site makes the object with the shape the
+   literal ended with last time, and object_site_end notes that shape. */
+DEF(    object_site, 3, 0, 1, u16)
+DEF(object_site_end, 3, 1, 1, u16)
+DEF(object_site_note, 3, 1, 1, u16) /* object_site_end once it has run */
 
 #undef DEF
 #undef def
