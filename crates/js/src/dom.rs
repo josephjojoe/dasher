@@ -137,15 +137,41 @@
 //! overrides of the public members; where `dom.js` builds on a native
 //! member it calls it as `N.init` left it (the `natives` object in
 //! `dom.js`).
+//!
+//! A member made with `Member::or_js` keeps the function `dom.js` defines in
+//! its place as its *fallback*: the stand-in is then the full JS
+//! implementation, not `nativeMember()`. Calls with fewer arguments than
+//! the member requires go straight to it (so the glue's own "1 argument
+//! required" message is thrown), and a body hands it anything it does not
+//! handle by returning `Thrown::Fallback`, before it has done anything
+//! scripts could notice: an argument that is not a node, an event handler
+//! attribute (whose changes the glue tracks), a script or custom element to
+//! create, an extra document. That keeps every rare case exactly as it was
+//! while the common path runs no JS. The fallbacks, and the glue's hooks the
+//! natives call (`connected()` for the scripts an insertion connects, the
+//! base URL), are kept in the `hooks` module.
+//!
+//! The live lists of the `lists` module (`childNodes`, `children`,
+//! `getElementsBy*`, `attributes`) are exotic QuickJS objects like the
+//! host objects, answering their indexed and named properties without a
+//! `Proxy`; `Receiver::List` members (`length`, `item`...) get the list
+//! object as the call's `node`. The IDL attributes HTML elements reflect
+//! (`a.href`, `el.hidden`...) are made native from the list `reflect()` in
+//! `dom.js` builds (see the `attrs` module).
 
+mod attrs;
 mod collection;
 mod custom;
+mod edits;
+mod hooks;
 mod host;
 mod inner_text;
 mod layout;
+mod lists;
 mod members;
 mod mutation;
 mod natives;
+mod queries;
 mod shadow;
 mod style;
 mod wrapper;

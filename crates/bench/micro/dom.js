@@ -157,3 +157,18 @@ bench("querySelectorAll(.class)", 1e3, function (n) {
 bench("querySelectorAll(tag)", 5e2, function (n) {
   for (let i = 0; i < n; i++) sink = document.querySelectorAll("li").length;
 });
+
+bench("children[i]", 5e5, function (n) {
+  const c = target().children;
+  for (let i = 0; i < n; i++) sink = c[i & 1];
+});
+
+bench("hidden", 5e5, function (n) {
+  const el = target();
+  for (let i = 0; i < n; i++) sink = el.hidden;
+});
+
+bench("a.href", 1e5, function (n) {
+  const a = document.querySelector("a");
+  for (let i = 0; i < n; i++) sink = a.href;
+});

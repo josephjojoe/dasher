@@ -702,6 +702,51 @@ python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
 Its tagName figure (72 ns here, 60 in the audit) puts this machine about
 1.2 times slower than the audit's for Lightpanda.
 
+### Native attributes, edits, queries and lists
+
+DAS-43 made the attribute, tree-edit, query and live-collection members
+native members (see "Native members" in `crates/js/src/dom.rs`), and the
+live `NodeList`, `HTMLCollection` and `NamedNodeMap` native exotic objects
+instead of a `Proxy` over a native object. `main` at `914ea5a` against the
+change, run back to back on the same machine (Graviton4, load average
+about 11), median of 5 runs. The Lightpanda column is the nightly
+`1.1.0-nightly.12116` on the same machine, timing the same loops on the
+same page in its own `performance.now()` loop (best of 5, wall time), so it
+compares roughly: dasher's figures include its interpreter's ~30 ns loop.
+
+| benchmark | before ns/op | after ns/op | | Lightpanda ns/op | after ÷ Lightpanda |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| append+removeChild | 1,935 | 569 | 3.4× | 208 | 2.7× |
+| setAttribute | 1,236 | 256 | 4.8× | 258 | 1.0× |
+| attributes.length | 1,335 | 149 | 9.0× | 96 | 1.6× |
+| getAttribute | 709 | 170 | 4.2× | 125 | 1.4× |
+| matches(tag) | 617 | 157 | 3.9× | 91 | 1.7× |
+| querySelector(tag) | 685 | 172 | 4.0× | 122 | 1.4× |
+| createElement | 1,656 | 567 | 2.9× | 737 | 0.8× |
+| getElementById | 534 | 195 | 2.7× | 435 | 0.4× |
+| querySelectorAll(#id) | 1,155 | 476 | 2.4× | 1,000 | 0.5× |
+| querySelectorAll(.class) | 132,812 | 108,931 | 1.2× | 59,975 | 1.8× |
+| querySelectorAll(tag) | 194,597 | 108,614 | 1.8× | | |
+| children | 369 | 94 | 3.9× | 446 | 0.2× |
+| children[i] | 626 | 78 | 8.0× | 78 | 1.0× |
+| hidden | 309 | 101 | 3.1× | 49 | 2.1× |
+| a.href | 1,453 | 1,424 | 1.0× | 887 | 1.6× |
+
+The other DOM rows did not move beyond noise. Against the audit's
+Lightpanda figures, scaled by this machine's ratio to the audit's
+(1,935 / 1,315 for append+removeChild), every row of the ticket is within
+2×; against Lightpanda measured here, append+removeChild is not (2.7×).
+What is left of it is mostly bookkeeping around the tree edit, which
+itself costs ~75 ns in dasher-dom: regrouping wrapper rings (each link is
+an rquickjs `Node`, so every clone and drop is two reference counts and
+every borrow three calls into QuickJS), and counting the change as DOM
+activity (an ancestor walk and a clock read) on both calls. Ring links as
+raw object pointers would take most of the first; that needs marking raw
+values from `Trace`, which rquickjs does not expose. `a.href` pays for
+`internals.baseURL()` (JS) and a `Url::join` per read.
+
+New loops: `children[i]`, `hidden` and `a.href`.
+
 ## Per-page limits
 
 Each page has two hard limits. Going over either one stops the page and
