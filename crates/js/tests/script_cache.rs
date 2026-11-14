@@ -331,3 +331,39 @@ mod modules {
         assert_eq!((stats.misses, stats.hits), (3, 6), "{stats:?}");
     }
 }
+
+#[test]
+fn a_page_can_settle_with_the_cache_before_it_is_dropped() {
+    let cache = cache();
+    let source = probe_source();
+    let first = page(&cache);
+    first.run_script(&source, "p.js").unwrap();
+    probe(&first);
+    // made from this compile: nothing to compile again yet
+    assert!(first.take_script_cache_work().is_empty());
+    drop(first);
+
+    let second = page(&cache);
+    second.run_script(&source, "p.js").unwrap();
+    probe(&second);
+    let work = second.take_script_cache_work();
+    assert!(!work.is_empty());
+    // the process would leave the page to the OS here
+    std::mem::forget(second);
+    work.run();
+    assert_eq!(counts(cache.stats()), (1, 1, 2));
+
+    let third = page(&cache);
+    third.run_script(&source, "p.js").unwrap();
+    probe(&third);
+    assert!(third.take_script_cache_work().is_empty());
+    let late = cache.stats().compiled_late;
+    drop(third);
+    assert_eq!(counts(cache.stats()), (1, 2, 2));
+    assert_eq!(cache.stats().compiled_late, late);
+
+    // without a cache there is never anything to do
+    let plain = JsRuntime::new(RuntimeOptions::default()).unwrap();
+    plain.run_script(&source, "p.js").unwrap();
+    assert!(plain.take_script_cache_work().is_empty());
+}

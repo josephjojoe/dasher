@@ -551,7 +551,7 @@ struct FinishScripts(Option<Rc<PageScripts>>);
 impl Drop for FinishScripts {
     fn drop(&mut self) {
         if let Some(scripts) = &self.0 {
-            scripts.finish();
+            scripts.finish().run();
         }
     }
 }
@@ -849,6 +849,23 @@ impl JsRuntime {
     /// Bytes currently allocated by the JS heap.
     pub fn memory_allocated(&self) -> usize {
         usize::try_from(self.runtime.memory_usage().malloc_size).unwrap_or(0)
+    }
+
+    /// Settles the page's account with its script cache now, rather than
+    /// when it is dropped, and returns the entries left to make again.
+    ///
+    /// A page notes which functions of the cached scripts it ran, and when
+    /// it is dropped, compiles again the scripts whose entries lacked them
+    /// (see [`ScriptCache`]). A process about to exit, which leaves its
+    /// pages for the OS to free rather than freeing them, calls this
+    /// instead and [runs](crate::ScriptCacheWork::run) what it returns:
+    /// usually nothing, once the cache has seen the page's scripts twice.
+    /// Without a cache it returns nothing to do.
+    pub fn take_script_cache_work(&self) -> crate::ScriptCacheWork {
+        match &self.shared.scripts {
+            Some(scripts) => scripts.finish(),
+            None => crate::ScriptCacheWork::default(),
+        }
     }
 
     /// Runs the cycle collector now, then frees the detached DOM nodes

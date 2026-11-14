@@ -709,16 +709,14 @@ impl PageScripts {
         all.len() as u64
     }
 
-    /// Makes or remakes the entries this page has reason to: scripts it
-    /// compiled from their text, and scripts whose entry lacked functions
-    /// it ran. Call it once the page's own runtime is gone, so that its
-    /// memory and the compiler's are not needed at once.
-    pub(crate) fn finish(&self) {
+    /// Notes what the page learnt about the scripts it used, and returns
+    /// the entries to make again with the functions it ran compiled in.
+    /// Scripts it uses after this are noted afresh.
+    pub(crate) fn finish(&self) -> ScriptCacheWork {
         let mut builds = Vec::new();
         for mut u in self.used.take() {
             u.ran.sort_unstable();
             u.ran.dedup();
-
             match u.how {
                 How::Compiled => {}
                 // Made from this page's compile: the functions it ran are
@@ -737,26 +735,86 @@ impl PageScripts {
                     }
                     let enough = pending.len() >= (entry.hints.len() / REBUILD_SHARE).max(1);
                     if entry.rebuilds < MAX_REBUILDS && enough {
-                        let hints = merge(&entry.hints, &pending);
-                        builds.push((u.key, u.kind, entry.text, hints, entry.rebuilds + 1));
+                        builds.push(Build {
+                            key: u.key,
+                            kind: u.kind,
+                            hints: merge(&entry.hints, &pending),
+                            text: entry.text,
+                            rebuilds: entry.rebuilds + 1,
+                        });
                     } else if !u.ran.is_empty() {
                         self.cache.want(&u.key, &u.ran);
                     }
                 }
             }
         }
-        if builds.is_empty() {
-            return;
+        ScriptCacheWork {
+            cache: (!builds.is_empty()).then(|| self.cache.clone()),
+            lazy: self.lazy,
+            builds,
         }
+    }
+}
+
+/// Entries a page left to be made again, with the functions it ran
+/// compiled in (see [`JsRuntime::take_script_cache_work`]).
+///
+/// [`JsRuntime::take_script_cache_work`]: crate::JsRuntime::take_script_cache_work
+#[must_use = "the entries are only made by `run`"]
+pub struct ScriptCacheWork {
+    cache: Option<ScriptCache>,
+    lazy: bool,
+    builds: Vec<Build>,
+}
+
+struct Build {
+    key: Key,
+    kind: Kind,
+    text: Arc<Text>,
+    hints: Vec<u32>,
+    rebuilds: u8,
+}
+
+impl fmt::Debug for ScriptCacheWork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScriptCacheWork")
+            .field("entries", &self.builds.len())
+            .finish()
+    }
+}
+
+/// Nothing to do.
+impl Default for ScriptCacheWork {
+    fn default() -> Self {
+        Self {
+            cache: None,
+            lazy: true,
+            builds: Vec::new(),
+        }
+    }
+}
+
+impl ScriptCacheWork {
+    /// Whether there is nothing to do.
+    pub fn is_empty(&self) -> bool {
+        self.builds.is_empty()
+    }
+
+    /// Compiles the scripts again, each in a runtime of its own, and puts
+    /// the entries in the cache.
+    pub fn run(self) {
+        let Some(cache) = self.cache else {
+            return;
+        };
         let Some(compiler) = Compiler::new(self.lazy) else {
             return;
         };
-        for (key, kind, text, hints, rebuilds) in builds {
+        for b in self.builds {
             if let Some(entry) = compiler
-                .compile(kind, &text, &hints)
-                .and_then(|code| Entry::new(text, &code, hints, rebuilds))
+                .compile(b.kind, &b.text, &b.hints)
+                .and_then(|code| Entry::new(b.text, &code, b.hints, b.rebuilds))
             {
-                self.cache.insert(key, entry);
+                cache.insert(b.key, entry);
             }
         }
     }

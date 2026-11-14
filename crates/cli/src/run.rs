@@ -77,14 +77,15 @@ async fn run(options: &Options) -> ExitCode {
     };
     // The process is about to exit and the output is written. Freeing the
     // page object by object first was 5% of a heavy page's CPU time, so
-    // leave its memory for the OS to take back; unless the page is to
-    // leave its compiled scripts in the cache directory, which it does
-    // once it is freed.
-    if options.script_cache_dir.is_some() {
-        drop(page);
-    } else {
+    // leave its memory for the OS to take back. Scripts the cache
+    // directory should hold compiled anew are compiled once it is freed.
+    let work = page.take_script_cache_work();
+    if work.is_empty() {
         #[allow(clippy::mem_forget)]
         std::mem::forget(page);
+    } else {
+        drop(page);
+        work.run();
     }
     code
 }

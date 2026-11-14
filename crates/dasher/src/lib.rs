@@ -136,8 +136,8 @@ pub use page::{GotoOptions, MemoryUsage, Navigation, Page};
 pub use dasher_js::{
     ClockMode, ConsoleLevel, ConsoleMessage, DEFAULT_MAX_DOM_NODES, DEFAULT_MEMORY_LIMIT,
     DEFAULT_SCRIPT_CACHE_BYTES, DEFAULT_SCRIPT_CACHE_DISK_BYTES, ErrorKind as ScriptErrorKind,
-    ResourceLimit, ScriptCache, ScriptCacheOptions, ScriptCacheStats, ScriptError, Viewport,
-    Visibility, precompile,
+    ResourceLimit, ScriptCache, ScriptCacheOptions, ScriptCacheStats, ScriptCacheWork, ScriptError,
+    Viewport, Visibility, precompile,
 };
 pub use dasher_net::{Cookie, SameSite};
 pub use dasher_page::{

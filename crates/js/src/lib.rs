@@ -392,7 +392,7 @@ pub use runtime::{
 };
 pub use script_cache::{
     DEFAULT_SCRIPT_CACHE_BYTES, DEFAULT_SCRIPT_CACHE_DISK_BYTES, ScriptCache, ScriptCacheOptions,
-    ScriptCacheStats,
+    ScriptCacheStats, ScriptCacheWork,
 };
 pub use storage::{DEFAULT_STORAGE_QUOTA, QuotaExceeded, StorageStore};
 pub use window::{
