@@ -594,6 +594,7 @@ impl JsRuntime {
         runtime.set_host_promise_rejection_tracker(Some(Box::new(track_rejection)));
 
         let context = Context::full(&runtime).map_err(internal)?;
+        context.with(|ctx| heap::attach(&ctx, &shared.heap));
         let js = Self {
             context,
             runtime,

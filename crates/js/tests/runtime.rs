@@ -629,3 +629,43 @@ fn late_compiled_functions_share_variables_with_the_functions_around_them() {
         Some("[2,6,3,0]")
     );
 }
+
+/// `s += x` appends to the string in place when nothing else can see it,
+/// and the string search and case functions have fast paths for 8-bit
+/// strings (see `PATCHES.md`). Aliases, closures, property keys and wide
+/// strings see the same strings as before; the expected values are what
+/// the engine gives without the patches, and V8 gives the same. The
+/// fixture also runs 3,000 random searches, splits and replacements and
+/// compares a hash of all the answers.
+#[test]
+fn strings_are_the_same_however_they_are_built() {
+    let js = runtime();
+    assert_eq!(
+        js.eval_json(include_str!("fixtures/strings.js"))
+            .unwrap()
+            .as_deref(),
+        Some(include_str!("fixtures/strings.expected.json"))
+    );
+    assert!(js.errors().is_empty());
+}
+
+/// JSON.parse reads strings with its own scanner and builds repeated
+/// objects from a remembered shape, and JSON.stringify writes plain
+/// objects and arrays straight from their shapes (see `PATCHES.md`). The
+/// fixture covers key order, `__proto__` and repeated keys, numbers, lone
+/// surrogates, error messages and their positions, revivers, `toJSON`,
+/// replacers, gaps and objects changed while they are written, plus 3,000
+/// random documents, some of them broken. The expected values are what the
+/// engine gives without the patches; V8 differs only in the wording of
+/// error messages.
+#[test]
+fn json_is_the_same_however_it_is_parsed_and_written() {
+    let js = runtime();
+    assert_eq!(
+        js.eval_json(include_str!("fixtures/json.js"))
+            .unwrap()
+            .as_deref(),
+        Some(include_str!("fixtures/json.expected.json"))
+    );
+    assert!(js.errors().is_empty());
+}

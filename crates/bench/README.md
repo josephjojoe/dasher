@@ -138,8 +138,9 @@ Rust code in dasher uses the **system allocator**: in the static musl
 build that ships, musl's own `malloc`. The JS heap does not. Each page's
 QuickJS runtime allocates from a slab allocator of dasher's own
 (`crates/js/src/slab.rs`), which gives all of a page's JS memory back to
-the OS when the page is dropped. [Real pages](#real-pages) has what that
-bought: 22% less CPU time and 9% less peak RSS than `malloc` on real
+the OS when the page is dropped. QuickJS calls it directly, through
+functions of dasher-js's own, not through rquickjs's allocator wrappers.
+[Real pages](#real-pages) has what that bought: 22% less CPU time and 9% less peak RSS than `malloc` on real
 sites. The fixtures here are too small to show it, and their peak RSS
 moved by 0.3 MiB at most.
 
@@ -425,6 +426,108 @@ evicts each before it comes back, and even 128 MiB holds a fraction. The
 cache pays when the same site comes back while its scripts are still
 held: a scraper working through one site, or a service whose jobs keep
 to a few.
+
+### Allocation and garbage collection
+
+Profiled on 2026-11-13 at `babeb38` with `perf` (call graphs from DWARF
+unwinding, 300 samples a second) on 13 heavy recorded pages: theverge.com,
+techcrunch.com, wired.com, cloud.google.com, yahoo.com, zillow.com,
+nytimes.com, bbc.com/news, airbnb.com, timesofindia.indiatimes.com,
+github.com, espn.com and edition.cnn.com. The build was the static musl
+`profiling` build on aarch64 Linux (AWS Graviton). A sample counts as
+allocation when it is in the allocator or its wrappers, as collection when
+the cycle collector is on the stack, and as freeing when it is in
+QuickJS's code that releases values and frees objects. Each is charged to
+the first caller outside that machinery:
+
+| what | share of CPU | asked for by |
+| --- | ---: | --- |
+| allocating and freeing blocks | 12.8% | interpreter and built-ins 8.7%, parser and compiler 2.9%, host code (DOM bindings, rquickjs glue) 1.1% |
+| the cycle collector | 5.4% | the trigger in `JS_NewObjectFromShape`, so whatever allocates objects |
+| releasing values and freeing objects | 5.4% | the interpreter 4.9%, host 0.4%, parser 0.3% |
+| the kernel (page faults, `mmap`) | 3.4% | |
+
+What that showed:
+
+- **Half of the allocator's time was calls, not allocating.** Each request
+  went through `js_malloc_rt`, rquickjs's C wrapper, a `dyn Allocator`
+  call and the slab heap, and asked for the block's size twice. What is
+  left is memory latency: the slab fast path stalls on reading the link of
+  a block it pops from a free list, and on fresh memory.
+- **Every value release was a function call.** `JS_FreeValue` and
+  `JS_FreeValueRT` were 4% of CPU in their own code: they are exported,
+  and an exported function is not inlined under `-fPIC`.
+- **The cycle collector is bound by memory latency.** Late in a heavy
+  page a pass visits about 500,000 objects and 1.5 million properties, in
+  50 to 100 ms (wired.com: 14 passes, 290 ms). Most passes on a growing
+  heap free little: on 12 of the 13 pages most passes free under 10%.
+  But those passes come at small heap sizes and are cheap: all of them
+  together are about 490 ms of the 2.1 s the 13 pages spend collecting,
+  1.2% of CPU.
+- **Objects grow their shapes one property at a time.** `resize_properties`
+  runs 1.8 million times on theverge.com, 1.2 million on wired.com and
+  2.6 million on yahoo.com, almost all for plain objects and arrays of 2
+  to 13 properties. A new object clones the empty shape and grows that
+  private shape in place, with a resized property array at 2, 3, 4, 6, 9
+  and 13 slots, until it reaches a shape some live object already has.
+  Together with cloning shapes this is about 1.5% of CPU. Object literals
+  made from a shape remembered at the creation site (DAS-36) remove it for
+  literals.
+- **The DOM boundary allocates little.** All allocation and freeing that
+  host code asks for, the DOM bindings' argument and result conversions
+  among it, is 1.5% of CPU.
+- **Scripts are copied on their way into the engine.** The decoded text
+  is copied out of the response, and rquickjs copies it again to add a
+  terminating NUL. On wired.com those copies are 9% of the page faults,
+  for about 0.3% of CPU. The copies are freed before the heap reaches its
+  peak.
+
+Changes made (PATCHES.md has each one): QuickJS calls the slab heap
+through dasher-js's own functions (`JS_SetMallocFunctions`), with its fast
+paths inlined and no ordered loads; the reference count tests of
+`JS_FreeValue` and the atom functions are inlined in quickjs.c; and the
+cycle collector marks children by direct, inlined steps. Measured
+together against `main` at `dd42aac` (lazy compilation included) on the
+same pages, five runs, median, with the two builds alternating:
+
+| page | CPU before | after | | peak RSS before | after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| theverge.com | 6.46 s | 6.00 s | −7.1% | 153 MiB | 154 MiB |
+| techcrunch.com | 5.36 | 5.00 | −6.7% | 87 | 87 |
+| wired.com | 5.21 | 4.94 | −5.2% | 174 | 174 |
+| cloud.google.com | 3.84 | 3.58 | −6.8% | 73 | 71 |
+| zillow.com | 3.11 | 2.90 | −6.8% | 104 | 103 |
+| nytimes.com | 1.94 | 1.87 | −3.6% | 105 | 105 |
+| bbc.com/news | 1.94 | 1.80 | −7.2% | 44 | 44 |
+| airbnb.com | 2.66 | 2.51 | −5.6% | 117 | 117 |
+| timesofindia.indiatimes.com | 1.09 | 1.03 | −5.5% | 44 | 45 |
+| github.com | 1.10 | 1.05 | −4.5% | 45 | 45 |
+| espn.com | 0.69 | 0.66 | −4.3% | 41 | 41 |
+| edition.cnn.com | 0.62 | 0.61 | −1.6% | 46 | 46 |
+| **all twelve** | **34.02 s** | **31.95 s** | **−6.1%** | **1031 MiB** | **1031 MiB** |
+
+Instructions fall by 5.7% and cycles by 6.2%. Each change on its own,
+against the build before it: calling the heap directly 0.9% fewer cycles,
+and 1.5% more with its fast paths inlined; inlined reference counts 4.0%;
+the collector's direct marking 1.2%. yahoo.com is left out of the
+table because its CPU time follows the clock: the same build varies by
+15 to 20% between runs. The release binary grows by 70 KiB (5.69 to 5.76
+MiB) and idle RSS by 68 KiB (4.10 to 4.17 MiB), the extra text the
+process touches. The fixtures' peak RSS stays within 0.1 MiB.
+
+Tried and left out:
+
+- **Prefetching the next free block** when the slab heap pops one, so the
+  next allocation does not stall on its link: 0.8% more cycles.
+- **Collecting later after a pass that frees little**: letting the heap
+  double before the next pass, instead of growing by half, whenever a
+  pass freed under 10%. 0.9% fewer cycles, but 4 MiB more peak RSS summed
+  over the twelve pages, and 3 to 5 MiB more on wired.com, zillow.com and
+  nytimes.com. That trades memory for CPU, as running the collector less
+  often did above.
+- **Inlining only the tag test of `JS_FreeValue`**, with the decrement
+  out of line, to save code: 22 KB less text than full inlining, but 2.8%
+  more cycles, three quarters of the gain.
 
 ### Visibility
 
@@ -825,6 +928,28 @@ python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
 Its tagName figure (72 ns here, 60 in the audit) puts this machine about
 1.2 times slower than the audit's for Lightpanda.
 
+### Strings, atoms and JSON
+
+In-place `+=`, a JSON scanner and writer of the engine's own, `memchr`
+string search and no dump code in QuickJS (DAS-37, see
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)).
+Same machine, main at `045dfd2` with and without the changes, median of 5
+runs, against Node 22 `--jitless --single-threaded`:
+
+| benchmark | before ns/op | after ns/op | Node `--jitless` ns/op | after ÷ Node |
+| --- | ---: | ---: | ---: | ---: |
+| string concat | 160 | 77.3 | 44.3 | 1.7× |
+| string methods | 1,632 | 928 | 561 | 1.7× |
+| JSON | 4,538 | 1,487 | 1,174 | 1.3× |
+
+The other language rows moved by 0 to 7%, most of them down, which is the
+smaller heap and code layout rather than anything they call. What is left
+of the first two is mostly the interpreter around the calls and
+allocation; with DAS-36 and DAS-46 merged in as they stood, the three rows
+came to 55.2, 730 and 1,248 ns. Parsing a 2.1 MB JSON array of 20,000
+records takes 10 ms instead of 38 (Node `--jitless`: 62), and writing it
+12 ms instead of 53 (16). On 14 heavy recorded pages: 3% less CPU time
+and 1.1 to 1.3% less peak RSS; the per-change figures are in `PATCHES.md`.
 ### Language fast paths
 
 DAS-36 added the fast paths in
