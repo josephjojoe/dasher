@@ -26877,15 +26877,56 @@ static __exception int js_parse_unary(JSParseState *s, int parse_flags)
 }
 
 /* allowed parse_flags: PF_IN_ACCEPTED */
+/* dasher: the precedence level of the binary operator 'tok' in
+   js_parse_expr_binary() (1 binds tightest), and its opcode; 0 if it is
+   not one */
+static int js_binary_op_level(int tok, int parse_flags, int *popcode)
+{
+    switch(tok) {
+    case '*': *popcode = OP_mul; return 1;
+    case '/': *popcode = OP_div; return 1;
+    case '%': *popcode = OP_mod; return 1;
+    case '+': *popcode = OP_add; return 2;
+    case '-': *popcode = OP_sub; return 2;
+    case TOK_SHL: *popcode = OP_shl; return 3;
+    case TOK_SAR: *popcode = OP_sar; return 3;
+    case TOK_SHR: *popcode = OP_shr; return 3;
+    case '<': *popcode = OP_lt; return 4;
+    case '>': *popcode = OP_gt; return 4;
+    case TOK_LTE: *popcode = OP_lte; return 4;
+    case TOK_GTE: *popcode = OP_gte; return 4;
+    case TOK_INSTANCEOF: *popcode = OP_instanceof; return 4;
+    case TOK_IN:
+        if (!(parse_flags & PF_IN_ACCEPTED))
+            return 0;
+        *popcode = OP_in;
+        return 4;
+    case TOK_EQ: *popcode = OP_eq; return 5;
+    case TOK_NEQ: *popcode = OP_neq; return 5;
+    case TOK_STRICT_EQ: *popcode = OP_strict_eq; return 5;
+    case TOK_STRICT_NEQ: *popcode = OP_strict_neq; return 5;
+    case '&': *popcode = OP_and; return 6;
+    case '^': *popcode = OP_xor; return 7;
+    case '|': *popcode = OP_or; return 8;
+    default:
+        return 0;
+    }
+}
+
+/* dasher: upstream recurses once per level for every operand, eight
+   calls deep for each one. This parses the leftmost operand directly and
+   recurses only for an operator's right operand, which emits the same
+   code: after the right operand of a level 'n' operator, the next
+   operator cannot be tighter than 'n'. */
 static __exception int js_parse_expr_binary(JSParseState *s, int level,
                                             int parse_flags)
 {
-    int op, opcode;
+    int op_level, opcode, min_level = 1;
 
     if (level == 0) {
         return js_parse_unary(s, PF_POW_ALLOWED);
     } else if (s->token.val == TOK_PRIVATE_NAME &&
-               (parse_flags & PF_IN_ACCEPTED) && level == 4 &&
+               (parse_flags & PF_IN_ACCEPTED) && level >= 4 &&
                peek_token(s, false) == TOK_IN) {
         JSAtom atom;
         atom = JS_DupAtom(s->ctx, s->token.u.ident.atom);
@@ -26895,7 +26936,7 @@ static __exception int js_parse_expr_binary(JSParseState *s, int level,
             goto fail_private_in;
         if (next_token(s))
             goto fail_private_in;
-        if (js_parse_expr_binary(s, level - 1, parse_flags)) {
+        if (js_parse_expr_binary(s, 3, parse_flags)) {
         fail_private_in:
             JS_FreeAtom(s->ctx, atom);
             return -1;
@@ -26904,136 +26945,21 @@ static __exception int js_parse_expr_binary(JSParseState *s, int level,
         emit_atom(s, atom);
         emit_u16(s, s->cur_func->scope_level);
         JS_FreeAtom(s->ctx, atom);
-        return 0;
+        /* upstream returns from level 4 here: only looser operators
+           follow */
+        min_level = 5;
     } else {
-        if (js_parse_expr_binary(s, level - 1, parse_flags))
+        if (js_parse_unary(s, PF_POW_ALLOWED))
             return -1;
     }
     for(;;) {
-        op = s->token.val;
-        switch(level) {
-        case 1:
-            switch(op) {
-            case '*':
-                opcode = OP_mul;
-                break;
-            case '/':
-                opcode = OP_div;
-                break;
-            case '%':
-                opcode = OP_mod;
-                break;
-            default:
-                return 0;
-            }
-            break;
-        case 2:
-            switch(op) {
-            case '+':
-                opcode = OP_add;
-                break;
-            case '-':
-                opcode = OP_sub;
-                break;
-            default:
-                return 0;
-            }
-            break;
-        case 3:
-            switch(op) {
-            case TOK_SHL:
-                opcode = OP_shl;
-                break;
-            case TOK_SAR:
-                opcode = OP_sar;
-                break;
-            case TOK_SHR:
-                opcode = OP_shr;
-                break;
-            default:
-                return 0;
-            }
-            break;
-        case 4:
-            switch(op) {
-            case '<':
-                opcode = OP_lt;
-                break;
-            case '>':
-                opcode = OP_gt;
-                break;
-            case TOK_LTE:
-                opcode = OP_lte;
-                break;
-            case TOK_GTE:
-                opcode = OP_gte;
-                break;
-            case TOK_INSTANCEOF:
-                opcode = OP_instanceof;
-                break;
-            case TOK_IN:
-                if (parse_flags & PF_IN_ACCEPTED) {
-                    opcode = OP_in;
-                } else {
-                    return 0;
-                }
-                break;
-            default:
-                return 0;
-            }
-            break;
-        case 5:
-            switch(op) {
-            case TOK_EQ:
-                opcode = OP_eq;
-                break;
-            case TOK_NEQ:
-                opcode = OP_neq;
-                break;
-            case TOK_STRICT_EQ:
-                opcode = OP_strict_eq;
-                break;
-            case TOK_STRICT_NEQ:
-                opcode = OP_strict_neq;
-                break;
-            default:
-                return 0;
-            }
-            break;
-        case 6:
-            switch(op) {
-            case '&':
-                opcode = OP_and;
-                break;
-            default:
-                return 0;
-            }
-            break;
-        case 7:
-            switch(op) {
-            case '^':
-                opcode = OP_xor;
-                break;
-            default:
-                return 0;
-            }
-            break;
-        case 8:
-            switch(op) {
-            case '|':
-                opcode = OP_or;
-                break;
-            default:
-                return 0;
-            }
-            break;
-        default:
-            abort();
-        }
+        op_level = js_binary_op_level(s->token.val, parse_flags, &opcode);
+        if (op_level < min_level || op_level > level)
+            return 0;
         if (next_token(s))
             return -1;
         emit_source_loc(s);
-        if (js_parse_expr_binary(s, level - 1, parse_flags))
+        if (js_parse_expr_binary(s, op_level - 1, parse_flags))
             return -1;
         emit_op(s, opcode);
     }
