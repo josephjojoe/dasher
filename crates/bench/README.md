@@ -226,6 +226,13 @@ It compiles each file as a classic script, or as a module if that fails
 bytes compiled, the CPU time it took, the rate in MB/s and how much of the
 JS heap the compiled scripts hold.
 
+Built with `--features replay`, it compiles every function with its
+script when `DASHER_EAGER_JS` is set. On 1,296 distinct scripts (128.4 MB)
+from 18 recorded pages, on Linux (aarch64, shared machine) it gives 38.3
+MB/s lazily and 26.6 MB/s with `DASHER_EAGER_JS` (21.9 and 16.3 before the
+parser and compiler changes in
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)).
+
 ### What it showed
 
 Fourteen pages recorded on 2026-11-10 and replayed on the static musl build
@@ -269,6 +276,7 @@ Each change was also measured on its own, against the build without it:
 | closures and `arguments` made from a known shape, regexp searches run by dasher, `Map` hash mixed (together) | −4% (−8% on one page) | none | macOS |
 | functions compiled on their first call, not with their script (16 heavy pages) | +3% | −8% (−22% on one page) | Linux |
 | compiled scripts kept across pages ([script cache](#the-script-cache); 16 heavy pages, third visit on) | −20% (−65% on one page) | +5%, the cache itself | Linux |
+| parser and compiler fast paths (16 heavy pages; parse-only corpus 1.75× lazily, 1.63× eagerly) | −9% (−30% on one page) | none | Linux |
 
 Before the allocator change, a quarter to over a third of CPU time on
 the heavy pages was inside `malloc`, `free` and `malloc_usable_size`

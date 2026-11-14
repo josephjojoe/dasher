@@ -500,6 +500,187 @@ properties and text, stack positions and early errors against what the
 engine gives with every function compiled with its script. test262 (tc39
 `main` of 2026-11-13, 41,841 tests) fails the same tests either way.
 
+## Parser and compiler throughput
+
+Compiling the parse-only corpus (see `crates/bench/README.md`) with lazy
+compilation, the profile was: 30% in the bracket lookahead (see the
+change above that remembers what it found), much of it turning names
+into atoms and building strings it then threw away; 19% interning names
+(`__JS_FindAtom`, `parse_ident`, `__JS_NewAtom`), part of it inside the
+lookahead; 10% dropping the functions not compiled yet (`js_lazy_drop`);
+6% in the eight nested calls `js_parse_expr_binary` makes for every
+operand; and 10% growing buffers and tables a few bytes at a time. Compiling every function with
+its script spends a further 40% in the passes after parsing
+(`resolve_variables`, `resolve_labels`, `compute_stack_size`). The
+changes below take the largest of these costs out. None of them changes
+the bytecode: every script of the corpus compiles to the same bytes
+(`JS_WriteObject`) with and without them, lazily and eagerly.
+
+### `quickjs/quickjs.c`: the bracket lookahead stops once it knows
+
+`js_parse_skip_parens_token` reads to the token after the matching
+bracket. Two of its callers only ask whether that token is `=>` (is this
+`(` an arrow function's parameters?) or `=` (is this `[` or `{` a
+destructuring assignment?), and the answer is usually no, after reading
+a whole object literal or function expression. They now say so
+(`js_parse_skip_parens_token2`, `SKIP_ASK_ARROW`, `SKIP_ASK_PATTERN`), and
+the scan stops at the first sign that the bracket cannot be what they
+look for (`js_skip_elem_add`):
+
+- parameters hold only names, `...`, `,`, patterns and default values,
+  so a `(` with anything else directly inside is not an arrow function;
+- a pattern element written directly in the bracket cannot have an
+  operator outside a default value, an object key cannot be followed by
+  `(` (a method), and an element cannot end in a literal, a template, a
+  call (`)` after something), or be a function or class expression, or
+  be a bracket inside that is itself not a pattern.
+
+Only contents that no valid program has there stop the scan, so a valid
+program is parsed exactly as before. An invalid one is still a
+`SyntaxError`, but may get another message for the same error:
+`(a.b) => 1` now says "expecting ';'" rather than "Unexpected token '.'",
+and `[a + b] = x` "invalid assignment left-hand side" rather than
+"Unexpected token '+'". Two more shortcuts: a `(` followed by nothing
+but names, commas and spaces up to its `)` is answered from the text
+(`js_skip_simple_parens`), which is also how a function's parameter list
+is checked for `=`; and the header of a `for` stops at its first `;`
+(`SKIP_ASK_SEMI`), the only thing that caller looks at.
+
+On the corpus the lookahead read 55.7 million tokens for the 47.7 million
+the parser read; it now reads 11.6 million.
+
+### `quickjs/quickjs.c`: the lookahead's tokens carry no values
+
+Inside the lookahead (`s->in_skip`) a plain ASCII name gets no atom, only
+its keyword if it is one (`js_keyword_atom`, with any other name standing
+as `JS_ATOM_empty_string`), and a string or template part is checked but
+not built. A name with an escape or a non-ASCII character still takes
+the general path, so what is a keyword in which function comes out as
+before.
+
+### `quickjs/quickjs.c`: short numbers, plain names and plain strings are read directly
+
+A decimal integer of up to nine digits (and a lone `0`) followed by
+something that cannot continue a number is read in `next_token` itself,
+giving the int `js_atof` gives. A plain ASCII name is hashed while it is
+read and looked up where it is in the source (`js_find_atom8`), without
+copying it to a buffer and hashing it again. A quoted string of ASCII
+without escapes is copied from the source as it is
+(`js_new_string8_len`).
+
+### `quickjs/quickjs.c`: binary operators by precedence climbing
+
+`js_parse_expr_binary` recursed once per precedence level, eight calls
+deep for every operand of every expression. It now parses the leftmost
+operand directly and recurses only for an operator's right operand, with
+the level below that operator's (`js_binary_op_level`). The code emitted
+is the same: after the right operand of a level-`n` operator, the next
+operator cannot bind tighter than `n`. `#x in obj`, which upstream
+returns from level 4, leaves only looser operators to follow.
+
+### `quickjs/cutils.h`, `quickjs/quickjs.c`: bytecode is written in place
+
+`dbuf_putc`, `dbuf_put_u16`, `dbuf_put_u32` and `dbuf_put` called into
+`cutils.c`, and from there `memcpy`, for every byte or instruction the
+compiler writes. When there is room, which is nearly always, they now
+write in place (`dbuf_putc_inline`, `dbuf_put_inline` and the inline
+`dbuf_put_u16`, `dbuf_put_u32`, `dbuf_put_u64`); `quickjs.c` uses them for
+all its `dbuf_putc` and `dbuf_put`.
+
+### `quickjs/quickjs.c`: the compiler's buffers and tables start with room
+
+A function's bytecode buffer started empty and grew by half again from a
+single byte; the passes after parsing built their output the same way.
+Now the bytecode buffer starts with 64 bytes and each pass's output with
+the size of its input (`js_dbuf_init_size`), and a function's variables,
+arguments, closure variables, constants and labels start with room for
+eight (`js_resize_array_fd`). All of these are freed, or copied to their
+exact size, when the function is compiled: the heap the compiled scripts
+hold is the same to the byte (251.5 MiB for the corpus compiled lazily).
+
+### `quickjs/quickjs.c`: `find_var` follows its hash table; `code_match` tests its first opcode inline
+
+`find_var` scanned every variable of the function whenever the first
+variable of that name in its hash table was in a block. All variables of
+a name are on the table's probe sequence for it, so it now looks only
+there, taking the last one at function level as the scan did. And the
+peephole matcher `code_match`, a variadic function called many times per
+instruction, mostly fails on its first opcode; a macro tests that inline
+first (`code_match_first`).
+
+### What these changes measure together
+
+The parse-only corpus (1,296 distinct scripts, 128.4 MB, from 18
+recorded pages) with `compile_corpus` on Linux (aarch64, the profiling
+build, slab allocator, a machine shared with other work), against
+`main` at `c210834`, best of three runs:
+
+| | before | after | |
+| --- | ---: | ---: | ---: |
+| lazily (the default): parse, compile the top level | 21.9 MB/s | 38.3 MB/s | 1.75× |
+| every function with its script (`DASHER_EAGER_JS`) | 16.3 MB/s | 26.6 MB/s | 1.63× |
+| JS heap held by the compiled scripts, lazily / eagerly | 251.5 / 570.7 MiB | 251.5 / 570.7 MiB | same |
+
+Compiling, on their first call, all 593,394 functions the lazy compile
+left (a C harness that calls `js_lazy_compile` on each, glibc `malloc`):
+6.70 to 4.73 s. A loop of `new Function("a", "b", "return a + b + " + i)`
+called once: 4.05 to 2.50 µs each.
+
+Each change on its own, compiling the corpus in the same C harness
+(glibc `malloc`, best of six runs, each build against the one before it,
+on the pre-merge base `dd42aac`):
+
+| change | lazily | eagerly |
+| --- | ---: | ---: |
+| before | 20.4 MB/s | 15.6 MB/s |
+| lookahead stops for arrows and patterns | +19% | +14% |
+| lookahead tokens without values, short integers | +10% | +6% |
+| lookahead follows nested brackets, calls, plain parameters, `for` | +5% | +3% |
+| precedence climbing | +9% | +7% |
+| names hashed as read | +3% | +2% |
+| plain strings copied | +5% | +3% |
+| bytecode written in place (emitters, then every write) | +4% | +3% |
+| buffers sized up front | +6% | +12% |
+| tables start with room for eight | +3% | +2% |
+| `find_var`, `code_match` | 0% | +1% |
+| after | 36.9 MB/s | 26.0 MB/s |
+
+On 16 heavy recorded pages (CPU time and peak RSS, median of three runs,
+the two builds alternating page by page): 9.2% less CPU summed over the
+pages (37.66 to 34.20 s; 15 to 30% less on espn.com, edition.cnn.com,
+github.com, zillow.com and wired.com), and the same peak RSS (1182.0 and
+1182.4 MiB). Element counts, tag counts, link counts and page text
+(digits masked) were the same on every page but theverge.com, whose
+output varies from run to run on either build.
+
+**Short of the targets.** V8 compiled a corpus of the same pages'
+scripts at about 86 MB/s lazily and 28 MB/s eagerly (audit of
+`babeb38`). The lazy figure here is 38 MB/s because a
+function not compiled now is still parsed in full, bytecode and all, so
+that every syntax error stops its script (see the change above that
+compiles functions on their first call); what is left is mostly that
+parse (tokens 35%, the parser and its emitters 35%) and dropping what it
+made (`js_lazy_drop`, 17%: walking the bytecode for the names the
+function uses and freeing its atoms). Going further needs a pre-parser
+that checks syntax without emitting code, as V8 has. Eagerly, what is
+left is spread thin: interning names and the passes after parsing, each
+a few percent.
+
+Tried and left out: interning with the atom table's load factor halved
+(2.5% faster, a larger table for the life of the runtime); string
+literals taken from the atom table when they are already atoms (no
+change); a cache of `resolve_scope_var`'s scope walks (no change); and
+`-fno-semantic-interposition`, so that GCC inlines `JS_FreeAtom` and
+`JS_DupAtom` into the parser (no change).
+
+`crates/js/tests/runtime.rs` (fixture `tests/fixtures/parser.js`) checks
+destructuring targets that are not plain names, literals that look like
+patterns, arrow functions and bracketed expressions, `for` headers,
+numbers, strings and names of every form the fast paths take or leave,
+the order of every binary operator, and `#x in`, against what the engine
+gives without these changes (the same lazily and eagerly). test262 (tc39 `main` of
+2026-11-13) fails the same tests with and without them, either way.
+
 ## `quickjs/quickjs.c`: no dump code
 
 Upstream turns its dump code on (`ENABLE_DUMPS`) whenever `NDEBUG` is
