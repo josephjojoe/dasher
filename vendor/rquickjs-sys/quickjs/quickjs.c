@@ -21575,9 +21575,6 @@ static __exception int next_token(JSParseState *s)
     }
 
     free_token(s, &s->token);
-#ifdef DASHER_COUNT
-    { extern long dc_tok[2]; dc_tok[s->in_skip != 0]++; }
-#endif
 
     p = s->last_ptr = s->buf_ptr;
     s->got_lf = false;
@@ -23725,6 +23722,28 @@ static void js_skip_memo_free(JSParseState *s)
 #define SKIP_ASK_ALL     0
 #define SKIP_ASK_ARROW   1
 #define SKIP_ASK_PATTERN 2
+#define SKIP_ASK_SEMI    3 /* stops at a ';' directly inside, returning
+                              TOK_ERROR and SKIP_HAS_SEMI */
+
+/* dasher: whether the text from 'p' to the next ')' is only names,
+   commas and spaces, as in most parameter lists: then the tokens inside
+   the bracket that ends there are just those, and '*pend' is set to
+   just after it */
+static bool js_skip_simple_parens(const uint8_t *p, const uint8_t **pend)
+{
+    for (;; p++) {
+        int c = *p;
+        if (c >= 0x80)
+            return false;
+        if (lre_js_is_ident_next(c) || c == ',' || c == ' ' || c == '\t' ||
+            c == '\n' || c == '\r')
+            continue;
+        if (c != ')')
+            return false;
+        *pend = p + 1;
+        return true;
+    }
+}
 
 /* dasher: a token that cannot be part of a destructuring target written
    directly in the pattern (outside brackets), unless it follows '.' */
@@ -23777,26 +23796,157 @@ static bool js_skip_not_target(int first, int last, int prev)
     }
 }
 
+/* dasher: an open bracket the lookahead is reading, for 'ask', and the
+   element of it being read: everything since its last ',' at its level */
+typedef struct JSSkipElem {
+    uint8_t flags;   /* SKIP_ELEM_xxx */
+    uint8_t items;   /* tokens and brackets of the element at its level,
+                        counted up to 2 */
+    int16_t first;   /* the element's first token at its level */
+    int16_t last;    /* its last, a closing bracket for a bracket */
+    int16_t prev;    /* the one before */
+} JSSkipElem;
+
+#define SKIP_ELEM_CAND      (1 << 0) /* the bracket could be what 'ask'
+                                        looks for, as far as it is read */
+#define SKIP_ELEM_NOT       (1 << 1) /* it was a candidate and is not */
+#define SKIP_ELEM_VALUE     (1 << 2) /* past an object property's key, or
+                                        in an array */
+#define SKIP_ELEM_DEFAULT   (1 << 3) /* past the element's '=': a default
+                                        value, which may hold anything */
+#define SKIP_ELEM_ARROW     (1 << 4) /* arrow function parameters */
+#define SKIP_ELEM_FIRST_NOT (1 << 5) /* the element's first item is a
+                                        candidate bracket that is not */
+
+static void js_skip_elem_reset(JSSkipElem *e, int bracket)
+{
+    e->flags = SKIP_ELEM_CAND;
+    if (bracket == '(')
+        e->flags |= SKIP_ELEM_ARROW;
+    else if (bracket == '[')
+        e->flags |= SKIP_ELEM_VALUE;
+    e->items = 0;
+    e->first = e->last = e->prev = 0;
+}
+
+static void js_skip_elem_open(JSSkipElem *e, int bracket, bool cand)
+{
+    js_skip_elem_reset(e, bracket);
+    if (!cand)
+        e->flags = 0;
+}
+
+static void js_skip_elem_push(JSSkipElem *e, int tok)
+{
+    if (!e->items)
+        e->first = tok;
+    if (e->items < 2)
+        e->items++;
+    e->prev = e->last;
+    e->last = tok;
+}
+
+/* whether the element read so far in the candidate 'e', which ends here,
+   cannot be a destructuring target */
+static bool js_skip_elem_not_target(const JSSkipElem *e)
+{
+    if ((e->flags & (SKIP_ELEM_DEFAULT | SKIP_ELEM_VALUE)) != SKIP_ELEM_VALUE)
+        return false;
+    /* a call (a target in parentheses is a single bracket, '(a)') */
+    if (e->last == ')' && e->items >= 2)
+        return true;
+    /* a bracket that is not a pattern, with nothing after it */
+    if ((e->flags & SKIP_ELEM_FIRST_NOT) && e->items == 1)
+        return true;
+    return js_skip_not_target(e->first, e->last, e->prev);
+}
+
+/* a function skipped whole from its '(' (see js_lazy_peek) in 'e' */
+static void js_skip_elem_end_function(JSSkipElem *e)
+{
+    if ((e->flags & (SKIP_ELEM_CAND | SKIP_ELEM_DEFAULT | SKIP_ELEM_VALUE)) ==
+        (SKIP_ELEM_CAND | SKIP_ELEM_VALUE)) {
+        e->prev = e->last;
+        e->last = '}';
+    }
+}
+
+/* notes 'tok', read with brackets open up to state[level - 1], in the
+   elements of the brackets it ends or is directly inside. Returns -1 if
+   the outer bracket cannot be what 'ask' looks for, else 0, and sets
+   '*open_cand' to whether a bracket that 'tok' opens is a candidate.
+
+   For SKIP_ASK_PATTERN a bracket is a candidate if it is the outer one,
+   or a '[' or '{' that starts an element of a candidate (outside its
+   default value). A candidate is not a pattern if it has, outside
+   brackets, a token no target can have (js_skip_not_in_target), an
+   object key followed by '(' (a method) or an element that cannot be a
+   target (js_skip_elem_not_target). The outer bracket then stops the
+   scan. An inner one is noted, which makes an element that is only that
+   bracket not a target. For SKIP_ASK_ARROW the outer '(' is the only
+   candidate, and its contents outside brackets and default values can
+   only be names, '...' and ','. */
+static int js_skip_elem_add(JSSkipElem *elem, const char *state, size_t level,
+                            int tok, int ask, bool *open_cand)
+{
+    size_t l = level - 1; /* the innermost open bracket */
+    JSSkipElem *e = &elem[l];
+    bool is_close = tok == ')' || tok == ']' || tok == '}';
+    bool not = false;
+
+    *open_cand = false;
+    if (e->flags & SKIP_ELEM_CAND) {
+        if (is_close) {
+            not = js_skip_elem_not_target(e);
+        } else if (tok == ',') {
+            not = js_skip_elem_not_target(e);
+            if (!not)
+                js_skip_elem_reset(e, state[l]);
+        } else if (e->flags & SKIP_ELEM_DEFAULT) {
+        } else if (tok == '=') {
+            e->flags |= SKIP_ELEM_DEFAULT;
+        } else if (e->flags & SKIP_ELEM_ARROW) {
+            not = tok != TOK_IDENT && tok != TOK_ELLIPSIS && tok != '[' &&
+                tok != '{';
+        } else if (!(e->flags & SKIP_ELEM_VALUE)) {
+            /* an object property's key */
+            if (tok == '(')
+                not = true;
+            else if (tok == ':' || tok == TOK_ELLIPSIS)
+                e->flags |= SKIP_ELEM_VALUE;
+        } else if (tok == TOK_ELLIPSIS && !e->items) {
+        } else if (js_skip_not_in_target(tok, e->last)) {
+            not = true;
+        } else {
+            if ((tok == '[' || tok == '{') && !e->items &&
+                ask == SKIP_ASK_PATTERN)
+                *open_cand = true;
+            js_skip_elem_push(e, tok);
+        }
+        if (not) {
+            if (l == 1 && !is_close)
+                return -1;
+            e->flags = SKIP_ELEM_NOT;
+        }
+    }
+    /* the end of a bracket is a token of the bracket around it */
+    if (is_close && l >= 2) {
+        JSSkipElem *pe = &elem[l - 1];
+        if ((pe->flags & (SKIP_ELEM_CAND | SKIP_ELEM_DEFAULT | SKIP_ELEM_VALUE)) ==
+            (SKIP_ELEM_CAND | SKIP_ELEM_VALUE)) {
+            if (pe->items == 1 && (e->flags & SKIP_ELEM_NOT))
+                pe->flags |= SKIP_ELEM_FIRST_NOT;
+            pe->prev = pe->last;
+            pe->last = state[l] == '`' ? TOK_TEMPLATE : tok;
+        }
+    }
+    return 0;
+}
+
 /* XXX: no longer works if regexps are present. Could use previous
    regexp parsing heuristics to handle most cases */
-#ifdef DASHER_COUNT
-static int js_parse_skip_parens_token3(JSParseState *s, int *pbits,
-                                       bool no_line_terminator, int ask);
 static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                                        bool no_line_terminator, int ask)
-{
-    extern long dc_tok[2]; extern void dc_site(void *, long, int);
-    long before = dc_tok[1];
-    int r = js_parse_skip_parens_token3(s, pbits, no_line_terminator, ask);
-    dc_site(__builtin_return_address(0), dc_tok[1] - before, r == TOK_ERROR);
-    return r;
-}
-static int js_parse_skip_parens_token3(JSParseState *s, int *pbits,
-                                       bool no_line_terminator, int ask)
-#else
-static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
-                                       bool no_line_terminator, int ask)
-#endif
 {
     char state[256];
     /* dasher: for each open bracket, where it is and what is inside it */
@@ -23810,12 +23960,26 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
     bool memo = (size_t)(s->buf_end - s->buf_start) < UINT32_MAX - 1;
     uint32_t closed_pos = 0; /* the bracket the last token closed, if any */
     int closed_bits = 0;
-    /* dasher: for 'ask', the element of the outer bracket being read:
-       whether it is past its '=' (a default value, which may hold
-       anything), whether it is past the key of an object property, and
-       its first, last and last but one tokens outside brackets */
-    bool in_default = false, in_value = s->token.val == '[';
-    int first_tok = 0, last_tok2 = 0, prev_tok2 = 0;
+    /* dasher: for 'ask', the element being read in each open bracket
+       that could be what it looks for (see js_skip_elem_add) */
+    JSSkipElem elem[256];
+    bool use_elem = ask == SKIP_ASK_ARROW || ask == SKIP_ASK_PATTERN;
+    bool open_cand = use_elem;
+    const uint8_t *p;
+
+    /* dasher: '(a, b)' needs no tokens, and is not an arrow function's
+       parameters unless '=>' follows */
+    if (ask == SKIP_ASK_ARROW && s->token.val == '(' &&
+        js_skip_simple_parens(s->buf_ptr, &p)) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\n' || *p == '\r')
+            return no_line_terminator ? '\n' : TOK_ERROR;
+        if (p[0] == '=' && p[1] == '>')
+            return TOK_ARROW;
+        if (p[0] > ' ' && p[0] < 0x7f && p[0] != '/')
+            return TOK_ERROR;
+    }
 
     if (memo && (s->token.val == '(' || s->token.val == '[' ||
                  s->token.val == '{')) {
@@ -23836,46 +24000,11 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
     last_tok = 0;
     s->in_skip++;
     for (;;) {
-        if (ask && level == 2) {
-            /* dasher: a token directly inside the bracket */
-            int t = s->token.val;
-            if (t == ',') {
-                if (ask == SKIP_ASK_PATTERN && !in_default && in_value &&
-                    js_skip_not_target(first_tok, last_tok2, prev_tok2))
-                    goto bail;
-                in_default = false;
-                in_value = state[1] == '[';
-                first_tok = last_tok2 = prev_tok2 = 0;
-            } else if (in_default) {
-            } else if (t == '=') {
-                in_default = true;
-            } else if (ask == SKIP_ASK_ARROW) {
-                /* parameters: names, patterns, '...' and defaults */
-                if (t != TOK_IDENT && t != TOK_ELLIPSIS && t != '[' &&
-                    t != '{' && t != ')')
-                    goto bail;
-            } else if (!in_value) {
-                /* an object property's key: a method if '(' follows */
-                if (t == '(')
-                    goto bail;
-                if (t == ':' || t == TOK_ELLIPSIS)
-                    in_value = true;
-            } else if (t == TOK_ELLIPSIS && !first_tok) {
-            } else if (t != ']' && t != '}') {
-                if (js_skip_not_in_target(t, last_tok2))
-                    goto bail;
-                if (!first_tok)
-                    first_tok = t;
-                prev_tok2 = last_tok2;
-                last_tok2 = t;
-            }
-        } else if (ask == SKIP_ASK_PATTERN && level == 3 && in_value &&
-                   !in_default && (s->token.val == ')' ||
-                                   s->token.val == ']' ||
-                                   s->token.val == '}')) {
-            /* dasher: the end of a bracket directly inside it */
-            prev_tok2 = last_tok2;
-            last_tok2 = state[2] == '`' ? TOK_TEMPLATE : s->token.val;
+        if (use_elem && level >= 2) {
+            /* dasher: see SKIP_ASK_ARROW and SKIP_ASK_PATTERN */
+            if (js_skip_elem_add(elem, state, level, s->token.val, ask,
+                                 &open_cand))
+                goto bail;
         }
         /* dasher: a function an earlier parse dropped is skipped whole, as
            the parse that follows will skip it */
@@ -23894,11 +24023,8 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                 s->token.line_num = r->last_line;
                 s->token.col_num = r->last_col;
                 last_tok = ')';
-                if (ask == SKIP_ASK_PATTERN && level == 2 && in_value &&
-                    !in_default) {
-                    prev_tok2 = last_tok2;
-                    last_tok2 = '}';
-                }
+                if (use_elem)
+                    js_skip_elem_end_function(&elem[level - 1]);
                 goto next;
             }
         }
@@ -23910,6 +24036,8 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                 goto done;
             open_pos[level] = s->token.ptr - s->buf_start + 1;
             open_bits[level] = 0;
+            if (use_elem)
+                js_skip_elem_open(&elem[level], s->token.val, open_cand);
             state[level++] = s->token.val;
             break;
         case ')':
@@ -23959,6 +24087,8 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                 if (level >= sizeof(state))
                     goto done;
                 open_bits[level] = 0;
+                if (use_elem)
+                    js_skip_elem_open(&elem[level], '`', false);
                 state[level++] = '`';
             }
             break;
@@ -23967,6 +24097,8 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
         case ';':
             if (level == 2) {
                 bits |= SKIP_HAS_SEMI;
+                if (ask == SKIP_ASK_SEMI)
+                    goto bail; /* dasher */
             }
             if (level >= 2)
                 open_bits[level - 1] |= SKIP_HAS_SEMI;
@@ -24046,7 +24178,7 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
     return tok;
 }
 
-static __attribute__((noinline)) int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_terminator)
+static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_terminator)
 {
     return js_parse_skip_parens_token2(s, pbits, no_line_terminator, SKIP_ASK_ALL);
 }
@@ -28142,7 +28274,8 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             bits = 0;
             is_async = false;
             if (s->token.val == '(') {
-                js_parse_skip_parens_token(s, &bits, false);
+                /* dasher: only SKIP_HAS_SEMI is looked at */
+                js_parse_skip_parens_token2(s, &bits, false, SKIP_ASK_SEMI);
             } else if (s->token.val == TOK_AWAIT) {
                 if (!(s->cur_func->func_kind & JS_FUNC_ASYNC)) {
                     js_parse_error(s, "for await is only valid in asynchronous functions");
@@ -35743,11 +35876,15 @@ static __exception int js_parse_function_body(JSParseState *s,
     } else if (func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT) {
         if (s->token.val == '(') {
             int skip_bits;
+            const uint8_t *end;
             /* if there is an '=' inside the parameter list, we
-               consider there is a parameter expression inside */
-            js_parse_skip_parens_token(s, &skip_bits, false);
-            if (skip_bits & SKIP_HAS_ASSIGNMENT)
-                fd->has_parameter_expressions = true;
+               consider there is a parameter expression inside
+               (dasher: there is none in a list of plain names) */
+            if (!js_skip_simple_parens(s->buf_ptr, &end)) {
+                js_parse_skip_parens_token(s, &skip_bits, false);
+                if (skip_bits & SKIP_HAS_ASSIGNMENT)
+                    fd->has_parameter_expressions = true;
+            }
             if (next_token(s))
                 return -1;
         } else {
