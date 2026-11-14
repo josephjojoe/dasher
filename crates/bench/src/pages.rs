@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! <name> <round> <load cpu s> <drop cpu s> <peak RSS MiB> <hits> <misses> \
-//!   <hit KiB> <miss KiB> <builds> <late> <cache MiB> <elements> <text hash>
+//!   <hit KiB> <miss KiB> <builds> <late> <cache MiB> <JS heap MiB> <elements> <text hash>
 //! ```
 //!
 //! `load` is `goto` and reading the page out; `drop` is freeing the page,
@@ -169,6 +169,7 @@ async fn run(options: &Options) {
             .await
             .unwrap_or_default();
         let _html = page.content();
+        let heap = page.memory_usage().js_heap;
         let load = crate::sys::thread_cpu() - start;
         drop(page);
         let dropped = crate::sys::thread_cpu() - start - load;
@@ -182,7 +183,7 @@ async fn run(options: &Options) {
             eprintln!("{name}: {e}");
         }
         println!(
-            "{name} {round} {:.3} {:.3} {:.1} {} {} {} {} {} {} {:.1} {elements} {:016x}",
+            "{name} {round} {:.3} {:.3} {:.1} {} {} {} {} {} {} {:.1} {:.1} {elements} {:016x}",
             load.as_secs_f64(),
             dropped.as_secs_f64(),
             peak as f64 / (1024.0 * 1024.0),
@@ -193,6 +194,7 @@ async fn run(options: &Options) {
             d(|s| s.builds),
             d(|s| s.compiled_late),
             after.bytes as f64 / (1024.0 * 1024.0),
+            heap as f64 / (1024.0 * 1024.0),
             hash.finish(),
         );
     }
