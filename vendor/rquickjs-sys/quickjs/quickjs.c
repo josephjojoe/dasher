@@ -23936,26 +23936,6 @@ insert:
     return 0;
 }
 
-static int find_var_htab(JSFunctionDef *fd, JSAtom var_name)
-{
-    uint32_t i, j, m, *p;
-
-    i = hash_atom(var_name);
-    j = 1;
-    m = fd->var_count + fd->var_count/5;
-    m = UINT32_MAX >> clz32(m);
-    for (;;) {
-        p = &fd->vars_htab[i & m];
-        if (*p == UINT32_MAX)
-            return -1;
-        if (fd->vars[*p].var_name == var_name)
-            return *p;
-        i += j;
-        j += 1; // quadratic probing
-    }
-    return -1; // pacify compiler
-}
-
 /* return the variable index or -1 if not found,
    add ARGUMENT_VAR_OFFSET for argument variables */
 static int find_arg(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
@@ -23977,7 +23957,7 @@ static int find_var(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
         /* dasher: upstream scanned every variable when the first one of
            that name in the table was in a block. All of them are on the
            probe sequence of the name: take the last at function level,
-           as the scan below does. */
+           as the scan below does. (This replaces find_var_htab.) */
         uint32_t h, j, m, *p;
         int best = -1;
         h = hash_atom(name);
