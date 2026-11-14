@@ -461,6 +461,30 @@ static inline int dbuf_putc_inline(DynBuf *s, uint8_t c)
     }
     return dbuf_putc(s, c);
 }
+static inline int dbuf_put_inline(DynBuf *s, const void *data, size_t len)
+{
+    if (likely(s->size + len <= s->allocated_size)) {
+        uint8_t *d = s->buf + s->size;
+        const uint8_t *p = data;
+        /* copies of known size, which compile to a few moves */
+        if (len >= 8 && len <= 16) {
+            memcpy(d, p, 8);
+            memcpy(d + len - 8, p + len - 8, 8);
+        } else if (len >= 4 && len < 8) {
+            memcpy(d, p, 4);
+            memcpy(d + len - 4, p + len - 4, 4);
+        } else if (len > 0 && len < 4) {
+            d[0] = p[0];
+            d[len / 2] = p[len / 2];
+            d[len - 1] = p[len - 1];
+        } else if (len > 16) {
+            memcpy(d, p, len);
+        }
+        s->size += len;
+        return 0;
+    }
+    return dbuf_put(s, data, len);
+}
 static inline int dbuf_put_u16(DynBuf *s, uint16_t val)
 {
     if (likely(s->size + 2 <= s->allocated_size)) {
