@@ -23954,12 +23954,14 @@ static int find_var(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
     int i;
 
     if (fd->vars_htab) {
-        /* dasher: upstream scanned every variable when the first one of
-           that name in the table was in a block. All of them are on the
-           probe sequence of the name: take the last at function level,
-           as the scan below does. (This replaces find_var_htab.) */
+        /* dasher: the first variable of that name in the table is
+           returned if it is at function level, as upstream did
+           (find_var_htab). Otherwise upstream scanned every variable for
+           the last one at function level; all variables of the name are
+           on its probe sequence, so look only there. */
         uint32_t h, j, m, *p;
         int best = -1;
+        bool first = true;
         h = hash_atom(name);
         j = 1;
         m = fd->var_count + fd->var_count/5;
@@ -23969,9 +23971,15 @@ static int find_var(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
             if (*p == UINT32_MAX)
                 break;
             vd = &fd->vars[*p];
-            if (vd->var_name == name && vd->scope_level == 0 &&
-                (int)*p > best)
-                best = *p;
+            if (vd->var_name == name) {
+                if (vd->scope_level == 0) {
+                    if (first)
+                        return *p;
+                    if ((int)*p > best)
+                        best = *p;
+                }
+                first = false;
+            }
             h += j;
             j += 1;
         }
