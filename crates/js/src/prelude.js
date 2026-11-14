@@ -258,6 +258,78 @@
   const empty = () => [];
   const noop = () => undefined;
 
+  // Navigation Timing Level 1, which pages still read for their own load
+  // metrics: https://www.w3.org/TR/navigation-timing/
+  //
+  // The document's stages are timed (native.loader.milestones). The network
+  // is not: every stage up to the response reports the navigation start, and
+  // nothing was unloaded or redirected.
+
+  const TIMING_KEY = {};
+  const navigationStart = Math.floor(timeOrigin);
+  const milestone = (index) => {
+    const at = native.loader.milestones()[index];
+    return at < 0 ? 0 : Math.floor(timeOrigin + at);
+  };
+  const TIMING = {
+    navigationStart: () => navigationStart,
+    unloadEventStart: () => 0,
+    unloadEventEnd: () => 0,
+    redirectStart: () => 0,
+    redirectEnd: () => 0,
+    fetchStart: () => navigationStart,
+    domainLookupStart: () => navigationStart,
+    domainLookupEnd: () => navigationStart,
+    connectStart: () => navigationStart,
+    connectEnd: () => navigationStart,
+    secureConnectionStart: () => (globalThis.location?.protocol === 'https:' ? navigationStart : 0),
+    requestStart: () => navigationStart,
+    responseStart: () => navigationStart,
+    responseEnd: () => navigationStart,
+    domLoading: () => navigationStart,
+    domInteractive: () => milestone(0),
+    domContentLoadedEventStart: () => milestone(1),
+    domContentLoadedEventEnd: () => milestone(2),
+    domComplete: () => milestone(3),
+    loadEventStart: () => milestone(4),
+    loadEventEnd: () => milestone(5),
+  };
+  const timingInterface = (name, attributes, constants) => {
+    const ctor = {
+      [name]: function (key) {
+        if (key !== TIMING_KEY) throw new TypeError('Illegal constructor');
+      },
+    }[name];
+    const proto = ctor.prototype;
+    for (const key of Object.keys(attributes)) {
+      Object.defineProperty(proto, key, { get: attributes[key], enumerable: true, configurable: true });
+    }
+    Object.defineProperty(proto, 'toJSON', {
+      value: function toJSON() {
+        const json = {};
+        for (const key of Object.keys(attributes)) json[key] = this[key];
+        return json;
+      },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    for (const key of Object.keys(constants)) {
+      const constant = { value: constants[key], enumerable: true };
+      Object.defineProperty(ctor, key, constant);
+      Object.defineProperty(proto, key, constant);
+    }
+    Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true });
+    Object.defineProperty(globalThis, name, { value: ctor, writable: true, configurable: true });
+    return new ctor(TIMING_KEY);
+  };
+  const timing = timingInterface('PerformanceTiming', TIMING, {});
+  const navigation = timingInterface(
+    'PerformanceNavigation',
+    { type: () => 0, redirectCount: () => 0 },
+    { TYPE_NAVIGATE: 0, TYPE_RELOAD: 1, TYPE_BACK_FORWARD: 2, TYPE_RESERVED: 255 },
+  );
+
   globalThis.performance = {
     now() {
       return pageNow();
@@ -265,8 +337,14 @@
     get timeOrigin() {
       return timeOrigin;
     },
+    get timing() {
+      return timing;
+    },
+    get navigation() {
+      return navigation;
+    },
     toJSON() {
-      return { timeOrigin };
+      return { timeOrigin, timing: timing.toJSON(), navigation: navigation.toJSON() };
     },
     mark: noop,
     measure: noop,

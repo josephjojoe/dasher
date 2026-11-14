@@ -56,6 +56,93 @@ fn ready_state_changes_fire_readystatechange() {
     );
 }
 
+/// `performance.timing` (Navigation Timing Level 1) reports when the
+/// document reached each stage, as epoch milliseconds, and 0 for a stage
+/// not reached yet.
+#[test]
+fn performance_timing_follows_the_lifecycle() {
+    use std::time::Duration;
+    let js = page("");
+    let stages = "['domInteractive', 'domContentLoadedEventStart', 'domContentLoadedEventEnd',
+                   'domComplete', 'loadEventStart', 'loadEventEnd']
+                    .map(k => performance.timing[k] && performance.timing[k] - performance.timing.navigationStart)";
+    assert_eq!(
+        json(
+            &js,
+            "performance.timing.navigationStart === Math.floor(performance.timeOrigin)"
+        ),
+        "true"
+    );
+    js.set_ready_state(ReadyState::Loading);
+    assert_eq!(json(&js, stages), "[0,0,0,0,0,0]");
+    assert_eq!(
+        json(
+            &js,
+            "['fetchStart', 'domainLookupStart', 'domainLookupEnd', 'connectStart', 'connectEnd',
+              'requestStart', 'responseStart', 'responseEnd', 'domLoading']
+               .every(k => performance.timing[k] === performance.timing.navigationStart)"
+        ),
+        "true"
+    );
+    assert_eq!(
+        json(
+            &js,
+            "['unloadEventStart', 'unloadEventEnd', 'redirectStart', 'redirectEnd']
+               .map(k => performance.timing[k])"
+        ),
+        "[0,0,0,0]"
+    );
+
+    js.advance(Duration::from_millis(30)).unwrap();
+    js.set_ready_state(ReadyState::Interactive);
+    js.advance(Duration::from_millis(10)).unwrap();
+    // The times are taken whether or not anything listens.
+    js.fire_event(EventTarget::Document, "DOMContentLoaded", true, false);
+    assert_eq!(json(&js, stages), "[30,40,40,0,0,0]");
+    js.advance(Duration::from_millis(60)).unwrap();
+    js.set_ready_state(ReadyState::Complete);
+    // What a page's load handler sees: the event has started, not ended.
+    js.run_script(
+        "addEventListener('load', () => {
+           globalThis.during = [performance.timing.loadEventStart - performance.timing.navigationStart,
+                                performance.timing.loadEventEnd];
+         });",
+        "test.js",
+    )
+    .unwrap();
+    js.fire_event(EventTarget::Window, "load", false, false);
+    assert_eq!(json(&js, "during"), "[100,0]");
+    assert_eq!(json(&js, stages), "[30,40,40,100,100,100]");
+    // A load event fired at an element is not the document's.
+    js.advance(Duration::from_millis(5)).unwrap();
+    js.fire_event(EventTarget::Document, "load", false, false);
+    assert_eq!(json(&js, stages), "[30,40,40,100,100,100]");
+
+    // The shape scripts check.
+    assert_eq!(
+        json(
+            &js,
+            "[performance.timing === performance.timing, performance.timing instanceof PerformanceTiming,
+              String(performance.timing), Object.keys(performance.timing.toJSON()).length,
+              performance.toJSON().timing.domComplete === performance.timing.domComplete,
+              'navigationStart' in PerformanceTiming.prototype,
+              (() => { try { new PerformanceTiming(); } catch (e) { return e.message; } })()]"
+        ),
+        r#"[true,true,"[object PerformanceTiming]",21,true,true,"Illegal constructor"]"#
+    );
+    assert_eq!(
+        json(
+            &js,
+            "[performance.navigation.type, performance.navigation.redirectCount,
+              performance.navigation instanceof PerformanceNavigation, String(performance.navigation),
+              PerformanceNavigation.TYPE_NAVIGATE, PerformanceNavigation.TYPE_RELOAD,
+              PerformanceNavigation.TYPE_BACK_FORWARD, PerformanceNavigation.TYPE_RESERVED,
+              performance.navigation.TYPE_RELOAD, JSON.stringify(performance.navigation)]"
+        ),
+        r#"[0,0,true,"[object PerformanceNavigation]",0,1,2,255,1,"{\"type\":0,\"redirectCount\":0}"]"#
+    );
+}
+
 #[test]
 fn lifecycle_events_reach_the_right_targets() {
     let js = page("<p id=p>");

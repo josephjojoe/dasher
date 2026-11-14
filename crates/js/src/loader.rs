@@ -120,6 +120,33 @@ pub(crate) struct LoaderState {
     write_mode: Cell<DocumentWrite>,
     written: RefCell<String>,
     ready_state: Cell<Option<ReadyState>>,
+    /// When the document reached each [`Milestone`], in page time: what
+    /// `performance.timing` reports.
+    milestones: Cell<[Option<f64>; 6]>,
+}
+
+/// A stage of loading that `performance.timing` gives a time for.
+#[derive(Clone, Copy)]
+enum Milestone {
+    Interactive,
+    ContentLoadedStart,
+    ContentLoadedEnd,
+    Complete,
+    LoadStart,
+    LoadEnd,
+}
+
+impl LoaderState {
+    /// Notes that the document reached `milestone` at `now` (page time, in
+    /// milliseconds), unless it already had.
+    fn reached(&self, milestone: Milestone, now: f64) {
+        let mut times = self.milestones.get();
+        let slot = &mut times[milestone as usize];
+        if slot.is_none() {
+            *slot = Some(now);
+            self.milestones.set(times);
+        }
+    }
 }
 
 /// The JS functions the loader calls (see `loader.js`).
@@ -205,10 +232,29 @@ pub(crate) fn install<'js>(
             }
         })?,
     )?;
+    // The page time of each `Milestone`, in order; -1 for one not reached.
+    let s = Rc::clone(shared);
+    loader.set(
+        "milestones",
+        Function::new(ctx.clone(), move || {
+            s.loader
+                .milestones
+                .get()
+                .map(|t| t.unwrap_or(-1.0))
+                .to_vec()
+        })?,
+    )?;
     native.set("loader", loader)
 }
 
 impl JsRuntime {
+    /// Notes that the document reached `milestone` now.
+    fn reached(&self, milestone: Milestone) {
+        let shared = self.shared();
+        let now = shared.event_loop.clock.now().as_secs_f64() * 1000.0;
+        shared.loader.reached(milestone, now);
+    }
+
     /// `document.readyState`. Without a page loader the document counts as
     /// complete.
     pub fn ready_state(&self) -> ReadyState {
@@ -222,6 +268,11 @@ impl JsRuntime {
     /// Sets `document.readyState` and, if it changed, fires
     /// `readystatechange` at the document, as a task.
     pub fn set_ready_state(&self, state: ReadyState) {
+        match state {
+            ReadyState::Loading => {}
+            ReadyState::Interactive => self.reached(Milestone::Interactive),
+            ReadyState::Complete => self.reached(Milestone::Complete),
+        }
         self.shared().loader.ready_state.set(Some(state));
         let _ = self.run_task(|ctx| {
             LoaderHooks::get(ctx)?
@@ -292,7 +343,22 @@ impl JsRuntime {
             EventTarget::Document => HostTarget::Node(self.shared().dom.doc().root()),
             EventTarget::Node(id) => HostTarget::Node(id),
         };
+        // The document's own `DOMContentLoaded` and `load` are timed for
+        // `performance.timing`, heard or not.
+        let timed = match (target, event) {
+            (HostTarget::Node(id), "DOMContentLoaded") if id == self.shared().dom.doc().root() => {
+                Some((Milestone::ContentLoadedStart, Milestone::ContentLoadedEnd))
+            }
+            (HostTarget::Window, "load") => Some((Milestone::LoadStart, Milestone::LoadEnd)),
+            _ => None,
+        };
+        if let Some((start, _)) = timed {
+            self.reached(start);
+        }
         if !self.with(|ctx| events::reaches(&ctx, target, event)) {
+            if let Some((_, end)) = timed {
+                self.reached(end);
+            }
             return true;
         }
         let mut not_canceled = true;
@@ -309,6 +375,9 @@ impl JsRuntime {
             };
             Ok(())
         });
+        if let Some((_, end)) = timed {
+            self.reached(end);
+        }
         self.perform_microtask_checkpoint();
         not_canceled
     }
