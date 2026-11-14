@@ -450,16 +450,42 @@ int dbuf_put(DynBuf *s, const void *data, size_t len);
 int dbuf_put_self(DynBuf *s, size_t offset, size_t len);
 int dbuf_putc(DynBuf *s, uint8_t c);
 int dbuf_putstr(DynBuf *s, const char *str);
+/* dasher: these write in place when there is room, which is nearly
+   always, instead of calling dbuf_put() and its memcpy() for a few
+   bytes. The compiler emits bytecode through them. */
+static inline int dbuf_putc_inline(DynBuf *s, uint8_t c)
+{
+    if (likely(s->size < s->allocated_size)) {
+        s->buf[s->size++] = c;
+        return 0;
+    }
+    return dbuf_putc(s, c);
+}
 static inline int dbuf_put_u16(DynBuf *s, uint16_t val)
 {
+    if (likely(s->size + 2 <= s->allocated_size)) {
+        memcpy(s->buf + s->size, &val, 2);
+        s->size += 2;
+        return 0;
+    }
     return dbuf_put(s, (uint8_t *)&val, 2);
 }
 static inline int dbuf_put_u32(DynBuf *s, uint32_t val)
 {
+    if (likely(s->size + 4 <= s->allocated_size)) {
+        memcpy(s->buf + s->size, &val, 4);
+        s->size += 4;
+        return 0;
+    }
     return dbuf_put(s, (uint8_t *)&val, 4);
 }
 static inline int dbuf_put_u64(DynBuf *s, uint64_t val)
 {
+    if (likely(s->size + 8 <= s->allocated_size)) {
+        memcpy(s->buf + s->size, &val, 8);
+        s->size += 8;
+        return 0;
+    }
     return dbuf_put(s, (uint8_t *)&val, 8);
 }
 int JS_PRINTF_FORMAT_ATTR(2, 3) dbuf_printf(DynBuf *s, JS_PRINTF_FORMAT const char *fmt, ...);

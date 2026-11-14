@@ -22562,7 +22562,7 @@ static bool js_is_live_code(JSParseState *s) {
 
 static void emit_u8(JSParseState *s, uint8_t val)
 {
-    dbuf_putc(&s->cur_func->byte_code, val);
+    dbuf_putc_inline(&s->cur_func->byte_code, val);
 }
 
 static void emit_u16(JSParseState *s, uint16_t val)
@@ -22580,7 +22580,7 @@ static void emit_source_loc(JSParseState *s)
     JSFunctionDef *fd = s->cur_func;
     DynBuf *bc = &fd->byte_code;
 
-    dbuf_putc(bc, OP_source_loc);
+    dbuf_putc_inline(bc, OP_source_loc);
     dbuf_put_u32(bc, s->token.line_num);
     dbuf_put_u32(bc, s->token.col_num);
 }
@@ -22591,7 +22591,7 @@ static void emit_op(JSParseState *s, uint8_t val)
     DynBuf *bc = &fd->byte_code;
 
     fd->last_opcode_pos = bc->size;
-    dbuf_putc(bc, val);
+    dbuf_putc_inline(bc, val);
 }
 
 static void emit_atom(JSParseState *s, JSAtom name)
