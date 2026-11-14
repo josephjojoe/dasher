@@ -1,0 +1,26 @@
+<!doctype html>
+<title>Waits for a script</title>
+<p id="status">waiting</p>
+<script>
+  // A scheduler that keeps coming back while it waits for a script the
+  // page inserted, the way React's does while a lazy chunk loads: one
+  // MessageChannel task after another, each computing for 2 ms.
+  const channel = new MessageChannel();
+  let slices = 0;
+  channel.port1.onmessage = () => {
+    slices++;
+    const end = performance.now() + 2;
+    while (performance.now() < end) {}
+    if (window.late === undefined) {
+      channel.port2.postMessage(null);
+    } else {
+      document.getElementById('status').textContent = 'loaded';
+    }
+  };
+  addEventListener('load', () => {
+    const script = document.createElement('script');
+    script.src = '/late.js';
+    document.head.appendChild(script);
+    channel.port2.postMessage(null);
+  });
+</script>

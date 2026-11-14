@@ -12,6 +12,14 @@ use crate::runtime::JsRuntime;
 /// same thread (such as the network requests a page is waiting on) progress.
 const TASKS_PER_YIELD: usize = 64;
 
+/// The longest tasks run without a yield, however few they are. A page whose
+/// tasks take a millisecond each, as a framework's render slices do, would
+/// otherwise never reach [`TASKS_PER_YIELD`] before the caller's `until`,
+/// and a caller that comes straight back for more (as settling does) would
+/// never let the script that page is waiting for be fetched. So the time is
+/// kept across calls.
+const YIELD_INTERVAL: Duration = Duration::from_millis(1);
+
 /// Bounds for [`JsRuntime::run`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunLimits {
@@ -119,8 +127,10 @@ impl JsRuntime {
                 if limits.until.is_some_and(|until| clock.now() > until) {
                     return RunOutcome::ReachedTime;
                 }
-                if ran % TASKS_PER_YIELD == 0 {
+                if ran % TASKS_PER_YIELD == 0 || state.yielded_at.get().elapsed() >= YIELD_INTERVAL
+                {
                     tokio::task::yield_now().await;
+                    state.yielded_at.set(Instant::now());
                 }
             }
 
@@ -177,6 +187,7 @@ impl JsRuntime {
                 () = sleep_for(wake_at.map(|at| at.saturating_sub(now))) => {}
                 () = sleep_until(deadline) => {}
             }
+            state.yielded_at.set(Instant::now());
         }
     }
 }

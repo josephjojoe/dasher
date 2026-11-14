@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rquickjs::{Ctx, Function, JsLifetime, Object, Persistent};
 
@@ -85,6 +85,8 @@ pub(crate) struct LoopState {
     timer_nesting: Cell<u32>,
     /// A scheduled declarative refresh: when it is due and where it goes.
     pub(crate) refresh: RefCell<Option<(Duration, String)>>,
+    /// When [`JsRuntime::run`] last gave the async executor its turn.
+    pub(crate) yielded_at: Cell<Instant>,
 }
 
 impl LoopState {
@@ -97,6 +99,7 @@ impl LoopState {
             frames: RefCell::default(),
             timer_nesting: Cell::new(0),
             refresh: RefCell::new(None),
+            yielded_at: Cell::new(Instant::now()),
         }
     }
 

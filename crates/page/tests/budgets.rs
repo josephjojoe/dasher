@@ -328,3 +328,22 @@ async fn a_page_busy_running_tasks_is_not_quiet() {
         r#""rendered""#
     );
 }
+
+#[tokio::test]
+async fn a_page_busy_waiting_for_a_script_gets_it() {
+    let server = server();
+    // Without the script the page would compute until this ran out.
+    let budget = WorkBudget {
+        cpu: Some(Duration::from_secs(2)),
+        ..WorkBudget::default()
+    };
+    let mut page = load_with(&server, "/budget/waits-for-script.html", budget).await;
+    assert_eq!(
+        page.settle(&SettleOptions::default()).await.unwrap(),
+        SettleOutcome::Settled
+    );
+    assert_eq!(
+        json(&page, "document.getElementById('status').textContent"),
+        r#""loaded""#
+    );
+}

@@ -1,5 +1,7 @@
 //! Driving the event loop asynchronously.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dasher_js::{
@@ -91,6 +93,39 @@ async fn until_bounds_page_time_and_leaves_later_work() {
         RunOutcome::ReachedTime
     );
     assert!(started.elapsed() >= ms(40));
+}
+
+#[tokio::test]
+async fn back_to_back_runs_of_slow_tasks_let_other_futures_progress() {
+    let js = runtime(ClockMode::Virtual);
+    // A scheduler that reposts itself forever, each task computing for 2 ms:
+    // too few tasks in a run for the count of them to bring a yield.
+    js.run_script(
+        r#"
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => {
+            const end = performance.now() + 2;
+            while (performance.now() < end) {}
+            channel.port2.postMessage(null);
+        };
+        channel.port2.postMessage(null);
+        "#,
+        "a.js",
+    )
+    .unwrap();
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ran);
+    let other = tokio::spawn(async move { flag.store(true, Ordering::Relaxed) });
+    // As settling does: one stretch of page time after another, with
+    // nothing else awaited in between.
+    for _ in 0..4 {
+        assert_eq!(
+            js.run(RunLimits::until(js.now() + ms(50))).await,
+            RunOutcome::ReachedTime
+        );
+    }
+    assert!(ran.load(Ordering::Relaxed), "the other task never ran");
+    other.await.unwrap();
 }
 
 #[tokio::test]
