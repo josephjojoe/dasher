@@ -871,6 +871,7 @@ typedef struct JSForInIterator {
 typedef struct JSRegExp {
     JSString *pattern;
     JSString *bytecode; /* also contains the flags */
+    void *search_plan; /* dasher: for the bytecode, see lre_exec_plan() */
 } JSRegExp;
 
 typedef struct JSProxyData {
@@ -5251,6 +5252,7 @@ static JSValue JS_NewObjectFromShape(JSContext *ctx, JSShape *sh, JSClassID clas
     case JS_CLASS_REGEXP:
         p->u.regexp.pattern = NULL;
         p->u.regexp.bytecode = NULL;
+        p->u.regexp.search_plan = NULL;
         goto set_exotic;
     default:
     set_exotic:
@@ -47178,6 +47180,7 @@ static void js_regexp_finalizer(JSRuntime *rt, JSValueConst val)
 {
     JSObject *p = JS_VALUE_GET_OBJ(val);
     JSRegExp *re = &p->u.regexp;
+    lre_free_plan(re->search_plan); /* dasher */
     JS_FreeValueRT(rt, JS_MKPTR(JS_TAG_STRING, re->bytecode));
     JS_FreeValueRT(rt, JS_MKPTR(JS_TAG_STRING, re->pattern));
 }
@@ -47493,6 +47496,9 @@ static JSValue js_regexp_compile(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeValue(ctx, JS_MKPTR(JS_TAG_STRING, re->pattern));
     JS_FreeValue(ctx, JS_MKPTR(JS_TAG_STRING, re->bytecode));
+    /* dasher: the plan was of the old bytecode */
+    lre_free_plan(re->search_plan);
+    re->search_plan = NULL;
     re->pattern = JS_VALUE_GET_STRING(pattern);
     re->bytecode = JS_VALUE_GET_STRING(bc);
     if (JS_SetProperty(ctx, this_val, JS_ATOM_lastIndex,
@@ -47976,9 +47982,9 @@ static int js_regexp_run(JSContext *ctx, JSValueConst rx, JSRegExp *re,
     if (last_index > str->len) {
         rc = 2;
     } else {
-        rc = lre_exec(m->capture, re_bytecode,
-                      str_buf, last_index, str->len,
-                      shift, ctx);
+        rc = lre_exec_plan(m->capture, re_bytecode,
+                           str_buf, last_index, str->len,
+                           shift, ctx, &re->search_plan);
     }
     if (rc == 1) {
         if (re_flags & (LRE_FLAG_GLOBAL | LRE_FLAG_STICKY)) {
@@ -48964,13 +48970,14 @@ exception:
 /* dasher: lre_exec() at `index` of `sp`; throws for what it returns below
    zero */
 static int js_regexp_exec_at(JSContext *ctx, JSRegExpMatch *m,
-                             uint8_t *re_bytecode, JSString *sp, int index)
+                             JSRegExp *re, JSString *sp, int index)
 {
+    uint8_t *re_bytecode = str8(re->bytecode);
     int rc;
 
     m->re_bytecode = re_bytecode;
-    rc = lre_exec(m->capture, re_bytecode, str8(sp), index, sp->len,
-                  sp->is_wide_char, ctx);
+    rc = lre_exec_plan(m->capture, re_bytecode, str8(sp), index, sp->len,
+                       sp->is_wide_char, ctx, &re->search_plan);
     if (rc >= 0)
         return rc;
     if (rc == LRE_RET_TIMEOUT)
@@ -49017,7 +49024,7 @@ static JSValue js_regexp_split_fast(JSContext *ctx, JSRegExp *re,
         goto done;
     p = q = 0;
     if (size == 0) {
-        rc = js_regexp_exec_at(ctx, &m, re_bytecode, sp, 0);
+        rc = js_regexp_exec_at(ctx, &m, re, sp, 0);
         if (rc < 0)
             goto exception;
         if (rc == 0)
@@ -49025,7 +49032,7 @@ static JSValue js_regexp_split_fast(JSContext *ctx, JSRegExp *re,
         goto done;
     }
     while (q < size) {
-        rc = js_regexp_exec_at(ctx, &m, re_bytecode, sp, q);
+        rc = js_regexp_exec_at(ctx, &m, re, sp, q);
         if (rc < 0)
             goto exception;
         if (rc == 0) {
@@ -49101,7 +49108,7 @@ static JSValue js_regexp_search_fast(JSContext *ctx, JSRegExp *re,
         if (!m.capture)
             return JS_EXCEPTION;
     }
-    rc = js_regexp_exec_at(ctx, &m, str8(re->bytecode), sp, 0);
+    rc = js_regexp_exec_at(ctx, &m, re, sp, 0);
     if (rc == 1)
         js_regexp_positions(pos, &m, sp, 1);
     js_regexp_match_free(ctx, &m);

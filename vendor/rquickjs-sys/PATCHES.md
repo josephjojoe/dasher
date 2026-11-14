@@ -173,12 +173,14 @@ every position and starting the pattern at each one.
 `lre_set_search_hook` lets the embedder run that loop. When a hook is
 set, `lre_exec` passes it the pattern's bytecode (after the loop) and the
 subject, and the hook calls `lre_search_try` at each position it wants
-tried. The matcher is not changed. dasher's hook is
-`crates/js/src/regexp.rs`: it reads the start of the bytecode to find the
-characters a match can begin with, or that the pattern begins with `^`,
-and tries only the positions that qualify. A static assertion beside the
-hook names every opcode that module reads, so an engine update that
-renumbers them does not compile.
+tried. dasher's hook is `crates/js/src/regexp.rs`: it reads the bytecode
+to find the characters a match can begin with, or that the pattern begins
+with `^`, and tries only the positions that qualify. Since DAS-38 it also
+rules out positions with a character every match needs, runs of a leading
+repeat and the first two characters (see "RegExp methods, the matcher and
+the search plan at V8's speed" below). A static assertion beside the hook
+names every opcode that module reads, so an engine update that renumbers
+them does not compile.
 
 Measured: three patterns tested 90,000 times each against a
 110-character user-agent string (a literal near its end, a literal that
@@ -294,4 +296,95 @@ once, as a function in parentheses is. Within noise on the 16 pages
 properties and text, stack positions and early errors against what the
 engine gives with every function compiled with its script. test262 (tc39
 `main` of 2026-11-13, 41,841 tests) fails the same tests either way.
+
+## RegExp methods, the matcher and the search plan at V8's speed
+
+Pages call regexps millions of times on short strings (a type check on
+`Object.prototype.toString`, a CSS name, a user agent, a cookie) and a few
+times on whole page texts (tracking scripts looking for email addresses
+and keywords on a timer). Upstream spent most of the first in the RegExp
+methods around the matcher and most of the second retrying patterns at
+positions that could not match. Every change below is checked by
+`lre_dasher_fast`; `lre_set_fast_paths(false)` (with the search hook
+removed: `dasher_js::regexp::uninstall()`) gives the engine's own way, and
+`crates/js/tests/regexp.rs` runs its fixtures both ways and expects the
+same answers.
+
+`quickjs/quickjs.c`, the methods:
+
+- **A pristine RegExp skips the spec's steps.** `replace`, `match` and
+  `split` read `flags`, which calls eight getters, look `exec` up and call
+  it, and read each match back from an array built for the purpose;
+  `split` compiles a second, sticky regexp on every call and `test`
+  builds a result to drop it. While nothing those steps look at has been
+  changed, `js_regexp_pristine()` says so, and `test`, `replace`, `match`,
+  `split` and `search` run the matcher directly (`js_regexp_run()`, the
+  matching part of `exec`) and build only what they return. Pristine
+  means: the RegExp's only own property is `lastIndex`, writable and an
+  integer; its prototype is `RegExp.prototype`; and the slots the method
+  reads (`exec`, `constructor`, `flags` and the eight flag getters,
+  `RegExp[Symbol.species]`) hold the functions the engine put there. The
+  context notes those slots when it is made and keeps a reference to each
+  function (`js_regexp_note_slots()`), so a slot counts as unchanged when
+  it has the same name, kind and function: three loads and compares. The
+  spec's order of effects is kept: arguments are converted before the
+  check, as the spec converts them before anything it would skip, a
+  `split` limit that is not a number goes the spec's way (its `valueOf`
+  runs after the spec has made its splitter), and `replace` with named
+  groups goes the spec's way. A replacement function still sees every
+  match found before it is first called.
+- **`exec` builds its result from a known shape** (length, `groups`,
+  `index`, `input`), noted from the first one built property by property,
+  as closures and `arguments` are above; RegExp objects themselves too.
+- **`new RegExp(source, flags)` reuses bytecode.** The last 32 patterns
+  compiled are kept with their bytecode, which nothing changes once made,
+  keyed by source and flags (`js_regexp_cache_slot()`).
+
+`quickjs/libregexp.c`, the matcher:
+
+- **A pattern that is only characters** (`/foo/`, `/\./g`, `/iphone/i`)
+  is a string search: `lre_exec_literal()` steps through the positions as
+  the search loop would and compares as the char opcodes do, with
+  `memchr` for the first character of an 8-bit subject, and never starts
+  the interpreter.
+- **A greedy repeat of one character test** (`\d+`, `\s*`, `[^"]*`, `.*`)
+  runs as a loop in `REOP_simple_greedy_quant` instead of a call of the
+  interpreter per character.
+- **Backing off skips what fails at once.** When such a repeat backs off,
+  lengths at which the rest of the pattern fails its first opcode (a
+  character, a class or `$`) are passed over without starting it; an
+  alternation saves no state for a branch that fails at its first test,
+  and leaves at once a branch that does (`re_may_continue()`; noting a
+  group's start or end before the test changes nothing).
+- The backtracking stack starts in a buffer on the C stack, and ASCII case
+  folding is inline (`re_canonicalize()`).
+
+`crates/js/src/regexp.rs`, the search hook, reads each pattern's bytecode
+once into a plan, cheaply at first and in full once the pattern has been
+searched four times:
+
+- **A character every match needs.** The rarest one-character test that
+  every way through the pattern passes (it dominates the pattern's
+  `match`) gives a set of characters. A search ends when none is left at
+  or after the position it would try next: the `@` of an email pattern
+  over a page's text is one `memchr`.
+- **Runs of a leading repeat.** When a pattern starts with an unbounded
+  greedy repeat of one test (`[a-z0-9._%+-]+@...`) and fails at a position,
+  it fails at every later position in the same run: from there the repeat
+  can only end where it already ended, and nothing after it sees where the
+  match began. The search goes on after the run, instead of retrying each
+  suffix of a word.
+- **The first two characters.** For each test a match can begin with, the
+  characters that can follow it: `\b(?:casino|viagra|...)\b` is tried at
+  `ca` and `vi`, not at every `c` and `v`.
+
+Catastrophic patterns still stop at the page's deadline: the new loops
+poll for it (the repeat loop every 4,096 characters) or are bounded by the
+subject's length, and `crates/js/tests/limits.rs` runs nested repeats
+through each path against a 50 ms deadline.
+
+Measured on an AWS Graviton4 (aarch64), against Node 22 `--jitless`
+(V8's regexp interpreter):
+
+MEASUREMENTS
 

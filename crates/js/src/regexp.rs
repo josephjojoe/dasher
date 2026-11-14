@@ -16,22 +16,28 @@
 //! engine's matcher only at the positions that qualify. What matches, and
 //! what each group captures, is decided by the engine's matcher as before.
 //! Only the positions it is asked about change, and a position is left out
-//! only when the pattern cannot match there. Three things rule positions
-//! out, all read from the bytecode once per pattern into a [`Plan`]:
+//! only when the pattern cannot match there. Four things rule positions
+//! out, all read from the bytecode into a [`Plan`] (the first two the
+//! first time a pattern is searched with, the rest once it has been
+//! searched with a few times):
 //!
 //! - the characters a match can start with ([`Start`]), an over-estimate,
 //!   never an under-estimate;
-//! - a set of characters every match contains at least one of
-//!   ([`Plan::required`]): once none is left in the rest of the subject,
-//!   no later position can match, which ends most searches over page text
-//!   for the `@` of an email address at once;
 //! - for a pattern that starts with an unbounded greedy repeat of one
 //!   class, such as `[a-z0-9._%+-]+@…` ([`Plan::run`]): when the pattern
 //!   fails at a position, it fails at every later position in the same run
 //!   of class characters, because from there the repeat can only end at
 //!   places it already ended at, and the rest of the pattern does not see
 //!   where the match began. The search goes on after the run instead of
-//!   retrying each suffix of a word, which is quadratic in its length.
+//!   retrying each suffix of a word, which is quadratic in its length;
+//! - a set of characters every match contains at least one of
+//!   ([`Plan::required`]): once none is left in the rest of the subject,
+//!   no later position can match, which ends most searches over page text
+//!   for the `@` of an email address at once;
+//! - the first two characters ([`Plan::pairs`]): for each test a match can
+//!   begin with, the characters that can follow it, so that
+//!   `\b(?:casino|viagra)\b` is tried at `ca` and `vi` rather than at
+//!   every `c` and `v`.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_int, c_void};
@@ -39,6 +45,7 @@ use std::rc::Rc;
 
 type Hook = unsafe extern "C" fn(
     *mut c_void,
+    *mut *mut c_void,
     *const u8,
     usize,
     *const u8,
@@ -48,8 +55,10 @@ type Hook = unsafe extern "C" fn(
     c_int,
 ) -> c_int;
 
+type FreePlan = unsafe extern "C" fn(*mut c_void);
+
 unsafe extern "C" {
-    fn lre_set_search_hook(hook: Option<Hook>);
+    fn lre_set_search_hook(hook: Option<Hook>, free_plan: Option<FreePlan>);
     fn lre_search_try(search: *mut c_void, index: c_int) -> c_int;
     fn lre_canonicalize(c: u32, is_unicode: bool) -> c_int;
     fn lre_set_fast_paths(on: bool);
@@ -64,7 +73,7 @@ pub(crate) fn install() {
     // and the engine reads the pointer only when it runs a regexp. The
     // flag is a plain global the engine reads.
     unsafe {
-        lre_set_search_hook(Some(search));
+        lre_set_search_hook(Some(search), Some(free_plan));
         lre_set_fast_paths(true);
     }
 }
@@ -76,7 +85,7 @@ pub(crate) fn install() {
 pub fn uninstall() {
     // SAFETY: a null hook and the flag off are the engine's default.
     unsafe {
-        lre_set_search_hook(None);
+        lre_set_search_hook(None, None);
         lre_set_fast_paths(false);
     }
 }
@@ -145,6 +154,8 @@ struct Plan {
     /// The pairs of characters a match can begin with, for a pattern that
     /// starts with [`Start::Chars`] and needs at least two characters.
     pairs: Option<Vec<Pair>>,
+    /// Whether this is [`analyse`]'s plan, not [`analyse_quick`]'s.
+    full: bool,
 }
 
 /// The most one-character tests a match can begin with that
@@ -388,6 +399,7 @@ fn analyse(code: &[u8], flags: c_int) -> Plan {
         required,
         run,
         pairs,
+        full: true,
     }
 }
 
@@ -401,6 +413,7 @@ fn analyse_quick(code: &[u8], flags: c_int) -> Plan {
         required: None,
         run,
         pairs: None,
+        full: false,
     }
 }
 
@@ -900,7 +913,11 @@ impl Subject<'_> {
 /// Runs a search. Called by `lre_exec` in place of the loop compiled in
 /// front of the pattern.
 ///
-/// `body` is the pattern's bytecode after that loop. `cbuf_type` is 0 for
+/// `plan` is null or where the RegExp being searched with keeps its
+/// pattern's plan, null until this stores one: a full [`Plan`], as an
+/// `Rc` turned into a pointer, which [`free_plan`] frees. A RegExp's plan
+/// is then found without [`plan_of`]'s lookup, which compares the whole
+/// bytecode. `body` is the pattern's bytecode after that loop. `cbuf_type` is 0 for
 /// a Latin-1 subject, 1 for UTF-16 and 2 for UTF-16 where surrogate pairs
 /// count as one character. The search starts at code unit `cindex` of
 /// `clen`. Returns what `lre_exec` returns: 1 for a match (the engine has
@@ -909,10 +926,12 @@ impl Subject<'_> {
 /// # Safety
 ///
 /// Only the engine calls this, with `search` its own state for
-/// `lre_search_try`, `body` valid for `body_len` bytes and `cbuf` valid
-/// for `clen` code units, aligned for them.
+/// `lre_search_try`, `plan` null or valid and holding null or what this
+/// stored there for the same bytecode, `body` valid for `body_len` bytes
+/// and `cbuf` valid for `clen` code units, aligned for them.
 unsafe extern "C" fn search(
     search: *mut c_void,
+    plan: *mut *mut c_void,
     body: *const u8,
     body_len: usize,
     cbuf: *const u8,
@@ -940,13 +959,36 @@ unsafe extern "C" fn search(
     SEARCHES.set(SEARCHES.get() + 1);
     #[cfg(test)]
     tests::LAST_CODE.with_borrow_mut(|last| *last = (code.to_vec(), flags));
-    let plan = plan_of(code, flags);
     let try_at = |at: usize| -> c_int {
         // SAFETY: `search` is the engine's, and `at` is within the subject
         // or at its end. It fits a `c_int` because `clen` did.
         unsafe { lre_search_try(search, at as c_int) }
     };
-    run(&plan, subject, from, flags, try_at)
+    // SAFETY: the caller's contract. A stored plan stays alive for the
+    // search: only finalizing or recompiling the RegExp frees it, and no
+    // script runs while it searches.
+    let kept = unsafe { plan.as_ref() }.map(|slot| slot.cast::<Plan>().cast_const());
+    if let Some(kept) = kept.filter(|kept| !kept.is_null()) {
+        // SAFETY: as above.
+        return run(unsafe { &*kept }, subject, from, flags, try_at);
+    }
+    let found = plan_of(code, flags);
+    if found.full && !plan.is_null() {
+        // SAFETY: as above; the slot is null.
+        unsafe { *plan = Rc::into_raw(Rc::clone(&found)).cast_mut().cast() };
+    }
+    run(&found, subject, from, flags, try_at)
+}
+
+/// Frees a plan [`search`] stored with a RegExp.
+///
+/// # Safety
+///
+/// Only the engine calls this, once for each plan stored, on the thread
+/// that stored it.
+unsafe extern "C" fn free_plan(plan: *mut c_void) {
+    // SAFETY: `plan` came from `Rc::into_raw` in `search`.
+    drop(unsafe { Rc::from_raw(plan.cast_const().cast::<Plan>()) });
 }
 
 /// The search loop: tries the pattern at each position `plan` allows, from
@@ -1210,6 +1252,7 @@ mod tests {
             required: None,
             run: false,
             pairs: None,
+            full: false,
         }
     }
 

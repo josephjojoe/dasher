@@ -174,6 +174,61 @@ bench("regexps", 2.5e4, function (n) {
   sink = x;
 });
 
+// Patterns and calls taken from recorded real pages (DAS-38): user-agent
+// sniffing, type checks, CSS name conversion, trimming, class lists,
+// email checks and cookie lookups, each on the short strings pages give
+// them. One op is the twelve calls.
+bench("regexps, page patterns", 1e4, function (n) {
+  const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+  const types = ["[object Object]", "[object Array]", "[object Function]"];
+  const mobile = /(iPhone|iPod|iPad).*AppleWebKit(?!.*Safari)/i;
+  const chrome = /Chrome\/(\d+)\.(\d+)/;
+  const bot = /bot|crawl|spider|slurp/i;
+  const type = /\[object (Boolean|Number|String|Function|Array|Date|RegExp)\]/;
+  const upper = /[A-Z]/g;
+  const vendor = /^(webkit|moz|ms|o)-/;
+  const trim = /^[\s﻿\xA0]+|[\s﻿\xA0]+$/g;
+  const space = /\s+/;
+  const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  let x = 0;
+  for (let i = 0; i < n; i++) {
+    x += mobile.test(ua) ? 1 : 0;
+    x += chrome.exec(ua)[1].length;
+    x += bot.test(ua) ? 1 : 0;
+    const m = type.exec(types[i % 3]);
+    x += m ? m[1].length : 0;
+    x += "backgroundColor".replace(upper, "-$&").length;
+    x += vendor.test("transform") ? 1 : 0;
+    x += "  some text  ".replace(trim, "").length;
+    x += "btn btn-primary  active".split(space).length;
+    x += email.test("first.last@example.com") ? 1 : 0;
+    x += /(^|; )session=([^;]*)/.exec("a=1; session=abc; b=2")[2].length;
+    x += new RegExp("(^|; )" + "theme" + "=([^;]*)").test("a=1; theme=dark") ? 1 : 0;
+    x += "a-b-c".split("-").length;
+  }
+  sink = x;
+});
+
+// Searches over page text, as tracking scripts run them on timers: an
+// email address, a list of keywords and runs of whitespace over 13 KB
+// with no address and no keyword in it. One op is the three searches.
+bench("regexps over page text", 20, function (n) {
+  const words = "the quick brown fox jumps over the lazy dog lorem ipsum dolor sit amet consectetur adipiscing elit".split(" ");
+  let text = "";
+  for (let i = 0; i < 2000; i++) text += words[(i * 7) % words.length] + (i % 13 == 0 ? ".\n" : " ");
+  text += "’";
+  const email = /[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+/g;
+  const keywords = /\b(?:casino|viagra|lottery|bitcoin|crypto|forex|payday|loans?)\b/gi;
+  const space = /\s+/g;
+  let x = 0;
+  for (let i = 0; i < n; i++) {
+    x += (text.match(email) || []).length;
+    x += (text.match(keywords) || []).length;
+    x += text.replace(space, " ").length;
+  }
+  sink = x;
+});
+
 bench("JSON", 3e4, function (n) {
   const o = { id: 1, name: "widget", tags: ["a", "b"], nested: { v: true, n: null, f: 1.5 } };
   for (let i = 0; i < n; i++) sink = JSON.parse(JSON.stringify(o));

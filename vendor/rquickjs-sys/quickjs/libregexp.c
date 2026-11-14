@@ -2732,12 +2732,16 @@ _Static_assert(REOP_char8 == 1 && REOP_char16 == 2 && REOP_char32 == 3 &&
                REOP_simple_greedy_quant == 29 && REOP_COUNT == 30,
                "regexp opcodes changed: update crates/js/src/regexp.rs");
 
-typedef int lre_search_hook_t(void *search, const uint8_t *body,
-                              size_t body_len, const uint8_t *cbuf,
-                              int cbuf_type, int cindex, int clen,
-                              int re_flags);
+typedef int lre_search_hook_t(void *search, void **plan,
+                              const uint8_t *body, size_t body_len,
+                              const uint8_t *cbuf, int cbuf_type, int cindex,
+                              int clen, int re_flags);
+typedef void lre_free_plan_t(void *plan);
 
 static lre_search_hook_t *lre_search_hook;
+/* What frees a hook's plans. Set with the hook but never cleared, so that
+   plans made before a test removes the hook are still freed. */
+static lre_free_plan_t *lre_plan_free;
 
 /* dasher: the fast paths in this file and in quickjs.c's RegExp methods
    check this, so a test can run the engine's own way beside them */
@@ -2748,9 +2752,20 @@ void lre_set_fast_paths(bool on)
     lre_dasher_fast = on;
 }
 
-void lre_set_search_hook(lre_search_hook_t *hook)
+/* `plan` is where lre_exec_plan()'s caller keeps the hook's plan of the
+   pattern (NULL from lre_exec()): the hook may store one there and use it
+   on later searches with the same pattern, and `free_plan` frees it. */
+void lre_set_search_hook(lre_search_hook_t *hook, lre_free_plan_t *free_plan)
 {
     lre_search_hook = hook;
+    if (free_plan)
+        lre_plan_free = free_plan;
+}
+
+void lre_free_plan(void *plan)
+{
+    if (plan && lre_plan_free)
+        lre_plan_free(plan);
 }
 
 typedef struct {
@@ -2862,6 +2877,14 @@ int lre_exec(uint8_t **capture,
              const uint8_t *bc_buf, const uint8_t *cbuf, int cindex, int clen,
              int cbuf_type, void *opaque)
 {
+    return lre_exec_plan(capture, bc_buf, cbuf, cindex, clen, cbuf_type,
+                         opaque, NULL);
+}
+
+int lre_exec_plan(uint8_t **capture,
+                  const uint8_t *bc_buf, const uint8_t *cbuf, int cindex,
+                  int clen, int cbuf_type, void *opaque, void **plan)
+{
     REExecContext s_s, *s = &s_s;
     int re_flags, i, alloca_size, ret;
     StackInt *stack_buf;
@@ -2932,7 +2955,7 @@ int lre_exec(uint8_t **capture,
             get_u32(pc + 1) == 6 && pc[5] == REOP_any &&
             pc[6] == REOP_goto && get_u32(pc + 7) == (uint32_t)-11) {
             LRESearch t = { s, capture, stack_buf, pc + 11 };
-            ret = lre_search_hook(&t, pc + 11, bc_len - 11, cbuf,
+            ret = lre_search_hook(&t, plan, pc + 11, bc_len - 11, cbuf,
                                   s->cbuf_type, cindex, clen, re_flags);
             if (s->state_stack != s->state_buf)
                 lre_realloc(s->opaque, s->state_stack, 0);
