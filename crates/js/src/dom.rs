@@ -49,6 +49,16 @@
 //! while the page parses, is what lets a script that churns the DOM while
 //! the parser is still running stay within its node limit.
 //!
+//! # Events
+//!
+//! A node's event listeners live in its wrapper (`NodeWrapper::listeners`),
+//! which reports them to the GC with its ring links, so they live exactly
+//! as long as the wrapper group. Listeners, `Event` objects and dispatch
+//! are in the `events` module, which walks event paths on node ids and
+//! only wraps the nodes of a path once a listener could hear the event.
+//! Event targets that are not nodes use the same native members, so the
+//! pattern for them is in `events/natives.rs`.
+//!
 //! # Mutations
 //!
 //! Every change to the tree made from JS goes through [`DomState`]'s
@@ -71,12 +81,15 @@
 //!    getter or method or a mixin member, with `return nativeMember();` as
 //!    its body. The stand-in gives the property its place on the prototype
 //!    and its attributes (class members are not enumerable, mixin members
-//!    are), which the native keeps. An accessor's setter stays in JS.
+//!    are), which the native keeps. An accessor's setter stays in JS
+//!    unless a `setter` entry replaces it (its stand-in body is then
+//!    `nativeMember();`).
 //! 2. In `members.rs`, write the body: a plain `fn(&Call, NodeId, &[JSValue])
 //!    -> Outcome` that reads the document through `Call::doc` and says what
 //!    to return as a `Ret` (a node, a cached name, a string, a number...)
-//!    or what to throw as a `Thrown`. Add a `getter(...)` or `method(...)`
-//!    entry to `MEMBERS` with the property name, the `Receiver` the
+//!    or what to throw as a `Thrown` (or a `Write` body; see below). Add a
+//!    `getter(...)`, `setter(...)`, `method(...)`, `reader(...)` or
+//!    `writer(...)` entry to `MEMBERS` with the property name, the `Receiver` the
 //!    interface needs (`this` must be a node of that kind, or the call
 //!    throws `TypeError: Illegal invocation` as browsers do) and the keys of
 //!    the prototypes it goes on, from the `interfaces` object `dom.js`
@@ -89,21 +102,41 @@
 //! function behind every member (the entry's index is its magic number). It
 //! finds the `NodeWrapper` behind `this` from the object's opaque pointer
 //! and rquickjs's class id and vtable, which it learns from the document
-//! wrapper (`Members`, reached through the context's opaque pointer), so
+//! wrapper (`Members`, reached through the context's opaque pointer; see
+//! the `native_data` module for what else hangs off it), so
 //! there is no conversion, closure, `Rc` clone or hash lookup. Nodes come
 //! back through the wrapper table, and names (tag names, local names,
 //! namespaces) as atoms cached by name id, so the same string is never
 //! converted from UTF-8 twice. Only a node without a wrapper yet, a
 //! one-off string or an error goes through rquickjs.
 //!
-//! A body is one of two kinds. A `Read` body runs with the document
-//! borrowed (shared) for the whole call, its string arguments converted
-//! beforehand (converting an object runs JS). A `Write` body runs with
-//! nothing borrowed: it converts its own arguments and changes the tree
-//! through the mutation natives in `natives` (`set_attr`, `insert`,
-//! `detach`...), which borrow the document and deliver mutation records and
-//! custom element reactions themselves, exactly as when the glue called
-//! them. A `DOMException` is thrown only after the borrow is let go.
+//! Two kinds of body:
+//!
+//! - `Body::Read` (the `getter`, `method` and `reader` entries) runs with
+//!   the document borrowed (shared) for the whole call, so it must not
+//!   change the document or run JS. Its arguments are converted first, as
+//!   the entry's `Arg`s say (`Str`: objects and symbols go through
+//!   `ToString`; `Uint32`: `ToUint32`), since converting an object can run
+//!   page script; the body reads them with `Call::str_arg` and
+//!   `Call::u32_arg`.
+//! - `Body::Write` (`setter`, `writer`) runs with nothing borrowed: a
+//!   `fn(&Write) -> Result<Ret, Thrown>` that borrows the document as it
+//!   needs to and may run JS: converting arguments (`Write::str_arg`),
+//!   setting attributes through `natives::set_attr` (which reports
+//!   mutation records and custom element reactions like `setAttribute`).
+//!
+//! Strings come in as UTF-8 from QuickJS (`JsStr`), lone surrogates turned
+//! into U+FFFD as `internals.usv` does. A `DOMException`
+//! (`Thrown::Dom`) is thrown once the document is let go, since making
+//! one runs JS. Besides node receivers there are the host objects of the
+//! `host` module (`Receiver::Style`, `Receiver::Tokens`: `this` is the
+//! object, the node its element) and plain functions (`Kind::Function`,
+//! `Receiver::ElementArg`: `getComputedStyle`, put on the `functions`
+//! object rather than a prototype). The natives `dom.js` calls internally
+//! (`N.nav` and friends) stay, since glue code must not see page script's
+//! overrides of the public members; where `dom.js` builds on a native
+//! member it calls it as `N.init` left it (the `natives` object in
+//! `dom.js`).
 //!
 //! A member made with `Member::or_js` keeps the function `dom.js` defines in
 //! its place as its *fallback*: the stand-in is then the full JS
@@ -118,16 +151,13 @@
 //! natives call (`connected()` for the scripts an insertion connects, the
 //! base URL), are kept in the `hooks` module.
 //!
-//! Members also live on objects that are not nodes: the style, token list
-//! and dataset objects of the `host` module, and the live lists of the
-//! `lists` module (`childNodes`, `children`, `getElementsBy*`, `attributes`),
-//! which are exotic QuickJS objects answering their indexed and named
-//! properties without a `Proxy`. Their receivers find the node behind them.
-//! The IDL attributes HTML elements reflect (`a.href`, `el.hidden`...) are
-//! made native from the list `reflect()` in `dom.js` builds (see the `attrs`
-//! module). The natives `dom.js` calls internally (`N.nav` and friends)
-//! stay, since glue code must not see page script's overrides of the public
-//! members.
+//! The live lists of the `lists` module (`childNodes`, `children`,
+//! `getElementsBy*`, `attributes`) are exotic QuickJS objects like the
+//! host objects, answering their indexed and named properties without a
+//! `Proxy`; `Receiver::List` members (`length`, `item`...) get the list
+//! object as the call's `node`. The IDL attributes HTML elements reflect
+//! (`a.href`, `el.hidden`...) are made native from the list `reflect()` in
+//! `dom.js` builds (see the `attrs` module).
 
 mod attrs;
 mod collection;
@@ -159,7 +189,8 @@ use crate::clock::Clock;
 use crate::runtime::{JsRuntime, Shared};
 
 pub(crate) use layout::Geometry;
-pub(crate) use wrapper::{Node, wrap};
+pub(crate) use members::Members;
+pub(crate) use wrapper::{Node, NodeWrapper, wrap};
 
 /// How many parsed selectors each generation of the selector cache holds.
 /// See [`SelectorCache`].

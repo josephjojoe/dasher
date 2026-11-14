@@ -27,6 +27,7 @@ use super::lists::{self, ListClass};
 use super::natives::{stale_node_error, throw_dom};
 use super::wrapper::{Node, NodeWrapper, wrap};
 use super::{edits, queries};
+use crate::native_data::NativeData;
 
 /// What `this` has to be for a member: a node wrapper of a kind that has
 /// the member's interface, or one of the host objects of the `host` module.
@@ -1088,9 +1089,8 @@ unsafe extern "C" fn call_member(
     magic: c_int,
 ) -> qjs::JSValue {
     let member = &MEMBERS[magic as usize];
-    // SAFETY: the context's opaque is null or the `Members` that `DomData`
-    // owns, which lives as long as JS can run.
-    let members = unsafe { qjs::JS_GetContextOpaque(ctx).cast::<Members>().as_ref() };
+    // SAFETY: QuickJS passes the live context of the call.
+    let members = unsafe { NativeData::of(ctx) }.and_then(NativeData::members);
     let Some(members) = members else {
         // SAFETY: QuickJS passes the live context of the call.
         return unsafe { throw_type(ctx, c"Illegal invocation") };
@@ -1218,9 +1218,8 @@ unsafe extern "C" fn call_member(
 // The per-context data.
 
 /// What [`call_member`] needs besides the wrapper: how to recognise a node
-/// wrapper, the host object classes, and the cached strings. Owned by
-/// `DomData`, and found through the context's opaque pointer, which nothing
-/// else in dasher or rquickjs uses.
+/// wrapper, the host object classes, and the cached strings. Owned by `DomData`, and found through
+/// the context's opaque pointer (see the `native_data` module).
 pub(crate) struct Members {
     /// The class id rquickjs gives all its (non-callable) class objects.
     class_id: qjs::JSClassID,
@@ -1288,10 +1287,11 @@ impl Members {
             hosts,
             hooks,
         });
-        let ptr: *const Members = &*members;
-        // SAFETY: the box is kept in `DomData` for as long as the context
-        // runs JS, and does not move.
-        unsafe { qjs::JS_SetContextOpaque(ctx.as_raw().as_ptr(), ptr.cast_mut().cast()) };
+        // The box is kept in `DomData` for as long as the context runs JS,
+        // and does not move.
+        if let Some(data) = NativeData::of_ctx(ctx) {
+            data.set_members(&*members);
+        }
         members
     }
 
@@ -1373,7 +1373,7 @@ impl Members {
     /// # Safety
     ///
     /// `value` must be alive, and stays borrowed for the result's life.
-    pub(super) unsafe fn wrapper<'v>(
+    pub(crate) unsafe fn wrapper<'v>(
         &self,
         ctx: *mut qjs::JSContext,
         value: qjs::JSValue,

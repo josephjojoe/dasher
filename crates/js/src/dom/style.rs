@@ -45,11 +45,20 @@ impl Declarations {
         &self.decls
     }
 
-    /// Records that the attribute was written as `text`, the serialization
-    /// of `decls`, so the next read need not parse it.
-    pub(crate) fn set(&mut self, text: &str, decls: Vec<Decl>) {
-        self.text = Some(text.into());
-        self.decls = decls;
+    /// Changes the declarations for the attribute value `text` in place.
+    /// If `f` returns `Some` (it changed them), returns that and the new
+    /// attribute value, which is recorded as their text; `f` must not
+    /// change them if it returns `None`.
+    pub(crate) fn edit<R>(
+        &mut self,
+        text: Option<&str>,
+        f: impl FnOnce(&mut Vec<Decl>) -> Option<R>,
+    ) -> Option<(R, String)> {
+        self.get(text);
+        let r = f(&mut self.decls)?;
+        let out = serialize(&self.decls);
+        self.text = Some(out.as_str().into());
+        Some((r, out))
     }
 }
 
@@ -369,9 +378,13 @@ mod tests {
         assert_eq!(d.get(Some("a: 1")).len(), 1);
         assert_eq!(d.get(Some("a: 1; b: 2")).len(), 2);
         assert!(d.get(None).is_empty());
-        let decls = parse("c: 3");
-        d.set("c: 3;", decls);
-        assert_eq!(names(d.get(Some("c: 3;"))), [("c", "3", false)]);
+        let edited = d.edit(Some("c: 3"), |decls| {
+            decls[0].value = "4".into();
+            Some(())
+        });
+        assert_eq!(edited, Some(((), "c: 4;".to_owned())));
+        assert_eq!(names(d.get(Some("c: 4;"))), [("c", "4", false)]);
+        assert_eq!(d.edit(Some("c: 4;"), |_| None::<()>), None);
     }
 
     #[test]

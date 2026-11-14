@@ -1,0 +1,21 @@
+<!doctype html>
+<title>Ticks forever</title>
+<p id="clock">0</p>
+<script>
+  // The content arrives once; the clock changes the DOM forever, as
+  // carousels, tickers and countdowns do.
+  window.ticks = 0;
+  setInterval(() => { document.getElementById('clock').textContent = ++window.ticks; }, 100);
+  fetch('/api/items').then((r) => r.json()).then((items) => {
+    const p = document.createElement('p');
+    p.id = 'loaded';
+    p.textContent = items.join(',');
+    document.body.append(p);
+  });
+  // Something that only shows up later, on a timer.
+  setTimeout(() => {
+    const p = document.createElement('p');
+    p.id = 'late';
+    document.body.append(p);
+  }, 1500);
+</script>

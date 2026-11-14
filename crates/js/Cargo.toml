@@ -10,6 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Lets benchmarks turn lazy compilation off with DASHER_EAGER_JS (see
+# crates/bench/README.md).
+replay = []
+
 [dependencies]
 bytes.workspace = true
 dasher-css.workspace = true

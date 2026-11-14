@@ -32,6 +32,7 @@ use super::collection::{Filter, Matches};
 use super::host::{ATOM_TAG_INT, Key, define_plain, delete_nothing, fill, key_of, proto_has};
 use super::members::{Call, Members, Outcome, Ret, Thrown, ctx_of};
 use super::wrapper::{Extra, NodeWrapper};
+use crate::native_data::NativeData;
 
 /// The kinds of list, each a class of its own.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -519,8 +520,9 @@ unsafe fn list_in<'a>(
     obj: qjs::JSValue,
     class: ListClass,
 ) -> Option<std::result::Result<(&'a Members, &'a List, NodeId), ()>> {
-    // SAFETY: the context's opaque is null or the live `Members`.
-    let members = unsafe { qjs::JS_GetContextOpaque(ctx).cast::<Members>().as_ref() }?;
+    // SAFETY: the context's opaque is null or the live `NativeData`, whose
+    // `Members` lives as long as JS can run.
+    let members = unsafe { NativeData::of(ctx) }.and_then(NativeData::members)?;
     // SAFETY: as for the function.
     let list = unsafe { members.lists().get(obj, class) }?;
     Some(match list.wrapper().id() {
@@ -857,8 +859,8 @@ pub(super) fn new_collection<'js>(
     named: bool,
 ) -> Result<rquickjs::Value<'js>> {
     let raw_ctx = ctx.as_raw().as_ptr();
-    // SAFETY: the context's opaque is the live `Members`, if set.
-    let members = unsafe { qjs::JS_GetContextOpaque(raw_ctx).cast::<Members>().as_ref() };
+    // SAFETY: the context's opaque is null or the live `NativeData`.
+    let members = unsafe { NativeData::of(raw_ctx) }.and_then(NativeData::members);
     let members = members.ok_or(rquickjs::Error::Unknown)?;
     let list = {
         let wrapper = root.borrow();
@@ -885,8 +887,8 @@ pub(super) fn list_value<'a>(
     value: &rquickjs::Value<'_>,
 ) -> Result<(&'a List, NodeId)> {
     let raw_ctx = ctx.as_raw().as_ptr();
-    // SAFETY: the context's opaque is the live `Members`, if set.
-    let members = unsafe { qjs::JS_GetContextOpaque(raw_ctx).cast::<Members>().as_ref() };
+    // SAFETY: the context's opaque is null or the live `NativeData`.
+    let members = unsafe { NativeData::of(raw_ctx) }.and_then(NativeData::members);
     // SAFETY: `value` is alive while the caller holds it, which covers the
     // caller's use of the list.
     let list = members.and_then(|m| unsafe { m.lists().any(value.as_raw()) });

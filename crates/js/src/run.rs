@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::budget::Budget;
 use crate::clock::ClockMode;
 use crate::event_loop::Stopped;
 use crate::limits::ResourceLimit;
@@ -47,6 +48,12 @@ pub enum RunOutcome {
     /// The page went over a resource limit and is stopped for good (see
     /// [`JsRuntime::limit_exceeded`]).
     LimitExceeded(ResourceLimit),
+    /// The page used up its CPU time or request budget (see
+    /// [`JsRuntime::set_work_limits`]); it runs no more JS until the
+    /// limits are set again. Or, with [`Budget::PageTime`], the
+    /// [skip limit](JsRuntime::set_skip_limit) was reached under
+    /// [`ClockMode::Manual`], so page time can move no further.
+    BudgetExhausted(Budget),
     /// The page asked to load another document (see
     /// [`JsRuntime::navigation_request`]). The loop stops after the task
     /// that asked, since the current document is about to be replaced, and
@@ -60,6 +67,7 @@ impl From<Stopped> for RunOutcome {
             Stopped::DeadlineExceeded => Self::DeadlineExceeded,
             Stopped::Interrupted => Self::Interrupted,
             Stopped::LimitExceeded(limit) => Self::LimitExceeded(limit),
+            Stopped::BudgetExhausted(budget) => Self::BudgetExhausted(budget),
         }
     }
 }
@@ -73,6 +81,15 @@ impl JsRuntime {
     /// skips ahead to the next timer or frame instead of waiting, unless
     /// host operations are in progress; then time runs at wall-clock speed
     /// (frozen in `Manual`) until they finish.
+    ///
+    /// Skipping stops at the [skip limit](Self::set_skip_limit): past it,
+    /// `Virtual` waits for timers in real time, and `Manual`, where page
+    /// time cannot otherwise move, returns
+    /// [`RunOutcome::BudgetExhausted`] with [`Budget::PageTime`].
+    ///
+    /// Callbacks waiting in `requestIdleCallback` run as they come due, but
+    /// do not keep the loop going: with nothing else left it is
+    /// [`Idle`](RunOutcome::Idle).
     ///
     /// Must be polled inside a Tokio runtime with the time driver enabled,
     /// on the thread that owns this runtime (for example in a `LocalSet`).
@@ -97,6 +114,11 @@ impl JsRuntime {
                     Err(stopped) => return stopped.into(),
                 }
                 ran += 1;
+                // A page that always has work due must still give the
+                // caller its turn once page time is past `until`.
+                if limits.until.is_some_and(|until| clock.now() > until) {
+                    return RunOutcome::ReachedTime;
+                }
                 if ran % TASKS_PER_YIELD == 0 {
                     tokio::task::yield_now().await;
                 }
@@ -111,19 +133,28 @@ impl JsRuntime {
             if remote.has_queued() {
                 continue;
             }
-            let next = self.next_wakeup();
+            // Idle callbacks run when they come due, but alone they do not
+            // keep the loop going: with nothing else left, it is idle.
+            let next = state.next_holding_wakeup().and_then(|_| self.next_wakeup());
             if !pending && clock.mode() != ClockMode::Realtime {
-                // Nothing but timers and frames: skip the idle gap.
+                // Nothing but timers and frames: skip the idle gap, as far
+                // as the skip limit allows. Past it, wait in real time.
                 match (next, limits.until) {
                     (None, _) => return RunOutcome::Idle,
                     (Some(next), Some(until)) if next > until => {
-                        clock.advance_to(until);
-                        return RunOutcome::ReachedTime;
+                        if clock.advance_to(until) {
+                            return RunOutcome::ReachedTime;
+                        }
                     }
                     (Some(next), _) => {
-                        clock.advance_to(next);
-                        continue;
+                        if clock.advance_to(next) {
+                            continue;
+                        }
                     }
+                }
+                if clock.mode() == ClockMode::Manual {
+                    // Page time cannot move, so nothing will come due.
+                    return RunOutcome::BudgetExhausted(Budget::PageTime);
                 }
             }
             if !pending && next.is_none() {
@@ -132,6 +163,7 @@ impl JsRuntime {
 
             // Wait for the next timer or frame (page time runs in real time
             // except in Manual mode), a posted task, or the deadline.
+            let now = clock.now();
             let wake_at = match clock.mode() {
                 ClockMode::Manual => None,
                 ClockMode::Realtime | ClockMode::Virtual => match (next, limits.until) {

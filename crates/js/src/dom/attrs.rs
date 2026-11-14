@@ -32,6 +32,7 @@ use super::members::{
 use super::natives::{
     html_lower, remove_attr, remove_attr_ns, set_attr, set_attr_ns, valid_attribute_name,
 };
+use crate::native_data::NativeData;
 
 type Done = Result<Ret<'static>, Thrown>;
 
@@ -419,7 +420,7 @@ unsafe extern "C" fn call_reflected(
     magic: c_int,
 ) -> qjs::JSValue {
     // SAFETY: see `members::call_member`, which this follows.
-    let members = unsafe { qjs::JS_GetContextOpaque(ctx).cast::<Members>().as_ref() };
+    let members = unsafe { NativeData::of(ctx) }.and_then(NativeData::members);
     let Some(members) = members else {
         // SAFETY: QuickJS passes the live context of the call.
         return unsafe { throw_type(ctx, c"Illegal invocation") };

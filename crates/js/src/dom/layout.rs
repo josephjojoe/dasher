@@ -75,6 +75,36 @@ pub(crate) struct LayoutCache {
     /// The document height, and the document version and insertion epoch
     /// it was computed for.
     root: std::cell::Cell<Option<(u32, u16, i32)>>,
+    /// Visibility and boxes found since the document last changed: pages
+    /// read several of an element's geometry properties, or one of them in
+    /// a loop, and finding them again walks the ancestors (`:visible`) and
+    /// for some policies the whole document.
+    seen: std::cell::RefCell<Seen>,
+}
+
+/// What [`LayoutCache::seen`] holds, for one document version and epoch.
+#[derive(Default)]
+struct Seen {
+    key: (u32, u16),
+    visible: HashMap<NodeId, bool>,
+    boxes: HashMap<NodeId, [i32; 4]>,
+}
+
+/// How many elements [`Seen`] remembers before starting over.
+const SEEN_LIMIT: usize = 4096;
+
+impl DomState {
+    /// The cache of what was found for the document as it is now.
+    fn seen(&self, doc: &Document) -> std::cell::RefMut<'_, Seen> {
+        let key = (self.version(), doc.insertion_epoch());
+        let mut seen = self.layout.seen.borrow_mut();
+        if seen.key != key || seen.visible.len() + seen.boxes.len() > SEEN_LIMIT {
+            seen.key = key;
+            seen.visible.clear();
+            seen.boxes.clear();
+        }
+        seen
+    }
 }
 
 /// Each target's place in the stacked layout, as `[line, lines]` pairs in
@@ -208,11 +238,16 @@ pub(crate) fn loaded_lines(doc: &Document, targets: &[NodeId]) -> Vec<i32> {
 impl DomState {
     /// Whether `el` is visible as far as its markup goes (`:visible`).
     pub(crate) fn visible(&self, doc: &Document, el: NodeId) -> bool {
+        if let Some(&v) = self.seen(doc).visible.get(&el) {
+            return v;
+        }
         let visible = self
             .layout
             .visible
             .get_or_init(|| SelectorList::parse(":visible").expect("`:visible` parses"));
-        visible.matches(doc, el)
+        let v = visible.matches(doc, el);
+        self.seen(doc).visible.insert(el, v);
+        v
     }
 
     /// Whether `el` is rendered: connected and visible.
@@ -258,6 +293,15 @@ impl DomState {
     /// `el`'s box, `[x, y, width, height]` in document coordinates (see the
     /// module docs).
     pub(crate) fn element_box(&self, doc: &Document, el: NodeId) -> [i32; 4] {
+        if let Some(&b) = self.seen(doc).boxes.get(&el) {
+            return b;
+        }
+        let b = self.find_box(doc, el);
+        self.seen(doc).boxes.insert(el, b);
+        b
+    }
+
+    fn find_box(&self, doc: &Document, el: NodeId) -> [i32; 4] {
         if !self.rendered(doc, el) {
             return [0; 4];
         }

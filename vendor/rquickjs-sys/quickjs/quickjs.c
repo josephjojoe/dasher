@@ -316,6 +316,8 @@ struct JSRuntime {
     JSSharedArrayBufferFunctions sab_funcs;
 
     bool can_block; /* true if Atomics.wait can block */
+    /* dasher: compile a function on its first call (JS_SetLazyFunctions) */
+    bool lazy_functions;
     uint32_t dump_flags : 24;
 
     /* Shape hash table */
@@ -714,7 +716,10 @@ typedef struct JSFunctionBytecode {
     uint8_t super_allowed : 1;
     uint8_t arguments_allowed : 1;
     uint8_t backtrace_barrier : 1; /* stop backtrace on this function */
-    /* XXX: 5 bits available */
+    /* dasher: not compiled yet: `lazy` is the JSLazyInfo to compile it
+       from on its first call (see js_lazy_compile) */
+    uint8_t is_lazy : 1;
+    /* XXX: 4 bits available */
     uint8_t *byte_code_buf; /* (self pointer) */
     int byte_code_len;
     JSAtom func_name;
@@ -738,6 +743,10 @@ typedef struct JSFunctionBytecode {
     /* dasher: when not NULL, `source` points into this shared copy of the
        whole script instead of being a block of its own */
     struct JSSourceText *source_text;
+    /* dasher: while is_lazy, the JSLazyInfo it is compiled from. Once a
+       lazy function is compiled, the block its cpool, vardefs, closure_var
+       and code live in (they are not in this one), or NULL. */
+    void *lazy;
 } JSFunctionBytecode;
 
 /* dasher: the text of one compiled script, shared by every function that
@@ -746,8 +755,60 @@ typedef struct JSFunctionBytecode {
    nesting level. */
 typedef struct JSSourceText {
     int ref_count;
+    uint32_t len; /* bytes in buf, not counting the final '\0' */
     char buf[];
 } JSSourceText;
+
+/* dasher: what parsing a function found that compiling it, or the function
+   around it, needs without parsing it again. A function that is not
+   compiled when its script is (see js_lazy_begin) keeps one of these until
+   its first call, and so does each function inside it, in `children`, so
+   that compiling it can skip over them. Offsets are into the script's
+   JSSourceText. */
+typedef struct JSLazyRecord {
+    /* the first token of the parameters ('(', or the name of an arrow
+       function's only parameter): where compiling the function starts */
+    uint32_t start;
+    uint32_t start_eol;  /* JSParseState.eol and .mark there, as offsets */
+    uint32_t start_mark;
+    int start_line;
+    /* the token after the function: where skipping it resumes */
+    uint32_t end;
+    uint32_t end_eol;
+    uint32_t end_mark;
+    int end_line;
+    int last_line, last_col; /* the function's last token */
+    uint32_t source_end; /* end of the function's text */
+    uint16_t defined_arg_count;
+    uint8_t got_lf : 1; /* a line terminator before the token at 'end' */
+    uint8_t is_strict_mode : 1;
+    uint8_t has_simple_parameter_list : 1;
+    uint8_t is_module : 1;
+    /* strict before the function's own directives: a class is strict code
+       while it is parsed, whatever the function around it is */
+    uint8_t parent_strict : 1;
+    /* an '=' token in the function: js_parse_skip_parens_token() reports
+       one in a bracket it scans, and skips over a function it has a
+       record for */
+    uint8_t has_assign : 1;
+    uint32_t child_count;
+    struct JSLazyRecord **children; /* in source order; NULL once taken */
+    /* the names the function and those inside it use and do not define:
+       free_count plain names, then private_count private names (#x) */
+    uint32_t free_count;
+    uint32_t private_count;
+    JSAtom free[];
+} JSLazyRecord;
+
+/* dasher: how to compile a lazy function (JSFunctionBytecode.is_lazy) */
+typedef struct JSLazyInfo {
+    JSLazyRecord *record;
+    uint8_t func_type;          /* JSParseFunctionEnum */
+    uint8_t parent_func_kind;   /* of the function it is defined in */
+    uint8_t is_func_expr : 1;
+    uint8_t parent_strict : 1;  /* strict before its own directives */
+    uint8_t parent_static_init : 1; /* defined in a class static block */
+} JSLazyInfo;
 
 typedef struct JSBoundFunction {
     JSValue func_obj;
@@ -1125,6 +1186,8 @@ static JSAtom __JS_NewAtomInit(JSRuntime *rt, const char *str, int len,
                                int atom_type);
 static void JS_FreeAtomStruct(JSRuntime *rt, JSAtomStruct *p);
 static void free_function_bytecode(JSRuntime *rt, JSFunctionBytecode *b);
+static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b); /* dasher */
+static void js_lazy_record_free(JSRuntime *rt, JSLazyRecord *r); /* dasher */
 static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
                                   JSValueConst this_obj,
                                   int argc, JSValueConst *argv, int flags);
@@ -1910,6 +1973,7 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
     rt->js_class_id_alloc = JS_CLASS_INIT_COUNT;
 
     rt->stack_size = JS_DEFAULT_STACK_SIZE;
+    rt->lazy_functions = true; /* dasher */
 #ifdef __wasi__
     rt->stack_size = 0;
 #endif
@@ -2024,6 +2088,13 @@ void JS_SetInterruptHandler(JSRuntime *rt, JSInterruptHandler *cb, void *opaque)
 void JS_SetCanBlock(JSRuntime *rt, bool can_block)
 {
     rt->can_block = can_block;
+}
+
+/* dasher: whether scripts compiled from now on leave their functions to be
+   compiled on first call (the default) or compile them all at once */
+void JS_SetLazyFunctions(JSRuntime *rt, bool enable)
+{
+    rt->lazy_functions = enable;
 }
 
 void JS_SetSharedArrayBufferFunctions(JSRuntime *rt,
@@ -16727,6 +16798,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                          argv, flags);
     }
     b = p->u.func.function_bytecode;
+    /* dasher: compile it on its first call */
+    if (unlikely(b->is_lazy) && js_lazy_compile(caller_ctx, b))
+        return JS_EXCEPTION;
 
     if (unlikely(argc < b->arg_count || (flags & JS_CALL_FLAG_COPY_ARGV))) {
         arg_allocated_size = b->arg_count;
@@ -19390,6 +19464,9 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
     init_list_head(&sf->var_ref_list);
     p = JS_VALUE_GET_OBJ(func_obj);
     b = p->u.func.function_bytecode;
+    /* dasher: compile it on its first call */
+    if (unlikely(b->is_lazy) && js_lazy_compile(ctx, b))
+        return -1;
     sf->is_strict_mode = b->is_strict_mode;
     sf->cur_pc = b->byte_code_buf;
     arg_buf_len = max_int(b->arg_count, argc);
@@ -20503,6 +20580,14 @@ typedef struct JSFunctionDef {
     bool need_home_object : 1;
     bool use_short_opcodes : 1; /* true if short opcodes are used in byte_code */
     bool has_await : 1; /* true if await is used (used in module eval) */
+    /* dasher: lazy compilation, see js_lazy_begin() */
+    uint8_t lazy_state : 2; /* JS_LAZY_xxx */
+    bool is_lazy_root : 1; /* compiled from a JSLazyInfo: its closure_var
+                              is fixed, as for direct eval */
+    bool lazy_parent_static_init : 1; /* for a lazy root */
+    bool lazy_record_borrowed : 1; /* lazy_record belongs to a JSLazyInfo */
+    bool lazy_parent_strict : 1; /* is_strict_mode before its directives */
+    uint8_t lazy_parent_func_kind; /* for a lazy root */
     
     JSFunctionKindEnum func_kind : 8;
     JSParseFunctionEnum func_type : 7;
@@ -20582,7 +20667,24 @@ typedef struct JSFunctionDef {
     JSSourceText *source_text; /* dasher: counted reference, or NULL */
 
     JSModuleDef *module; /* != NULL when parsing a module */
+
+    /* dasher: a shell's own record (JS_LAZY_SHELL). Otherwise what an
+       earlier parse found for the functions inside this one, or NULL;
+       lazy_cursor is the next of its children to look for. */
+    JSLazyRecord *lazy_record;
+    uint32_t lazy_cursor;
+    /* where the parameters start (see JSLazyRecord.start) */
+    uint32_t lazy_start;
+    uint32_t lazy_start_eol;
+    uint32_t lazy_start_mark;
+    int lazy_start_line;
+    uint32_t lazy_start_assign; /* JSParseState.assign_count there */
 } JSFunctionDef;
+
+/* dasher: JSFunctionDef.lazy_state */
+#define JS_LAZY_NONE      0 /* compiled with its parent */
+#define JS_LAZY_CANDIDATE 1 /* being parsed, to be dropped at its end */
+#define JS_LAZY_SHELL     2 /* dropped: only what the parent needs is left */
 
 typedef struct JSToken {
     int val;
@@ -20635,6 +20737,13 @@ typedef struct JSParseState {
     struct JSSkipMemo *skip_memo;
     uint32_t skip_memo_size;  /* slots, a power of two, or 0 */
     uint32_t skip_memo_count;
+    /* dasher: lazy compilation */
+    bool lazy;           /* functions may be left to their first call */
+    int with_depth;      /* 'with' statements around the current token */
+    const uint8_t *iife_ptr; /* a function starting here is likely called
+                                at once: it follows '(' or a unary '!' */
+    uint32_t assign_count; /* '=' tokens met, not counting lookahead */
+    int in_skip;         /* in js_parse_skip_parens_token() */
 } JSParseState;
 
 static void js_source_text_release(JSRuntime *rt, JSSourceText *t)
@@ -20654,6 +20763,7 @@ static int js_parse_set_source(JSParseState *s, JSFunctionDef *fd,
         if (!t)
             return -1;
         t->ref_count = 1;
+        t->len = n;
         memcpy(t->buf, s->buf_start, n);
         t->buf[n] = '\0';
         s->source_text = t;
@@ -21200,6 +21310,19 @@ static __exception int ident_realloc(JSContext *ctx, char **pbuf, size_t *psize,
 
 #ifndef QJS_DISABLE_PARSER
 
+/* dasher: the kind of the function 'fd' is defined in. A lazy root has
+   no parent to look at, so it keeps what its parent was. */
+static inline int js_parent_func_kind(JSFunctionDef *fd)
+{
+    return fd->parent ? fd->parent->func_kind : fd->lazy_parent_func_kind;
+}
+
+static inline bool js_parent_is_static_init(JSFunctionDef *fd)
+{
+    return fd->parent ? fd->parent->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT :
+        fd->lazy_parent_static_init;
+}
+
 /* convert a TOK_IDENT to a keyword when needed */
 static void update_token_ident(JSParseState *s)
 {
@@ -21209,16 +21332,16 @@ static void update_token_ident(JSParseState *s)
         (s->token.u.ident.atom == JS_ATOM_yield &&
          ((s->cur_func->func_kind & JS_FUNC_GENERATOR) ||
           (s->cur_func->func_type == JS_PARSE_FUNC_ARROW &&
-           !s->cur_func->in_function_body && s->cur_func->parent &&
-           (s->cur_func->parent->func_kind & JS_FUNC_GENERATOR)))) ||
+           !s->cur_func->in_function_body &&
+           (js_parent_func_kind(s->cur_func) & JS_FUNC_GENERATOR)))) ||
         (s->token.u.ident.atom == JS_ATOM_await &&
          (s->is_module ||
           (s->cur_func->func_kind & JS_FUNC_ASYNC) ||
           s->cur_func->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT ||
           (s->cur_func->func_type == JS_PARSE_FUNC_ARROW &&
-           !s->cur_func->in_function_body && s->cur_func->parent &&
-           ((s->cur_func->parent->func_kind & JS_FUNC_ASYNC) ||
-            s->cur_func->parent->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT))))) {
+           !s->cur_func->in_function_body &&
+           ((js_parent_func_kind(s->cur_func) & JS_FUNC_ASYNC) ||
+            js_parent_is_static_init(s->cur_func)))))) {
         if (s->token.u.ident.has_escape) {
             s->token.u.ident.is_reserved = true;
             s->token.val = TOK_IDENT;
@@ -21742,6 +21865,9 @@ static __exception int next_token(JSParseState *s)
     }
     s->token.col_num = max_int(1, s->mark - s->eol);
     s->buf_ptr = p;
+    /* dasher: see JSLazyRecord.has_assign */
+    if (s->token.val == '=' && !s->in_skip)
+        s->assign_count++;
 
     //    dump_token(s, &s->token);
     return 0;
@@ -23229,6 +23355,27 @@ static __exception int js_parse_seek_token(JSParseState *s, const JSParsePos *sp
     return next_token(s);
 }
 
+/* dasher: the record of the function starting at 'off' in 'fd', if an
+   earlier parse dropped it, without taking it (see js_lazy_take). The
+   children from lazy_cursor on are all there, in source order. */
+static JSLazyRecord *js_lazy_peek(JSFunctionDef *fd, uint32_t off)
+{
+    JSLazyRecord *pr = fd->lazy_record;
+    uint32_t lo = fd->lazy_cursor, hi = pr->child_count;
+
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        JSLazyRecord *r = pr->children[mid];
+        if (r->start == off)
+            return r;
+        if (r->start < off)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return NULL;
+}
+
 /* return true if a regexp literal is allowed after this token */
 static bool is_regexp_allowed(int tok)
 {
@@ -23289,20 +23436,19 @@ typedef struct JSSkipMemo {
 static int js_skip_memo_ctx(JSParseState *s)
 {
     JSFunctionDef *fd = s->cur_func;
-    JSFunctionDef *parent = NULL;
+    bool in_arrow_params;
     int ctx = 0;
 
-    if (fd->func_type == JS_PARSE_FUNC_ARROW && !fd->in_function_body)
-        parent = fd->parent;
+    in_arrow_params = fd->func_type == JS_PARSE_FUNC_ARROW && !fd->in_function_body;
     if (fd->is_strict_mode)
         ctx |= SKIP_CTX_STRICT;
     if ((fd->func_kind & JS_FUNC_GENERATOR) ||
-        (parent && (parent->func_kind & JS_FUNC_GENERATOR)))
+        (in_arrow_params && (js_parent_func_kind(fd) & JS_FUNC_GENERATOR)))
         ctx |= SKIP_CTX_YIELD;
     if (s->is_module || (fd->func_kind & JS_FUNC_ASYNC) ||
         fd->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT ||
-        (parent && ((parent->func_kind & JS_FUNC_ASYNC) ||
-                    parent->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT)))
+        (in_arrow_params && ((js_parent_func_kind(fd) & JS_FUNC_ASYNC) ||
+                             js_parent_is_static_init(fd))))
         ctx |= SKIP_CTX_AWAIT;
     return ctx;
 }
@@ -23414,7 +23560,28 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
 
     js_parse_get_pos(s, &pos);
     last_tok = 0;
+    s->in_skip++;
     for (;;) {
+        /* dasher: a function an earlier parse dropped is skipped whole, as
+           the parse that follows will skip it */
+        if (s->token.val == '(' && level >= 2 && s->cur_func->lazy_record) {
+            JSLazyRecord *r = js_lazy_peek(s->cur_func,
+                                           s->token.ptr - s->buf_start);
+            if (r) {
+                if (r->has_assign) {
+                    bits |= SKIP_HAS_ASSIGNMENT;
+                    open_bits[level - 1] |= SKIP_HAS_ASSIGNMENT;
+                }
+                s->buf_ptr = s->buf_start + r->end;
+                s->eol = s->buf_start + r->end_eol;
+                s->mark = s->buf_start + r->end_mark;
+                s->line_num = r->end_line;
+                s->token.line_num = r->last_line;
+                s->token.col_num = r->last_col;
+                last_tok = ')';
+                goto next;
+            }
+        }
         switch(s->token.val) {
         case '(':
         case '[':
@@ -23520,6 +23687,7 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
         } else {
             last_tok = s->token.val;
         }
+    next:
         if (next_token(s)) {
             /* XXX: should clear the exception generated by next_token() */
             break;
@@ -23545,6 +23713,7 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
         }
     }
  done:
+    s->in_skip--;
     if (pbits) {
         *pbits = bits;
     }
@@ -25468,7 +25637,13 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
         }
         break;
     case '(':
-        if (js_parse_expr_paren(s))
+        /* dasher: '(function' and '(() =>' are usually called at once */
+        if (js_parse_expect(s, '('))
+            return -1;
+        s->iife_ptr = s->token.ptr;
+        if (js_parse_expr(s))
+            return -1;
+        if (js_parse_expect(s, ')'))
             return -1;
         break;
     case TOK_FUNCTION:
@@ -26123,6 +26298,9 @@ static __exception int js_parse_unary(JSParseState *s, int parse_flags)
         op = s->token.val;
         if (next_token(s))
             return -1;
+        /* dasher: '!function () {...}()' is called at once */
+        if (op == '!')
+            s->iife_ptr = s->token.ptr;
         if (js_parse_unary(s, PF_POW_FORBIDDEN))
             return -1;
         switch(op) {
@@ -28067,8 +28245,10 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             emit_u16(s, with_idx);
 
             set_eval_ret_undefined(s);
+            s->with_depth++; /* dasher: see js_lazy_begin() */
             if (js_parse_statement(s))
                 goto fail;
+            s->with_depth--;
 
             /* Popping scope drops lexical context for the with object variable */
             pop_scope(s);
@@ -30474,7 +30654,12 @@ static JSFunctionDef *js_new_function_def(JSContext *ctx,
     fd->scope_first = -1;
     fd->body_scope = -1;
 
-    fd->filename = JS_NewAtom(ctx, filename);
+    /* dasher: a function is in its parent's file: no need to look the
+       name up again */
+    if (parent && parent->filename != JS_ATOM_NULL)
+        fd->filename = JS_DupAtom(ctx, parent->filename);
+    else if (filename) /* dasher: a lazy root sets its own */
+        fd->filename = JS_NewAtom(ctx, filename);
     fd->line_num = line_num;
     fd->col_num = col_num;
 
@@ -30523,6 +30708,21 @@ static void free_bytecode_atoms(JSRuntime *rt,
 }
 
 #ifndef QJS_DISABLE_PARSER
+
+/* dasher: frees a JSLazyRecord and those of the functions inside it */
+static void js_lazy_record_free(JSRuntime *rt, JSLazyRecord *r)
+{
+    uint32_t i;
+
+    if (!r)
+        return;
+    for (i = 0; i < r->free_count + r->private_count; i++)
+        JS_FreeAtomRT(rt, r->free[i]);
+    for (i = 0; i < r->child_count; i++)
+        js_lazy_record_free(rt, r->children[i]);
+    js_free_rt(rt, r->children);
+    js_free_rt(rt, r);
+}
 
 static void js_free_function_def(JSContext *ctx, JSFunctionDef *fd)
 {
@@ -30578,6 +30778,8 @@ static void js_free_function_def(JSContext *ctx, JSFunctionDef *fd)
     dbuf_free(&fd->pc2line);
 
     js_source_text_release(ctx->rt, fd->source_text);
+    if (!fd->lazy_record_borrowed) /* dasher */
+        js_lazy_record_free(ctx->rt, fd->lazy_record);
 
     if (fd->parent) {
         /* remove in parent list */
@@ -31592,7 +31794,8 @@ static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
             var_object_test(ctx, s, var_name, op, bc, &label_done, 0);
         }
 
-        if (fd->is_eval)
+        /* dasher: and so is a lazy root */
+        if (fd->is_eval || fd->is_lazy_root)
             break; /* it it necessarily the top level function */
     }
 
@@ -31600,7 +31803,8 @@ static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
        which is necessarily at the top level) */
     if (!fd)
         fd = s;
-    if (var_idx < 0 && fd->is_eval) {
+    /* dasher: a lazy root's closure is looked up the same way */
+    if (var_idx < 0 && (fd->is_eval || fd->is_lazy_root)) {
         int idx1;
         for (idx1 = 0; idx1 < fd->closure_var_count; idx1++) {
             JSClosureVar *cv = &fd->closure_var[idx1];
@@ -31826,7 +32030,7 @@ static int resolve_scope_private_field1(JSContext *ctx,
         }
         scope_level = fd->parent_scope_level;
         if (!fd->parent) {
-            if (fd->is_eval) {
+            if (fd->is_eval || fd->is_lazy_root) { /* dasher: lazy root */
                 /* closure of the eval function (top level) */
                 for (idx = 0; idx < fd->closure_var_count; idx++) {
                     JSClosureVar *cv = &fd->closure_var[idx];
@@ -32034,7 +32238,7 @@ static void add_eval_variables(JSContext *ctx, JSFunctionDef *s)
        they must be all put in the closure. The closure variables are
        ordered by scope. It works only because no closure are created
        before. */
-    assert(s->is_eval || s->closure_var_count == 0);
+    assert(s->is_eval || s->is_lazy_root || s->closure_var_count == 0);
 
     /* XXX: inefficient, but eval performance is less critical */
     fd = s;
@@ -32107,7 +32311,7 @@ static void add_eval_variables(JSContext *ctx, JSFunctionDef *s)
                 }
             }
         }
-        if (fd->is_eval) {
+        if (fd->is_eval || fd->is_lazy_root) { /* dasher: lazy root */
             int idx;
             /* add direct eval variables (we are necessarily at the
                top level) */
@@ -34333,19 +34537,314 @@ static int add_module_variables(JSContext *ctx, JSFunctionDef *fd)
     return 0;
 }
 
-/* create a function object from a function definition. The function
-   definition is freed. All the child functions are also created. It
-   must be done this way to resolve all the variables. */
-static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
-{
-    JSValue func_obj;
-    JSFunctionBytecode *b;
-    struct list_head *el, *el1;
-    int stack_size, scope, idx;
-    int function_size, byte_code_offset, cpool_offset;
-    int closure_var_offset, vardefs_offset;
+/* dasher: the closure of a lazy function. A shell (JS_LAZY_SHELL) keeps
+   the names it uses and does not define. Each is looked up from where the
+   function was defined, the way resolve_scope_var() looks up a name that
+   is not local, so that the variables it finds are captured and the shell
+   gets a closure variable for each: the closure the function will have
+   when it is compiled. Its closure_var stays in the order of that walk
+   (innermost first), as direct eval's does, because a lazy root looks
+   names up in it in order (see resolve_scope_var), and a 'with' object or
+   a sloppy eval's variable object on the way must be tested only by the
+   names found beyond it. 'keys' gets each closure variable's place in the
+   walk. */
+typedef struct JSLazyKeys {
+    int *key;
+    int size;
+    int count;
+    bool has_marker; /* a 'with' or eval variable object is in the closure */
+} JSLazyKeys;
 
-    /* recompute scope linkage */
+static int js_lazy_note(JSContext *ctx, JSFunctionDef *lf, JSLazyKeys *k,
+                        int idx, int key)
+{
+    if (idx < 0)
+        return -1;
+    if (idx >= k->count) {
+        if (js_resize_array(ctx, (void **)&k->key, sizeof(k->key[0]),
+                            &k->size, idx + 1))
+            return -1;
+        k->key[idx] = key;
+        k->count = idx + 1;
+    }
+    return 0;
+}
+
+static int js_lazy_resolve_name(JSContext *ctx, JSFunctionDef *lf,
+                                JSAtom name, JSLazyKeys *k)
+{
+    JSFunctionDef *fd;
+    JSVarDef *vd;
+    int scope_level, idx, var_idx, step;
+    bool is_pseudo_var, is_arg_scope;
+
+    is_pseudo_var = (name == JS_ATOM_home_object ||
+                     name == JS_ATOM_this_active_func ||
+                     name == JS_ATOM_new_target ||
+                     name == JS_ATOM_this);
+    var_idx = -1;
+    step = 0;
+    for (fd = lf; fd->parent;) {
+        scope_level = fd->parent_scope_level;
+        fd = fd->parent;
+        for (idx = fd->scopes[scope_level].first; idx >= 0; idx = vd->scope_next) {
+            vd = &fd->vars[idx];
+            step++;
+            if (vd->var_name == name) {
+                var_idx = idx;
+                break;
+            }
+            if (vd->var_name == JS_ATOM__with_ && !is_pseudo_var) {
+                vd->is_captured = 1;
+                k->has_marker = true;
+                if (js_lazy_note(ctx, lf, k,
+                                 get_closure_var(ctx, lf, fd, false, idx,
+                                                 vd->var_name, false, false,
+                                                 JS_VAR_NORMAL), step))
+                    return -1;
+            }
+        }
+        if (var_idx >= 0)
+            break;
+        is_arg_scope = (idx == ARG_SCOPE_END);
+        step++;
+        if (!is_arg_scope) {
+            var_idx = find_var(ctx, fd, name);
+            if (var_idx >= 0)
+                break;
+        }
+        if (is_pseudo_var) {
+            var_idx = resolve_pseudo_var(ctx, fd, name);
+            if (var_idx >= 0)
+                break;
+        }
+        if (name == JS_ATOM_arguments && fd->has_arguments_binding) {
+            var_idx = add_arguments_var(ctx, fd);
+            break;
+        }
+        if (fd->is_func_expr && fd->func_name == name) {
+            var_idx = add_func_var(ctx, fd, name);
+            break;
+        }
+        step++;
+        if (!is_arg_scope && fd->var_object_idx >= 0 && !is_pseudo_var) {
+            vd = &fd->vars[fd->var_object_idx];
+            vd->is_captured = 1;
+            k->has_marker = true;
+            if (js_lazy_note(ctx, lf, k,
+                             get_closure_var(ctx, lf, fd, false,
+                                             fd->var_object_idx, vd->var_name,
+                                             false, false, JS_VAR_NORMAL), step))
+                return -1;
+        }
+        step++;
+        if (fd->arg_var_object_idx >= 0 && !is_pseudo_var) {
+            vd = &fd->vars[fd->arg_var_object_idx];
+            vd->is_captured = 1;
+            k->has_marker = true;
+            if (js_lazy_note(ctx, lf, k,
+                             get_closure_var(ctx, lf, fd, false,
+                                             fd->arg_var_object_idx, vd->var_name,
+                                             false, false, JS_VAR_NORMAL), step))
+                return -1;
+        }
+        step++;
+        if (fd->is_eval || fd->is_lazy_root)
+            break;
+    }
+    if (var_idx < 0) {
+        /* the closure of the top level: direct eval or lazy root */
+        if (fd->is_eval || fd->is_lazy_root) {
+            int idx1;
+            for (idx1 = 0; idx1 < fd->closure_var_count; idx1++) {
+                JSClosureVar *cv = &fd->closure_var[idx1];
+                if (cv->var_name == name) {
+                    return js_lazy_note(ctx, lf, k,
+                                        get_closure_var2(ctx, lf, fd, false,
+                                                         cv->is_arg, idx1,
+                                                         cv->var_name, cv->is_const,
+                                                         cv->is_lexical, cv->var_kind),
+                                        step + 1 + idx1);
+                }
+                if ((cv->var_name == JS_ATOM__var_ ||
+                     cv->var_name == JS_ATOM__arg_var_ ||
+                     cv->var_name == JS_ATOM__with_) && !is_pseudo_var) {
+                    k->has_marker = true;
+                    if (js_lazy_note(ctx, lf, k,
+                                     get_closure_var2(ctx, lf, fd, false,
+                                                      cv->is_arg, idx1,
+                                                      cv->var_name, false, false,
+                                                      JS_VAR_NORMAL),
+                                     step + 1 + idx1))
+                        return -1;
+                }
+            }
+        }
+        return 0; /* a global */
+    }
+    if (var_idx & ARGUMENT_VAR_OFFSET) {
+        var_idx -= ARGUMENT_VAR_OFFSET;
+        fd->args[var_idx].is_captured = 1;
+        idx = get_closure_var(ctx, lf, fd, true, var_idx, name, false, false,
+                              JS_VAR_NORMAL);
+    } else {
+        vd = &fd->vars[var_idx];
+        vd->is_captured = 1;
+        idx = get_closure_var(ctx, lf, fd, false, var_idx, name,
+                              vd->is_const, vd->is_lexical, vd->var_kind);
+    }
+    return js_lazy_note(ctx, lf, k, idx, step);
+}
+
+typedef struct JSLazySortItem {
+    int key;
+    int idx;
+} JSLazySortItem;
+
+static int js_lazy_sort_cmp(const void *a, const void *b)
+{
+    const JSLazySortItem *x = a, *y = b;
+    if (x->key != y->key)
+        return x->key < y->key ? -1 : 1;
+    return x->idx - y->idx;
+}
+
+/* dasher: turns the shell 'fd' into a lazy JSFunctionBytecode, which
+   holds what js_lazy_compile() needs, and frees the shell */
+static JSValue js_create_lazy_function(JSContext *ctx, JSFunctionDef *fd)
+{
+    JSLazyRecord *r = fd->lazy_record;
+    JSLazyKeys k = { NULL, 0, 0, false };
+    JSFunctionBytecode *b;
+    JSLazyInfo *li;
+    uint32_t i;
+    int n;
+
+    for (i = 0; i < r->free_count; i++) {
+        if (js_lazy_resolve_name(ctx, fd, r->free[i], &k))
+            goto fail;
+    }
+    for (i = r->free_count; i < r->free_count + r->private_count; i++) {
+        bool is_ref;
+        int idx, var_kind;
+        /* an undefined private name is a syntax error here, as it is
+           when the function is compiled with its parent */
+        idx = resolve_scope_private_field1(ctx, &is_ref, &var_kind, fd,
+                                           r->free[i], 0);
+        if (idx < 0)
+            goto fail;
+        /* the kind is needed to look the name up in a lazy root's closure */
+        if (is_ref)
+            fd->closure_var[idx].var_kind = var_kind;
+        if (js_lazy_note(ctx, fd, &k, idx, INT32_MAX))
+            goto fail;
+        /* assigning to a private accessor calls its setter, which has a
+           name of its own that the code does not mention */
+        if (var_kind == JS_VAR_PRIVATE_SETTER ||
+            var_kind == JS_VAR_PRIVATE_GETTER_SETTER) {
+            JSAtom setter_name = get_private_setter_name(ctx, r->free[i]);
+            if (setter_name == JS_ATOM_NULL)
+                goto fail;
+            idx = resolve_scope_private_field1(ctx, &is_ref, &var_kind, fd,
+                                               setter_name, 0);
+            JS_FreeAtom(ctx, setter_name);
+            if (idx < 0)
+                goto fail;
+            if (is_ref)
+                fd->closure_var[idx].var_kind = var_kind;
+            if (js_lazy_note(ctx, fd, &k, idx, INT32_MAX))
+                goto fail;
+        }
+    }
+    n = fd->closure_var_count;
+    if (k.has_marker && n > 1) {
+        JSLazySortItem *items;
+        JSClosureVar *cv;
+        int j;
+        items = js_malloc(ctx, n * sizeof(*items));
+        cv = js_malloc(ctx, n * sizeof(*cv));
+        if (!items || !cv) {
+            js_free(ctx, items);
+            js_free(ctx, cv);
+            goto fail;
+        }
+        for (j = 0; j < n; j++) {
+            items[j].key = k.key[j];
+            items[j].idx = j;
+        }
+        qsort(items, n, sizeof(*items), js_lazy_sort_cmp);
+        for (j = 0; j < n; j++)
+            cv[j] = fd->closure_var[items[j].idx];
+        memcpy(fd->closure_var, cv, n * sizeof(*cv));
+        js_free(ctx, items);
+        js_free(ctx, cv);
+    }
+    js_free(ctx, k.key);
+    k.key = NULL;
+
+    li = js_mallocz(ctx, sizeof(*li));
+    b = js_mallocz(ctx, sizeof(*b) + n * sizeof(*b->closure_var));
+    if (!li || !b) {
+        js_free(ctx, li);
+        js_free(ctx, b);
+        goto fail;
+    }
+    b->header.ref_count = 1;
+    b->closure_var_count = n;
+    if (n) {
+        b->closure_var = (void *)(b + 1);
+        memcpy(b->closure_var, fd->closure_var, n * sizeof(*b->closure_var));
+    }
+    js_free(ctx, fd->closure_var); /* the atoms moved to b */
+    fd->closure_var = NULL;
+    fd->closure_var_count = 0;
+
+    b->func_name = fd->func_name;
+    fd->func_name = JS_ATOM_NULL;
+    b->filename = fd->filename;
+    fd->filename = JS_ATOM_NULL;
+    b->line_num = fd->line_num;
+    b->col_num = fd->col_num;
+    b->source = fd->source;
+    b->source_len = fd->source_len;
+    b->source_text = fd->source_text;
+    fd->source_text = NULL;
+    b->defined_arg_count = fd->defined_arg_count;
+    b->has_prototype = fd->has_prototype;
+    b->has_simple_parameter_list = r->has_simple_parameter_list;
+    b->is_strict_mode = r->is_strict_mode;
+    b->func_kind = fd->func_kind;
+    /* a method's closure gets its home object when it is defined, before
+       anyone knows whether it uses it */
+    b->need_home_object = fd->has_home_object || fd->need_home_object;
+    b->new_target_allowed = fd->new_target_allowed;
+    b->super_call_allowed = fd->super_call_allowed;
+    b->super_allowed = fd->super_allowed;
+    b->arguments_allowed = fd->arguments_allowed;
+    b->realm = JS_DupContext(ctx);
+    b->is_lazy = 1;
+    b->lazy = li;
+    li->record = r;
+    fd->lazy_record = NULL;
+    li->func_type = fd->func_type;
+    li->is_func_expr = fd->is_func_expr;
+    li->parent_strict = r->parent_strict;
+    li->parent_func_kind = fd->parent->func_kind;
+    li->parent_static_init = fd->parent->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT;
+    add_gc_object(ctx->rt, &b->header, JS_GC_OBJ_TYPE_FUNCTION_BYTECODE);
+    js_free_function_def(ctx, fd);
+    return JS_MKPTR(JS_TAG_FUNCTION_BYTECODE, b);
+ fail:
+    js_free(ctx, k.key);
+    return JS_EXCEPTION;
+}
+
+/* recompute scope linkage (dasher: split out of js_create_function(), for
+   js_lazy_collect()) */
+static void js_link_scopes(JSFunctionDef *fd)
+{
+    int scope, idx;
+
     for (scope = 0; scope < fd->scope_count; scope++) {
         fd->scopes[scope].first = -1;
     }
@@ -34370,6 +34869,28 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
             vd->scope_next = fd->scopes[scope].first;
         }
     }
+}
+
+static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd);
+
+/* create a function object from a function definition. The function
+   definition is freed. All the child functions are also created. It
+   must be done this way to resolve all the variables. */
+/* dasher: with 'into', a lazy function compiled on its first call: its
+   code goes into 'into', and its cpool, vardefs, closure_var and code into
+   a block 'into' keeps in 'lazy'. Returns undefined then. */
+static JSValue js_create_function2(JSContext *ctx, JSFunctionDef *fd,
+                                   JSFunctionBytecode *into)
+{
+    JSValue func_obj;
+    JSFunctionBytecode *b;
+    struct list_head *el, *el1;
+    int stack_size;
+    int function_size, byte_code_offset, cpool_offset;
+    int closure_var_offset, vardefs_offset;
+    uint8_t *base;
+
+    js_link_scopes(fd);
 
     /* if the function contains an eval call, the closure variables
        are used to compile the eval and they must be ordered by scope,
@@ -34393,7 +34914,10 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
 
         fd1 = list_entry(el, JSFunctionDef, link);
         cpool_idx = fd1->parent_cpool_idx;
-        func_obj = js_create_function(ctx, fd1);
+        if (fd1->lazy_state == JS_LAZY_SHELL) /* dasher */
+            func_obj = js_create_lazy_function(ctx, fd1);
+        else
+            func_obj = js_create_function(ctx, fd1);
         if (JS_IsException(func_obj))
             goto fail;
         /* save it in the constant pool */
@@ -34444,12 +34968,28 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
     byte_code_offset = function_size;
     function_size += fd->byte_code.size;
 
-    b = js_mallocz(ctx, function_size);
-    if (!b)
-        goto fail;
-    b->header.ref_count = 1;
+    if (into) {
+        /* dasher: the stub's own closure_var is replaced by the same one */
+        int i;
+        b = into;
+        base = js_mallocz(ctx, function_size - sizeof(*b));
+        if (!base)
+            goto fail;
+        base -= sizeof(*b);
+        for (i = 0; i < b->closure_var_count; i++)
+            JS_FreeAtom(ctx, b->closure_var[i].var_name);
+        JS_FreeAtom(ctx, b->func_name);
+        JS_FreeAtom(ctx, b->filename);
+        js_source_text_release(ctx->rt, b->source_text);
+    } else {
+        b = js_mallocz(ctx, function_size);
+        if (!b)
+            goto fail;
+        b->header.ref_count = 1;
+        base = (uint8_t *)b;
+    }
 
-    b->byte_code_buf = (void *)((uint8_t*)b + byte_code_offset);
+    b->byte_code_buf = (void *)(base + byte_code_offset);
     b->byte_code_len = fd->byte_code.size;
     memcpy(b->byte_code_buf, fd->byte_code.buf, fd->byte_code.size);
     js_free(ctx, fd->byte_code.buf);
@@ -34457,7 +34997,7 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
 
     b->func_name = fd->func_name;
     if (fd->arg_count + fd->var_count > 0) {
-        b->vardefs = (void *)((uint8_t*)b + vardefs_offset);
+        b->vardefs = (void *)(base + vardefs_offset);
         if (fd->arg_count > 0)
             memcpy(b->vardefs, fd->args, fd->arg_count * sizeof(fd->args[0]));
         if (fd->var_count > 0)
@@ -34471,7 +35011,7 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
     }
     b->cpool_count = fd->cpool_count;
     if (b->cpool_count) {
-        b->cpool = (void *)((uint8_t*)b + cpool_offset);
+        b->cpool = (void *)(base + cpool_offset);
         memcpy(b->cpool, fd->cpool, b->cpool_count * sizeof(*b->cpool));
     }
     js_free(ctx, fd->cpool);
@@ -34500,7 +35040,7 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
 
     b->closure_var_count = fd->closure_var_count;
     if (b->closure_var_count) {
-        b->closure_var = (void *)((uint8_t*)b + closure_var_offset);
+        b->closure_var = (void *)(base + closure_var_offset);
         memcpy(b->closure_var, fd->closure_var, b->closure_var_count * sizeof(*b->closure_var));
     }
     js_free(ctx, fd->closure_var);
@@ -34518,9 +35058,16 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
     b->super_allowed = fd->super_allowed;
     b->arguments_allowed = fd->arguments_allowed;
     b->backtrace_barrier = fd->backtrace_barrier;
-    b->realm = JS_DupContext(ctx);
-
-    add_gc_object(ctx->rt, &b->header, JS_GC_OBJ_TYPE_FUNCTION_BYTECODE);
+    if (!fd->lazy_record_borrowed) /* dasher */
+        js_lazy_record_free(ctx->rt, fd->lazy_record);
+    if (into) {
+        /* dasher: the realm and GC header are the stub's */
+        b->lazy = base + sizeof(*b);
+        b->is_lazy = 0;
+    } else {
+        b->realm = JS_DupContext(ctx);
+        add_gc_object(ctx->rt, &b->header, JS_GC_OBJ_TYPE_FUNCTION_BYTECODE);
+    }
 
 #ifdef ENABLE_DUMPS // JS_DUMP_BYTECODE_FINAL
     if (check_dump_flag(ctx->rt, JS_DUMP_BYTECODE_FINAL))
@@ -34533,10 +35080,17 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
     }
 
     js_free(ctx, fd);
+    if (into)
+        return JS_UNDEFINED;
     return JS_MKPTR(JS_TAG_FUNCTION_BYTECODE, b);
  fail:
     js_free_function_def(ctx, fd);
     return JS_EXCEPTION;
+}
+
+static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
+{
+    return js_create_function2(ctx, fd, NULL);
 }
 
 #endif // QJS_DISABLE_PARSER
@@ -34570,6 +35124,15 @@ static void free_function_bytecode(JSRuntime *rt, JSFunctionBytecode *b)
         js_source_text_release(rt, b->source_text);
     else
         js_free_rt(rt, b->source);
+    /* dasher: what a lazy function is compiled from, or the block its code
+       went into */
+    if (b->is_lazy) {
+        JSLazyInfo *li = b->lazy;
+        js_lazy_record_free(rt, li->record);
+        js_free_rt(rt, li);
+    } else if (b->lazy) {
+        js_free_rt(rt, b->lazy);
+    }
 
     remove_gc_object(&b->header);
     if (rt->gc_phase == JS_GC_PHASE_REMOVE_CYCLES && b->header.ref_count != 0) {
@@ -34761,6 +35324,922 @@ static JSFunctionDef *js_parse_function_class_fields_init(JSParseState *s)
     return fd;
 }
 
+/* dasher: the flags of a function that follow from its type and kind, as
+   js_parse_function_decl2() sets them. A lazy root has no parent: the
+   caller sets what an arrow function takes from its parent. */
+static void js_parse_function_set_flags(JSFunctionDef *fd,
+                                        JSParseFunctionEnum func_type,
+                                        JSFunctionKindEnum func_kind)
+{
+    /* XXX: test !fd->is_generator is always false */
+    fd->has_prototype = (func_type == JS_PARSE_FUNC_STATEMENT ||
+                         func_type == JS_PARSE_FUNC_VAR ||
+                         func_type == JS_PARSE_FUNC_EXPR) &&
+                        func_kind == JS_FUNC_NORMAL;
+    fd->has_home_object = (func_type == JS_PARSE_FUNC_METHOD ||
+                           func_type == JS_PARSE_FUNC_GETTER ||
+                           func_type == JS_PARSE_FUNC_SETTER ||
+                           func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
+                           func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
+    fd->has_arguments_binding = (func_type != JS_PARSE_FUNC_ARROW &&
+                                 func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT);
+    fd->has_this_binding = fd->has_arguments_binding;
+    fd->is_derived_class_constructor = (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
+    if (func_type == JS_PARSE_FUNC_ARROW) {
+        if (!fd->parent)
+            goto done;
+        fd->new_target_allowed = fd->parent->new_target_allowed;
+        fd->super_call_allowed = fd->parent->super_call_allowed;
+        fd->super_allowed = fd->parent->super_allowed;
+        fd->arguments_allowed = fd->parent->arguments_allowed;
+    } else if (func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT) {
+        fd->new_target_allowed = true; // although new.target === undefined
+        fd->super_call_allowed = false;
+        fd->super_allowed = true;
+        fd->arguments_allowed = false;
+    } else {
+        fd->new_target_allowed = true;
+        fd->super_call_allowed = fd->is_derived_class_constructor;
+        fd->super_allowed = fd->has_home_object;
+        fd->arguments_allowed = true;
+    }
+
+done:
+    /* fd->in_function_body == false prevents yield/await during the parsing
+       of the arguments in generator/async functions. They are parsed as
+       regular identifiers for other function kinds. */
+    fd->func_kind = func_kind;
+    fd->func_type = func_type;
+}
+
+/* dasher: the parameters and body of the function 'fd', from the first
+   token of the parameters to the token after the function, which is
+   reparsed for the parent. Split out of js_parse_function_decl2() so that
+   js_lazy_compile() can start here. On failure the caller frees 'fd'. */
+static __exception int js_parse_function_body(JSParseState *s,
+                                              JSFunctionDef *fd,
+                                              JSParseFunctionEnum func_type,
+                                              JSFunctionKindEnum func_kind,
+                                              JSAtom func_name,
+                                              const uint8_t *ptr)
+{
+    JSContext *ctx = s->ctx;
+    bool has_opt_arg;
+
+    if (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
+        func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR) {
+        /* error if not invoked as a constructor */
+        emit_op(s, OP_check_ctor);
+    }
+
+    if (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR) {
+        emit_class_field_init(s);
+    }
+
+    /* parse arguments */
+    fd->has_simple_parameter_list = true;
+    fd->has_parameter_expressions = false;
+    has_opt_arg = false;
+    if (func_type == JS_PARSE_FUNC_ARROW && s->token.val == TOK_IDENT) {
+        JSAtom name;
+        if (s->token.u.ident.is_reserved) {
+            js_parse_error_reserved_identifier(s);
+            return -1;
+        }
+        name = s->token.u.ident.atom;
+        if (add_arg(ctx, fd, name) < 0)
+            return -1;
+        fd->defined_arg_count = 1;
+    } else if (func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT) {
+        if (s->token.val == '(') {
+            int skip_bits;
+            /* if there is an '=' inside the parameter list, we
+               consider there is a parameter expression inside */
+            js_parse_skip_parens_token(s, &skip_bits, false);
+            if (skip_bits & SKIP_HAS_ASSIGNMENT)
+                fd->has_parameter_expressions = true;
+            if (next_token(s))
+                return -1;
+        } else {
+            if (js_parse_expect(s, '('))
+                return -1;
+        }
+
+        if (fd->has_parameter_expressions) {
+            fd->scope_level = -1; /* force no parent scope */
+            if (push_scope(s) < 0)
+                return -1;
+        }
+
+        while (s->token.val != ')') {
+            JSAtom name;
+            bool rest = false;
+            int idx, has_initializer;
+
+            if (s->token.val == TOK_ELLIPSIS) {
+                fd->has_simple_parameter_list = false;
+                rest = true;
+                if (next_token(s))
+                    return -1;
+            }
+            if (s->token.val == '[' || s->token.val == '{') {
+                fd->has_simple_parameter_list = false;
+                if (rest) {
+                    emit_op(s, OP_rest);
+                    emit_u16(s, fd->arg_count);
+                } else {
+                    /* unnamed arg for destructuring */
+                    idx = add_arg(ctx, fd, JS_ATOM_NULL);
+                    emit_op(s, OP_get_arg);
+                    emit_u16(s, idx);
+                }
+                has_initializer = js_parse_destructuring_element(s, fd->has_parameter_expressions ? TOK_LET : TOK_VAR, true, true, -1, true, false);
+                if (has_initializer < 0)
+                    return -1;
+                if (has_initializer)
+                    has_opt_arg = true;
+                if (!has_opt_arg)
+                    fd->defined_arg_count++;
+            } else if (s->token.val == TOK_IDENT) {
+                if (s->token.u.ident.is_reserved) {
+                    js_parse_error_reserved_identifier(s);
+                    return -1;
+                }
+                name = s->token.u.ident.atom;
+                if (name == JS_ATOM_yield && fd->func_kind == JS_FUNC_GENERATOR) {
+                    js_parse_error_reserved_identifier(s);
+                    return -1;
+                }
+                if (fd->has_parameter_expressions) {
+                    if (js_parse_check_duplicate_parameter(s, name))
+                        return -1;
+                    if (define_var(s, fd, name, JS_VAR_DEF_LET) < 0)
+                        return -1;
+                }
+                /* XXX: could avoid allocating an argument if rest is true */
+                idx = add_arg(ctx, fd, name);
+                if (idx < 0)
+                    return -1;
+                if (next_token(s))
+                    return -1;
+                if (rest) {
+                    emit_op(s, OP_rest);
+                    emit_u16(s, idx);
+                    if (fd->has_parameter_expressions) {
+                        emit_op(s, OP_dup);
+                        emit_op(s, OP_scope_put_var_init);
+                        emit_atom(s, name);
+                        emit_u16(s, fd->scope_level);
+                    }
+                    emit_op(s, OP_put_arg);
+                    emit_u16(s, idx);
+                    fd->has_simple_parameter_list = false;
+                    has_opt_arg = true;
+                } else if (s->token.val == '=') {
+                    int label;
+
+                    fd->has_simple_parameter_list = false;
+                    has_opt_arg = true;
+
+                    if (next_token(s))
+                        return -1;
+
+                    label = new_label(s);
+                    emit_op(s, OP_get_arg);
+                    emit_u16(s, idx);
+                    emit_op(s, OP_dup);
+                    emit_op(s, OP_undefined);
+                    emit_op(s, OP_strict_eq);
+                    emit_goto(s, OP_if_false, label);
+                    emit_op(s, OP_drop);
+                    if (js_parse_assign_expr(s))
+                        return -1;
+                    set_object_name(s, name);
+                    emit_op(s, OP_dup);
+                    emit_op(s, OP_put_arg);
+                    emit_u16(s, idx);
+                    emit_label(s, label);
+                    emit_op(s, OP_scope_put_var_init);
+                    emit_atom(s, name);
+                    emit_u16(s, fd->scope_level);
+                } else {
+                    if (!has_opt_arg) {
+                        fd->defined_arg_count++;
+                    }
+                    if (fd->has_parameter_expressions) {
+                        /* copy the argument to the argument scope */
+                        emit_op(s, OP_get_arg);
+                        emit_u16(s, idx);
+                        emit_op(s, OP_scope_put_var_init);
+                        emit_atom(s, name);
+                        emit_u16(s, fd->scope_level);
+                    }
+                }
+            } else {
+                js_parse_error(s, "missing formal parameter");
+                return -1;
+            }
+            if (rest && s->token.val != ')') {
+                js_parse_expect(s, ')');
+                return -1;
+            }
+            if (s->token.val == ')')
+                break;
+            if (js_parse_expect(s, ','))
+                return -1;
+        }
+        if ((func_type == JS_PARSE_FUNC_GETTER && fd->arg_count != 0) ||
+            (func_type == JS_PARSE_FUNC_SETTER && fd->arg_count != 1)) {
+            js_parse_error(s, "invalid number of arguments for getter or setter");
+            return -1;
+        }
+    }
+
+    if (fd->has_parameter_expressions) {
+        int idx;
+
+        /* Copy the variables in the argument scope to the variable
+           scope (see FunctionDeclarationInstantiation() in spec). The
+           normal arguments are already present, so no need to copy
+           them. */
+        idx = fd->scopes[fd->scope_level].first;
+        while (idx >= 0) {
+            JSVarDef *vd = &fd->vars[idx];
+            if (vd->scope_level != fd->scope_level)
+                break;
+            if (find_var(ctx, fd, vd->var_name) < 0) {
+                if (add_var(ctx, fd, vd->var_name) < 0)
+                    return -1;
+                vd = &fd->vars[idx]; /* fd->vars may have been reallocated */
+                emit_op(s, OP_scope_get_var);
+                emit_atom(s, vd->var_name);
+                emit_u16(s, fd->scope_level);
+                emit_op(s, OP_scope_put_var);
+                emit_atom(s, vd->var_name);
+                emit_u16(s, 0);
+            }
+            idx = vd->scope_next;
+        }
+
+        /* the argument scope has no parent, hence we don't use pop_scope(s) */
+        emit_op(s, OP_leave_scope);
+        emit_u16(s, fd->scope_level);
+
+        /* set the variable scope as the current scope */
+        fd->scope_level = 0;
+        fd->scope_first = fd->scopes[fd->scope_level].first;
+    }
+
+    if (next_token(s))
+        return -1;
+
+    /* generator function: yield after the parameters are evaluated */
+    if (func_kind == JS_FUNC_GENERATOR ||
+        func_kind == JS_FUNC_ASYNC_GENERATOR)
+        emit_op(s, OP_initial_yield);
+
+    /* in generators, yield expression is forbidden during the parsing
+       of the arguments */
+    fd->in_function_body = true;
+    push_scope(s);  /* enter body scope */
+    fd->body_scope = fd->scope_level;
+
+    if (s->token.val == TOK_ARROW) {
+        if (next_token(s))
+            return -1;
+
+        if (s->token.val != '{') {
+            if (js_parse_function_check_names(s, fd, func_name))
+                return -1;
+
+            if (js_parse_assign_expr(s))
+                return -1;
+
+            if (func_kind != JS_FUNC_NORMAL)
+                emit_op(s, OP_return_async);
+            else
+                emit_op(s, OP_return);
+
+            /* save the function source code */
+            /* the end of the function source code is after the last
+                token of the function source stored into s->last_ptr */
+            if (js_parse_set_source(s, fd, ptr, s->last_ptr - ptr))
+                return -1;
+
+            goto done;
+        }
+    }
+
+    // js_parse_class() already consumed the '{'
+    if (func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT)
+        if (js_parse_expect(s, '{'))
+            return -1;
+
+    if (js_parse_directives(s))
+        return -1;
+
+    /* in strict_mode, check function and argument names */
+    if (js_parse_function_check_names(s, fd, func_name))
+        return -1;
+
+    while (s->token.val != '}') {
+        if (js_parse_source_element(s))
+            return -1;
+    }
+
+    /* save the function source code */
+    if (js_parse_set_source(s, fd, ptr, s->buf_ptr - ptr))
+        return -1;
+
+    if (next_token(s)) {
+        /* consume the '}' */
+        return -1;
+    }
+
+    /* in case there is no return, add one */
+    if (js_is_live_code(s)) {
+        emit_return(s, false);
+    }
+done:
+    s->cur_func = fd->parent;
+
+    /* Reparse identifiers after the function is terminated so that
+       the token is parsed in the englobing function. It could be done
+       by just using next_token() here for normal functions, but it is
+       necessary for arrow functions with an expression body. */
+    if (s->cur_func) /* dasher: NULL after a lazy root */
+        reparse_ident_token(s);
+    return 0;
+}
+
+/* dasher: lazy compilation.
+
+   A function that is not likely to be called as soon as it is defined
+   (see js_lazy_begin) is a candidate. It is parsed in full, so a syntax
+   error anywhere in it still fails its script, and at its end it is
+   dropped (js_lazy_drop): what its parent needs is kept in a shell, a
+   JSFunctionDef with nothing else in it, and what compiling it later
+   needs in a JSLazyRecord. When the parent is compiled, the shell becomes
+   a JSFunctionBytecode with no code (js_create_lazy_function), whose
+   closure is worked out then from the names the function uses. Its first
+   call compiles it from the script's text (js_lazy_compile), skipping
+   over the functions inside it with their own records, which become lazy
+   functions in turn.
+
+   A candidate is kept after all if it or anything inside it calls eval():
+   eval can reach any variable around it, and compiling a function on its
+   own gives it only the closure its names called for. */
+
+
+typedef struct JSLazyNames {
+    JSAtom *plain;
+    int plain_count, plain_size;
+    JSAtom *priv;
+    int priv_count, priv_size;
+} JSLazyNames;
+
+static void js_lazy_names_free(JSContext *ctx, JSLazyNames *n)
+{
+    int i;
+    for (i = 0; i < n->plain_count; i++)
+        JS_FreeAtom(ctx, n->plain[i]);
+    for (i = 0; i < n->priv_count; i++)
+        JS_FreeAtom(ctx, n->priv[i]);
+    js_free(ctx, n->plain);
+    js_free(ctx, n->priv);
+}
+
+static int js_lazy_names_add(JSContext *ctx, JSLazyNames *n, JSAtom name,
+                             bool is_private)
+{
+    JSAtom **pa = is_private ? &n->priv : &n->plain;
+    int *pcount = is_private ? &n->priv_count : &n->plain_count;
+    int *psize = is_private ? &n->priv_size : &n->plain_size;
+
+    if (*pcount > 0 && (*pa)[*pcount - 1] == name)
+        return 0;
+    if (js_resize_array(ctx, (void **)pa, sizeof(**pa), psize, *pcount + 1))
+        return -1;
+    (*pa)[(*pcount)++] = JS_DupAtom(ctx, name);
+    return 0;
+}
+
+static int js_lazy_atom_cmp(const void *a, const void *b)
+{
+    JSAtom x = *(const JSAtom *)a, y = *(const JSAtom *)b;
+    return x < y ? -1 : x > y;
+}
+
+static int js_lazy_unique(JSContext *ctx, JSAtom *a, int n)
+{
+    int i, j;
+    if (n < 2)
+        return n;
+    qsort(a, n, sizeof(*a), js_lazy_atom_cmp);
+    for (i = j = 1; i < n; i++) {
+        if (a[i] != a[j - 1])
+            a[j++] = a[i];
+        else
+            JS_FreeAtom(ctx, a[i]);
+    }
+    return j;
+}
+
+/* whether 'name', used at 'scope_level' in 'fd', is found in 'fd': the
+   local part of resolve_scope_var() and resolve_scope_private_field1() */
+static bool js_lazy_is_bound(JSContext *ctx, JSFunctionDef *fd, JSAtom name,
+                             int scope_level, bool is_private)
+{
+    JSVarDef *vd;
+    int idx;
+
+    if (is_private)
+        return find_private_class_field_all(ctx, fd, name, scope_level) >= 0;
+    for (idx = fd->scopes[scope_level].first; idx >= 0; idx = vd->scope_next) {
+        vd = &fd->vars[idx];
+        if (vd->var_name == name)
+            return true;
+    }
+    if (idx != ARG_SCOPE_END && find_var(ctx, fd, name) >= 0)
+        return true;
+    if (fd->has_this_binding &&
+        (name == JS_ATOM_home_object || name == JS_ATOM_this_active_func ||
+         name == JS_ATOM_new_target || name == JS_ATOM_this))
+        return true;
+    if (name == JS_ATOM_arguments && fd->has_arguments_binding)
+        return true;
+    if (fd->is_func_expr && name == fd->func_name)
+        return true;
+    return false;
+}
+
+/* adds to 'n' the names 'fd' and the functions inside it use and do not
+   find in 'fd'. fd's code is dropped: its atoms are freed on the way. */
+static int js_lazy_collect(JSContext *ctx, JSFunctionDef *fd, JSLazyNames *n)
+{
+    const uint8_t *bc = fd->byte_code.buf;
+    int pos, len = fd->byte_code.size, op, scope, i, ret = 0;
+    struct list_head *el;
+    JSAtom name;
+    bool priv;
+    /* a name is often used again in the same scope */
+    struct { JSAtom name; int scope; bool bound; } seen[32];
+
+    memset(seen, 0, sizeof(seen));
+    js_link_scopes(fd);
+    for (pos = 0; pos < len; pos += opcode_info[op].size) {
+        op = bc[pos];
+        if (pos + opcode_info[op].size > len)
+            break; /* cut short when memory ran out */
+        switch (opcode_info[op].fmt) {
+        case OP_FMT_atom:
+        case OP_FMT_atom_u8:
+        case OP_FMT_atom_u16:
+        case OP_FMT_atom_label_u8:
+        case OP_FMT_atom_label_u16:
+            break;
+        default:
+            continue;
+        }
+        name = get_u32(bc + pos + 1);
+        switch (op) {
+        case OP_scope_get_var_undef:
+        case OP_scope_get_var:
+        case OP_scope_put_var:
+        case OP_scope_delete_var:
+        case OP_scope_get_ref:
+        case OP_scope_put_var_init:
+            name = get_u32(bc + pos + 1);
+            scope = get_u16(bc + pos + 5);
+            priv = false;
+            break;
+        case OP_scope_make_ref:
+            name = get_u32(bc + pos + 1);
+            scope = get_u16(bc + pos + 9);
+            priv = false;
+            break;
+        case OP_scope_get_private_field:
+        case OP_scope_get_private_field2:
+        case OP_scope_put_private_field:
+        case OP_scope_in_private_field:
+            name = get_u32(bc + pos + 1);
+            scope = get_u16(bc + pos + 5);
+            priv = true;
+            break;
+        default:
+            JS_FreeAtom(ctx, name);
+            continue;
+        }
+        if (!ret) {
+            int h = (name * 31 + scope) & (countof(seen) - 1);
+            bool bound;
+            if (seen[h].name == name && seen[h].scope == scope && name != JS_ATOM_NULL) {
+                bound = seen[h].bound;
+            } else {
+                bound = js_lazy_is_bound(ctx, fd, name, scope, priv);
+                seen[h].name = name;
+                seen[h].scope = scope;
+                seen[h].bound = bound;
+            }
+            if (!bound && js_lazy_names_add(ctx, n, name, priv))
+                ret = -1;
+        }
+        JS_FreeAtom(ctx, name);
+    }
+    /* every atom in the code has been freed */
+    fd->byte_code.size = 0;
+    if (ret)
+        return -1;
+    list_for_each(el, &fd->child_list) {
+        JSFunctionDef *c = list_entry(el, JSFunctionDef, link);
+        JSLazyNames sub = { 0 };
+        JSAtom *names;
+        int count, priv_from;
+
+        if (c->lazy_state == JS_LAZY_SHELL) {
+            names = c->lazy_record->free;
+            priv_from = c->lazy_record->free_count;
+            count = priv_from + c->lazy_record->private_count;
+        } else {
+            if (js_lazy_collect(ctx, c, &sub))
+                goto fail_sub;
+            /* one array, the private names last */
+            if (sub.priv_count) {
+                if (js_resize_array(ctx, (void **)&sub.plain, sizeof(JSAtom),
+                                    &sub.plain_size,
+                                    sub.plain_count + sub.priv_count))
+                    goto fail_sub;
+                memcpy(sub.plain + sub.plain_count, sub.priv,
+                       sub.priv_count * sizeof(JSAtom));
+            }
+            names = sub.plain;
+            priv_from = sub.plain_count;
+            count = priv_from + sub.priv_count;
+            /* the atoms are now all in sub.plain, for js_lazy_names_free() */
+            sub.plain_count = count;
+            sub.priv_count = 0;
+        }
+        for (i = 0; i < count; i++) {
+            priv = i >= priv_from;
+            if (!js_lazy_is_bound(ctx, fd, names[i], c->parent_scope_level, priv) &&
+                js_lazy_names_add(ctx, n, names[i], priv))
+                goto fail_sub;
+        }
+        js_lazy_names_free(ctx, &sub);
+        continue;
+    fail_sub:
+        js_lazy_names_free(ctx, &sub);
+        return -1;
+    }
+    n->plain_count = js_lazy_unique(ctx, n->plain, n->plain_count);
+    n->priv_count = js_lazy_unique(ctx, n->priv, n->priv_count);
+    return 0;
+}
+
+static bool js_lazy_has_eval(JSFunctionDef *fd)
+{
+    struct list_head *el;
+    if (fd->has_eval_call)
+        return true;
+    list_for_each(el, &fd->child_list) {
+        JSFunctionDef *c = list_entry(el, JSFunctionDef, link);
+        if (c->lazy_state != JS_LAZY_SHELL && js_lazy_has_eval(c))
+            return true;
+    }
+    return false;
+}
+
+/* frees all of 'fd' but what its parent needs when it is compiled */
+static void js_lazy_make_shell(JSContext *ctx, JSFunctionDef *fd)
+{
+    struct list_head *el, *el1;
+    int i;
+
+    list_for_each_safe(el, el1, &fd->child_list) {
+        js_free_function_def(ctx, list_entry(el, JSFunctionDef, link));
+    }
+    free_bytecode_atoms(ctx->rt, fd->byte_code.buf, fd->byte_code.size,
+                        fd->use_short_opcodes);
+    dbuf_free(&fd->byte_code);
+    js_dbuf_init(ctx, &fd->byte_code);
+    fd->last_opcode_pos = -1;
+    js_free(ctx, fd->jump_slots);
+    fd->jump_slots = NULL;
+    fd->jump_size = fd->jump_count = 0;
+    js_free(ctx, fd->label_slots);
+    fd->label_slots = NULL;
+    fd->label_size = fd->label_count = 0;
+    js_free(ctx, fd->source_loc_slots);
+    fd->source_loc_slots = NULL;
+    fd->source_loc_size = fd->source_loc_count = 0;
+    for (i = 0; i < fd->cpool_count; i++)
+        JS_FreeValue(ctx, fd->cpool[i]);
+    js_free(ctx, fd->cpool);
+    fd->cpool = NULL;
+    fd->cpool_size = fd->cpool_count = 0;
+    for (i = 0; i < fd->var_count; i++)
+        JS_FreeAtom(ctx, fd->vars[i].var_name);
+    js_free(ctx, fd->vars);
+    js_free(ctx, fd->vars_htab);
+    fd->vars = NULL;
+    fd->vars_htab = NULL;
+    fd->var_size = fd->var_count = 0;
+    for (i = 0; i < fd->arg_count; i++)
+        JS_FreeAtom(ctx, fd->args[i].var_name);
+    js_free(ctx, fd->args);
+    fd->args = NULL;
+    fd->arg_size = fd->arg_count = 0;
+    for (i = 0; i < fd->global_var_count; i++)
+        JS_FreeAtom(ctx, fd->global_vars[i].var_name);
+    js_free(ctx, fd->global_vars);
+    fd->global_vars = NULL;
+    fd->global_var_size = fd->global_var_count = 0;
+    for (i = 0; i < fd->closure_var_count; i++)
+        JS_FreeAtom(ctx, fd->closure_var[i].var_name);
+    js_free(ctx, fd->closure_var);
+    fd->closure_var = NULL;
+    fd->closure_var_size = fd->closure_var_count = 0;
+    if (fd->scopes != fd->def_scope_array)
+        js_free(ctx, fd->scopes);
+    fd->scopes = fd->def_scope_array;
+    fd->scope_size = countof(fd->def_scope_array);
+    fd->scope_count = 1;
+    fd->scopes[0].first = -1;
+    fd->scopes[0].parent = -1;
+    fd->scope_level = 0;
+    fd->scope_first = -1;
+    dbuf_free(&fd->pc2line);
+    js_dbuf_init(ctx, &fd->pc2line);
+    fd->var_object_idx = -1;
+    fd->arg_var_object_idx = -1;
+    fd->arguments_var_idx = -1;
+    fd->arguments_arg_idx = -1;
+    fd->func_var_idx = -1;
+    fd->eval_ret_idx = -1;
+    fd->this_var_idx = -1;
+    fd->new_target_var_idx = -1;
+    fd->this_active_func_var_idx = -1;
+    fd->home_object_var_idx = -1;
+    fd->lazy_state = JS_LAZY_SHELL;
+}
+
+/* the candidate 'fd' has been parsed, up to the token after it: keep what
+   is needed to compile it later and make it a shell */
+static int js_lazy_drop(JSParseState *s, JSFunctionDef *fd)
+{
+    JSContext *ctx = s->ctx;
+    JSLazyNames n = { 0 };
+    JSLazyRecord *r;
+    struct list_head *el;
+    uint32_t child_count = 0;
+    int i;
+
+    if (js_lazy_collect(ctx, fd, &n))
+        goto fail;
+    r = js_mallocz(ctx, sizeof(*r) + (n.plain_count + n.priv_count) * sizeof(JSAtom));
+    if (!r)
+        goto fail;
+    /* the atoms move to the record */
+    for (i = 0; i < n.plain_count; i++)
+        r->free[i] = n.plain[i];
+    for (i = 0; i < n.priv_count; i++)
+        r->free[n.plain_count + i] = n.priv[i];
+    r->free_count = n.plain_count;
+    r->private_count = n.priv_count;
+    n.plain_count = n.priv_count = 0;
+    js_lazy_names_free(ctx, &n);
+
+    list_for_each(el, &fd->child_list) {
+        JSFunctionDef *c = list_entry(el, JSFunctionDef, link);
+        if (c->lazy_state == JS_LAZY_SHELL)
+            child_count++;
+    }
+    if (child_count) {
+        r->children = js_malloc(ctx, child_count * sizeof(r->children[0]));
+        if (!r->children) {
+            js_lazy_record_free(ctx->rt, r);
+            return -1;
+        }
+        list_for_each(el, &fd->child_list) {
+            JSFunctionDef *c = list_entry(el, JSFunctionDef, link);
+            if (c->lazy_state == JS_LAZY_SHELL) {
+                r->children[r->child_count++] = c->lazy_record;
+                c->lazy_record = NULL;
+            }
+        }
+    }
+    r->start = fd->lazy_start;
+    r->start_eol = fd->lazy_start_eol;
+    r->start_mark = fd->lazy_start_mark;
+    r->start_line = fd->lazy_start_line;
+    r->end = s->token.ptr - s->buf_start;
+    r->end_eol = s->eol - s->buf_start;
+    r->end_mark = s->mark - s->buf_start;
+    r->end_line = s->token.line_num;
+    r->got_lf = s->got_lf;
+    r->last_line = s->last_line_num;
+    r->last_col = s->last_col_num;
+    r->source_end = (fd->source - fd->source_text->buf) + fd->source_len;
+    r->defined_arg_count = fd->defined_arg_count;
+    r->is_strict_mode = fd->is_strict_mode;
+    r->has_simple_parameter_list = fd->has_simple_parameter_list;
+    r->is_module = s->is_module;
+    r->has_assign = s->assign_count != fd->lazy_start_assign;
+    r->parent_strict = fd->lazy_parent_strict;
+
+    js_lazy_make_shell(ctx, fd);
+    fd->lazy_record = r;
+    return 0;
+ fail:
+    js_lazy_names_free(ctx, &n);
+    return -1;
+}
+
+/* the record of the function starting at 'off' in the parent, if an
+   earlier parse dropped it. The functions in a function are met in source
+   order. */
+static JSLazyRecord *js_lazy_take(JSFunctionDef *parent, uint32_t off)
+{
+    JSLazyRecord *pr = parent->lazy_record, *r;
+
+    while (parent->lazy_cursor < pr->child_count) {
+        r = pr->children[parent->lazy_cursor];
+        if (r && r->start > off)
+            return NULL;
+        parent->lazy_cursor++;
+        if (r && r->start == off) {
+            pr->children[parent->lazy_cursor - 1] = NULL;
+            return r;
+        }
+    }
+    return NULL;
+}
+
+/* called with the first token of the parameters of 'fd'. Returns 1 if the
+   function has been skipped (the token is then the one after it), 0 to
+   parse it, -1 on error. */
+static int js_lazy_begin(JSParseState *s, JSFunctionDef *fd,
+                         JSParseFunctionEnum func_type, const uint8_t *ptr)
+{
+    JSFunctionDef *parent = fd->parent;
+    JSLazyRecord *r = NULL;
+    bool compile_now;
+    uint32_t off;
+
+    /* constructors and static blocks run when their class is defined or
+       used, and the class parser looks into the constructor's definition;
+       a function in a 'with' must look its names up through the object */
+    if (func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT ||
+        func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
+        func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR ||
+        s->with_depth)
+        return 0;
+    off = s->token.ptr - s->buf_start;
+    /* as V8 does, a function in parentheses or after '!' is taken to be
+       called at once, unless its parent is not compiled now either */
+    compile_now = ptr == s->iife_ptr && parent->lazy_state == JS_LAZY_NONE;
+    if (parent->lazy_record)
+        r = js_lazy_take(parent, off);
+    if (r) {
+        if (compile_now) {
+            /* parsed in full, with the records of the functions inside */
+            fd->lazy_record = r;
+            return 0;
+        }
+        fd->lazy_record = r;
+        fd->lazy_state = JS_LAZY_SHELL;
+        fd->defined_arg_count = r->defined_arg_count;
+        fd->is_strict_mode = r->is_strict_mode;
+        fd->has_simple_parameter_list = r->has_simple_parameter_list;
+        if (js_parse_set_source(s, fd, ptr,
+                                r->source_end - (ptr - s->buf_start)))
+            return -1;
+        s->cur_func = parent;
+        s->buf_ptr = s->buf_start + r->end;
+        s->eol = s->buf_start + r->end_eol;
+        s->mark = s->buf_start + r->end_mark;
+        s->line_num = r->end_line;
+        s->token.line_num = r->last_line;
+        s->token.col_num = r->last_col;
+        if (next_token(s))
+            return -1;
+        s->got_lf = r->got_lf;
+        return 1;
+    }
+    if (compile_now)
+        return 0;
+    fd->lazy_state = JS_LAZY_CANDIDATE;
+    fd->lazy_start = off;
+    fd->lazy_start_eol = s->eol - s->buf_start;
+    fd->lazy_start_mark = s->mark - s->buf_start;
+    fd->lazy_start_line = s->token.line_num;
+    fd->lazy_start_assign = s->assign_count;
+    fd->lazy_parent_strict = fd->is_strict_mode;
+    return 0;
+}
+
+/* called at the end of js_parse_function_decl2() for a function that
+   js_lazy_begin() made a candidate or skipped */
+static int js_lazy_end(JSParseState *s, JSFunctionDef *fd)
+{
+    if (fd->lazy_state == JS_LAZY_SHELL) {
+        JSLazyRecord *r = fd->lazy_record;
+        js_lazy_make_shell(s->ctx, fd);
+        fd->lazy_record = r;
+        return 0;
+    }
+    if (js_lazy_has_eval(fd)) {
+        fd->lazy_state = JS_LAZY_NONE;
+        return 0;
+    }
+    return js_lazy_drop(s, fd);
+}
+
+static void js_parse_init(JSContext *ctx, JSParseState *s,
+                          const char *input, size_t input_len,
+                          const char *filename, int line);
+
+/* compiles the lazy function 'b' in place (see js_create_function2) */
+static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
+{
+    JSLazyInfo *li = b->lazy;
+    JSLazyRecord *r = li->record;
+    JSSourceText *t = b->source_text;
+    JSParseState s1, *s = &s1;
+    JSFunctionDef *fd;
+    char filename_buf[ATOM_GET_STR_BUF_SIZE];
+    const char *filename;
+    JSValue ret;
+    int i, err;
+
+    ctx = b->realm;
+    /* only for error messages, which a parse that has succeeded once
+       gives only when it runs out of memory or stack */
+    filename = JS_AtomGetStr(ctx, filename_buf, sizeof(filename_buf), b->filename);
+    js_parse_init(ctx, s, t->buf, t->len, filename, r->start_line);
+    s->lazy = ctx->rt->lazy_functions;
+    s->is_module = r->is_module;
+    s->allow_html_comments = !s->is_module;
+    t->ref_count++;
+    s->source_text = t;
+    s->buf_ptr = s->buf_start + r->start;
+    s->eol = s->buf_start + r->start_eol;
+    s->mark = s->buf_start + r->start_mark;
+    s->token.line_num = r->start_line;
+
+    fd = js_new_function_def(ctx, NULL, false, li->is_func_expr, NULL,
+                             b->line_num, b->col_num);
+    if (!fd)
+        goto fail;
+    fd->filename = JS_DupAtom(ctx, b->filename);
+    fd->is_lazy_root = true;
+    fd->func_name = JS_DupAtom(ctx, b->func_name);
+    js_parse_function_set_flags(fd, li->func_type, b->func_kind);
+    fd->new_target_allowed = b->new_target_allowed;
+    fd->super_call_allowed = b->super_call_allowed;
+    fd->super_allowed = b->super_allowed;
+    fd->arguments_allowed = b->arguments_allowed;
+    fd->need_home_object = b->need_home_object;
+    fd->is_strict_mode = li->parent_strict;
+    fd->lazy_parent_func_kind = li->parent_func_kind;
+    fd->lazy_parent_static_init = li->parent_static_init;
+    fd->lazy_record = r;
+    fd->lazy_record_borrowed = true;
+    for (i = 0; i < b->closure_var_count; i++) {
+        JSClosureVar *cv = &b->closure_var[i];
+        if (add_closure_var(ctx, fd, cv->is_local, cv->is_arg, cv->var_idx,
+                            cv->var_name, cv->is_const, cv->is_lexical,
+                            cv->var_kind) < 0)
+            goto fail_fd;
+    }
+    s->cur_func = fd;
+    if (next_token(s))
+        goto fail_fd;
+    err = js_parse_function_body(s, fd, li->func_type, b->func_kind,
+                                 fd->func_name, (const uint8_t *)b->source);
+    free_token(s, &s->token);
+    js_skip_memo_free(s);
+    js_source_text_release(ctx->rt, s->source_text);
+    s->source_text = NULL;
+    if (err)
+        goto fail_fd;
+    /* the closure is the one the function was created with */
+    assert(fd->closure_var_count == b->closure_var_count);
+    ret = js_create_function2(ctx, fd, b);
+    if (JS_IsException(ret))
+        goto fail;
+    /* compiled: the record went with the parse */
+    js_lazy_record_free(ctx->rt, r);
+    js_free(ctx, li);
+    return 0;
+ fail_fd:
+    js_free_function_def(ctx, fd);
+    return -1;
+ fail:
+    js_source_text_release(ctx->rt, s->source_text);
+    return -1;
+}
+
 /* func_name must be JS_ATOM_NULL for JS_PARSE_FUNC_STATEMENT and
    JS_PARSE_FUNC_EXPR, JS_PARSE_FUNC_ARROW and JS_PARSE_FUNC_VAR */
 static __exception int js_parse_function_decl2(JSParseState *s,
@@ -34777,7 +36256,6 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     JSFunctionDef *fd = s->cur_func;
     bool is_expr;
     int func_idx, lexical_func_idx = -1;
-    bool has_opt_arg;
     bool create_func_var = false;
 
     is_expr = (func_type != JS_PARSE_FUNC_STATEMENT &&
@@ -34893,325 +36371,25 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         *pfd = fd;
     s->cur_func = fd;
     fd->func_name = func_name;
-    /* XXX: test !fd->is_generator is always false */
-    fd->has_prototype = (func_type == JS_PARSE_FUNC_STATEMENT ||
-                         func_type == JS_PARSE_FUNC_VAR ||
-                         func_type == JS_PARSE_FUNC_EXPR) &&
-                        func_kind == JS_FUNC_NORMAL;
-    fd->has_home_object = (func_type == JS_PARSE_FUNC_METHOD ||
-                           func_type == JS_PARSE_FUNC_GETTER ||
-                           func_type == JS_PARSE_FUNC_SETTER ||
-                           func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
-                           func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
-    fd->has_arguments_binding = (func_type != JS_PARSE_FUNC_ARROW &&
-                                 func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT);
-    fd->has_this_binding = fd->has_arguments_binding;
-    fd->is_derived_class_constructor = (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
-    if (func_type == JS_PARSE_FUNC_ARROW) {
-        fd->new_target_allowed = fd->parent->new_target_allowed;
-        fd->super_call_allowed = fd->parent->super_call_allowed;
-        fd->super_allowed = fd->parent->super_allowed;
-        fd->arguments_allowed = fd->parent->arguments_allowed;
-    } else if (func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT) {
-        fd->new_target_allowed = true; // although new.target === undefined
-        fd->super_call_allowed = false;
-        fd->super_allowed = true;
-        fd->arguments_allowed = false;
-    } else {
-        fd->new_target_allowed = true;
-        fd->super_call_allowed = fd->is_derived_class_constructor;
-        fd->super_allowed = fd->has_home_object;
-        fd->arguments_allowed = true;
-    }
+    js_parse_function_set_flags(fd, func_type, func_kind);
 
-    /* fd->in_function_body == false prevents yield/await during the parsing
-       of the arguments in generator/async functions. They are parsed as
-       regular identifiers for other function kinds. */
-    fd->func_kind = func_kind;
-    fd->func_type = func_type;
 
-    if (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
-        func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR) {
-        /* error if not invoked as a constructor */
-        emit_op(s, OP_check_ctor);
-    }
-
-    if (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR) {
-        emit_class_field_init(s);
-    }
-
-    /* parse arguments */
-    fd->has_simple_parameter_list = true;
-    fd->has_parameter_expressions = false;
-    has_opt_arg = false;
-    if (func_type == JS_PARSE_FUNC_ARROW && s->token.val == TOK_IDENT) {
-        JSAtom name;
-        if (s->token.u.ident.is_reserved) {
-            js_parse_error_reserved_identifier(s);
+    /* dasher: a function that is not likely to run at once is parsed in
+       full, which finds any syntax error in it and what it uses from the
+       functions around it, and then dropped: it is compiled again from
+       its text when first called (js_lazy_compile). One that an earlier
+       parse dropped is skipped. See js_lazy_begin(). */
+    if (s->lazy) {
+        int ret = js_lazy_begin(s, fd, func_type, ptr);
+        if (ret < 0)
             goto fail;
-        }
-        name = s->token.u.ident.atom;
-        if (add_arg(ctx, fd, name) < 0)
-            goto fail;
-        fd->defined_arg_count = 1;
-    } else if (func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT) {
-        if (s->token.val == '(') {
-            int skip_bits;
-            /* if there is an '=' inside the parameter list, we
-               consider there is a parameter expression inside */
-            js_parse_skip_parens_token(s, &skip_bits, false);
-            if (skip_bits & SKIP_HAS_ASSIGNMENT)
-                fd->has_parameter_expressions = true;
-            if (next_token(s))
-                goto fail;
-        } else {
-            if (js_parse_expect(s, '('))
-                goto fail;
-        }
-
-        if (fd->has_parameter_expressions) {
-            fd->scope_level = -1; /* force no parent scope */
-            if (push_scope(s) < 0)
-                return -1;
-        }
-
-        while (s->token.val != ')') {
-            JSAtom name;
-            bool rest = false;
-            int idx, has_initializer;
-
-            if (s->token.val == TOK_ELLIPSIS) {
-                fd->has_simple_parameter_list = false;
-                rest = true;
-                if (next_token(s))
-                    goto fail;
-            }
-            if (s->token.val == '[' || s->token.val == '{') {
-                fd->has_simple_parameter_list = false;
-                if (rest) {
-                    emit_op(s, OP_rest);
-                    emit_u16(s, fd->arg_count);
-                } else {
-                    /* unnamed arg for destructuring */
-                    idx = add_arg(ctx, fd, JS_ATOM_NULL);
-                    emit_op(s, OP_get_arg);
-                    emit_u16(s, idx);
-                }
-                has_initializer = js_parse_destructuring_element(s, fd->has_parameter_expressions ? TOK_LET : TOK_VAR, true, true, -1, true, false);
-                if (has_initializer < 0)
-                    goto fail;
-                if (has_initializer)
-                    has_opt_arg = true;
-                if (!has_opt_arg)
-                    fd->defined_arg_count++;
-            } else if (s->token.val == TOK_IDENT) {
-                if (s->token.u.ident.is_reserved) {
-                    js_parse_error_reserved_identifier(s);
-                    goto fail;
-                }
-                name = s->token.u.ident.atom;
-                if (name == JS_ATOM_yield && fd->func_kind == JS_FUNC_GENERATOR) {
-                    js_parse_error_reserved_identifier(s);
-                    goto fail;
-                }
-                if (fd->has_parameter_expressions) {
-                    if (js_parse_check_duplicate_parameter(s, name))
-                        goto fail;
-                    if (define_var(s, fd, name, JS_VAR_DEF_LET) < 0)
-                        goto fail;
-                }
-                /* XXX: could avoid allocating an argument if rest is true */
-                idx = add_arg(ctx, fd, name);
-                if (idx < 0)
-                    goto fail;
-                if (next_token(s))
-                    goto fail;
-                if (rest) {
-                    emit_op(s, OP_rest);
-                    emit_u16(s, idx);
-                    if (fd->has_parameter_expressions) {
-                        emit_op(s, OP_dup);
-                        emit_op(s, OP_scope_put_var_init);
-                        emit_atom(s, name);
-                        emit_u16(s, fd->scope_level);
-                    }
-                    emit_op(s, OP_put_arg);
-                    emit_u16(s, idx);
-                    fd->has_simple_parameter_list = false;
-                    has_opt_arg = true;
-                } else if (s->token.val == '=') {
-                    int label;
-
-                    fd->has_simple_parameter_list = false;
-                    has_opt_arg = true;
-
-                    if (next_token(s))
-                        goto fail;
-
-                    label = new_label(s);
-                    emit_op(s, OP_get_arg);
-                    emit_u16(s, idx);
-                    emit_op(s, OP_dup);
-                    emit_op(s, OP_undefined);
-                    emit_op(s, OP_strict_eq);
-                    emit_goto(s, OP_if_false, label);
-                    emit_op(s, OP_drop);
-                    if (js_parse_assign_expr(s))
-                        goto fail;
-                    set_object_name(s, name);
-                    emit_op(s, OP_dup);
-                    emit_op(s, OP_put_arg);
-                    emit_u16(s, idx);
-                    emit_label(s, label);
-                    emit_op(s, OP_scope_put_var_init);
-                    emit_atom(s, name);
-                    emit_u16(s, fd->scope_level);
-                } else {
-                    if (!has_opt_arg) {
-                        fd->defined_arg_count++;
-                    }
-                    if (fd->has_parameter_expressions) {
-                        /* copy the argument to the argument scope */
-                        emit_op(s, OP_get_arg);
-                        emit_u16(s, idx);
-                        emit_op(s, OP_scope_put_var_init);
-                        emit_atom(s, name);
-                        emit_u16(s, fd->scope_level);
-                    }
-                }
-            } else {
-                js_parse_error(s, "missing formal parameter");
-                goto fail;
-            }
-            if (rest && s->token.val != ')') {
-                js_parse_expect(s, ')');
-                goto fail;
-            }
-            if (s->token.val == ')')
-                break;
-            if (js_parse_expect(s, ','))
-                goto fail;
-        }
-        if ((func_type == JS_PARSE_FUNC_GETTER && fd->arg_count != 0) ||
-            (func_type == JS_PARSE_FUNC_SETTER && fd->arg_count != 1)) {
-            js_parse_error(s, "invalid number of arguments for getter or setter");
-            goto fail;
-        }
+        if (ret > 0)
+            goto skipped;
     }
 
-    if (fd->has_parameter_expressions) {
-        int idx;
-
-        /* Copy the variables in the argument scope to the variable
-           scope (see FunctionDeclarationInstantiation() in spec). The
-           normal arguments are already present, so no need to copy
-           them. */
-        idx = fd->scopes[fd->scope_level].first;
-        while (idx >= 0) {
-            JSVarDef *vd = &fd->vars[idx];
-            if (vd->scope_level != fd->scope_level)
-                break;
-            if (find_var(ctx, fd, vd->var_name) < 0) {
-                if (add_var(ctx, fd, vd->var_name) < 0)
-                    goto fail;
-                vd = &fd->vars[idx]; /* fd->vars may have been reallocated */
-                emit_op(s, OP_scope_get_var);
-                emit_atom(s, vd->var_name);
-                emit_u16(s, fd->scope_level);
-                emit_op(s, OP_scope_put_var);
-                emit_atom(s, vd->var_name);
-                emit_u16(s, 0);
-            }
-            idx = vd->scope_next;
-        }
-
-        /* the argument scope has no parent, hence we don't use pop_scope(s) */
-        emit_op(s, OP_leave_scope);
-        emit_u16(s, fd->scope_level);
-
-        /* set the variable scope as the current scope */
-        fd->scope_level = 0;
-        fd->scope_first = fd->scopes[fd->scope_level].first;
-    }
-
-    if (next_token(s))
+    if (js_parse_function_body(s, fd, func_type, func_kind, func_name, ptr))
         goto fail;
-
-    /* generator function: yield after the parameters are evaluated */
-    if (func_kind == JS_FUNC_GENERATOR ||
-        func_kind == JS_FUNC_ASYNC_GENERATOR)
-        emit_op(s, OP_initial_yield);
-
-    /* in generators, yield expression is forbidden during the parsing
-       of the arguments */
-    fd->in_function_body = true;
-    push_scope(s);  /* enter body scope */
-    fd->body_scope = fd->scope_level;
-
-    if (s->token.val == TOK_ARROW) {
-        if (next_token(s))
-            goto fail;
-
-        if (s->token.val != '{') {
-            if (js_parse_function_check_names(s, fd, func_name))
-                goto fail;
-
-            if (js_parse_assign_expr(s))
-                goto fail;
-
-            if (func_kind != JS_FUNC_NORMAL)
-                emit_op(s, OP_return_async);
-            else
-                emit_op(s, OP_return);
-
-            /* save the function source code */
-            /* the end of the function source code is after the last
-                token of the function source stored into s->last_ptr */
-            if (js_parse_set_source(s, fd, ptr, s->last_ptr - ptr))
-                goto fail;
-
-            goto done;
-        }
-    }
-
-    // js_parse_class() already consumed the '{'
-    if (func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT)
-        if (js_parse_expect(s, '{'))
-            goto fail;
-
-    if (js_parse_directives(s))
-        goto fail;
-
-    /* in strict_mode, check function and argument names */
-    if (js_parse_function_check_names(s, fd, func_name))
-        goto fail;
-
-    while (s->token.val != '}') {
-        if (js_parse_source_element(s))
-            goto fail;
-    }
-
-    /* save the function source code */
-    if (js_parse_set_source(s, fd, ptr, s->buf_ptr - ptr))
-        goto fail;
-
-    if (next_token(s)) {
-        /* consume the '}' */
-        goto fail;
-    }
-
-    /* in case there is no return, add one */
-    if (js_is_live_code(s)) {
-        emit_return(s, false);
-    }
-done:
-    s->cur_func = fd->parent;
-
-    /* Reparse identifiers after the function is terminated so that
-       the token is parsed in the englobing function. It could be done
-       by just using next_token() here for normal functions, but it is
-       necessary for arrow functions with an expression body. */
-    reparse_ident_token(s);
+ skipped:
 
     /* create the function object */
     {
@@ -35314,6 +36492,9 @@ done:
             }
         }
     }
+    /* dasher: drop it now that the parent has what it needs */
+    if (fd->lazy_state != JS_LAZY_NONE && js_lazy_end(s, fd))
+        goto fail;
     return 0;
  fail:
     s->cur_func = fd->parent;
@@ -35464,6 +36645,7 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     bool is_strict_mode;
 
     js_parse_init(ctx, s, input, input_len, filename, line);
+    s->lazy = ctx->rt->lazy_functions; /* dasher */
     skip_shebang(&s->buf_ptr, s->buf_end);
 
     eval_type = flags & JS_EVAL_TYPE_MASK;
@@ -36132,6 +37314,10 @@ static int JS_WriteFunctionTag(BCWriterState *s, JSValueConst obj)
     JSFunctionBytecode *b = JS_VALUE_GET_PTR(obj);
     uint32_t flags;
     int idx, i;
+
+    /* dasher: bytecode is written out compiled */
+    if (b->is_lazy && js_lazy_compile(s->ctx, b))
+        return -1;
 
     bc_put_u8(s, BC_TAG_FUNCTION_BYTECODE);
     flags = idx = 0;
