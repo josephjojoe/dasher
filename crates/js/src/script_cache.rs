@@ -13,32 +13,50 @@
 //! `vendor/rquickjs-sys/PATCHES.md`), so compiling a script compiles only
 //! its top level and the functions it is likely to call at once. The rest
 //! are kept as records of where they are in the text. An entry is the
-//! script's text, written once, and its compiled code in QuickJS's bytecode
-//! format (`JS_WRITE_OBJ_SCRIPT`), with the functions that are not
-//! compiled written as those records.
+//! script's text and its compiled code in QuickJS's bytecode format
+//! (`JS_WRITE_OBJ_SCRIPT`, compressed with zstd), with the functions that
+//! are not compiled written as those records and every function's text as
+//! a place in the script's.
 //!
-//! Each page that uses an entry notes which of its functions it compiled
-//! on their first call. When the page is dropped, the script is compiled
-//! again with those functions compiled with it ("hints"), and the entry is
-//! replaced. The next page then gets exactly the functions pages have been
-//! running, compiled, and the rest still waiting for their first call. The
-//! hints grow as pages run functions the entry lacks, at most
-//! [`MAX_REBUILDS`] times per entry, so a script settles after a few pages.
+//! A script compiled from its text is written out at once, before any of
+//! it runs. The page then notes which of its functions it compiled on
+//! their first call, and the entry keeps that list. The next page to use
+//! the entry reads it back, compiles those functions on their first call
+//! too, and when it is dropped compiles the script again, in a runtime of
+//! its own, with every function the two pages ran compiled with it
+//! ("hints"); the entry is replaced. From the third page on, the functions
+//! pages run are compiled already and the rest still wait for their first
+//! call. A script seen once costs only the writing, and one seen twice
+//! pays for compiling it again once. The hints grow when pages run
+//! functions the entry lacks, at most [`MAX_REBUILDS`] times per entry.
+//! Inline scripts are only kept once they come back (most belong to one
+//! page), and scripts under [`MIN_SCRIPT_LEN`] bytes not at all.
 //!
 //! Every function read back shares one copy of the script's text, and that
 //! copy is the cache's own: pages point into it rather than copying it into
 //! their heaps (`JSScriptSource`), and it is freed when the last page using
-//! it and the cache have both let it go.
+//! it and the cache have both let it go. Classic scripts and modules are
+//! both kept; the key says which, and whether functions are compiled on
+//! first call at all. The file name (a module's name) is not part of it:
+//! the same text at another URL finds the entry, and its functions get the
+//! URL they were loaded from.
 //!
 //! # What pages can see
 //!
 //! Nothing a page does reaches another page. An entry is made from the
-//! script's text alone, in a runtime of its own with nothing in it, never
-//! from the objects of a page that ran the script; the hints only say which
+//! script's text alone: written right after it is compiled, before it
+//! runs, or compiled again in a runtime with nothing in it, never from the
+//! objects of a page that ran the script. The hints only say which
 //! functions to compile now rather than later, which a script cannot tell
 //! apart. A page reads the entry into objects of its own. The key is the
 //! SHA-256 of the text, so a page only finds the entry of a script whose
 //! text it fetched itself.
+//!
+//! What a page can do is time itself: a script whose entry exists runs
+//! sooner, so a page can tell, roughly, whether a script it already holds
+//! the whole text of was run by an earlier page in the process. And a page
+//! that loads many large scripts of its own evicts other entries, which
+//! costs later pages time but changes nothing they compute.
 //!
 //! # Bounds
 //!
@@ -48,6 +66,7 @@
 //! With [`ScriptCacheOptions::dir`] set, entries are also written there, so
 //! that a new process starts warm. Files carry the engine build they were
 //! written by and a checksum, and one that does not match is ignored.
+//! Measurements are in `crates/bench/README.md` ("The script cache").
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
