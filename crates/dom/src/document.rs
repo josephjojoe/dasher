@@ -225,7 +225,7 @@ impl Document {
     }
 
     /// Whether `id`'s slot is free: released and not reused since.
-    pub(crate) fn is_released(&self, id: NodeId) -> bool {
+    pub fn is_released(&self, id: NodeId) -> bool {
         matches!(self.nodes[id.index()].data, NodeData::Free)
     }
 

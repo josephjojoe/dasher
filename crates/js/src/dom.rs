@@ -533,11 +533,13 @@ impl DomState {
         if candidates.is_empty() {
             return;
         }
-        // Every candidate is still allocated here: nodes are only released
-        // below, and a tree is only released once nothing refers to it. Find
-        // all the roots before releasing any of them.
+        // Every candidate is still allocated here, but for those the parser
+        // held and released itself when it finished: nodes are otherwise
+        // only released below, and a tree is only released once nothing
+        // refers to it. Find all the roots before releasing any of them.
         let mut roots: Vec<NodeId> = candidates
             .into_iter()
+            .filter(|&n| !doc.is_released(n))
             .map(|n| group_root(doc, n))
             .filter(|&r| r != doc.root())
             .collect();

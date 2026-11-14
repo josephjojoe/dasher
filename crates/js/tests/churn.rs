@@ -289,6 +289,57 @@ fn nodes_the_parser_builds_into_survive_removal() {
     assert_eq!(js.with_document(Document::len), tree);
 }
 
+/// A `<template shadowrootmode>` becomes a shadow root and is never
+/// inserted: it is the parser's own, to free when parsing ends. One the
+/// input pauses inside, as a page arriving in chunks does, is not garbage
+/// in between.
+#[test]
+fn declarative_shadow_templates_survive_a_pause() {
+    let js = runtime("");
+    js.set_document(Document::new());
+    let mut parser = js.with_document_mut(|doc| DocumentParser::new(doc, ParseOptions::default()));
+    // The input runs out with the template open.
+    parser.push("<!doctype html><body><my-card><template shadowrootmode=open><p>in the");
+    assert_eq!(
+        js.with_parser(&mut parser, |p, doc| p.resume(doc)),
+        ParseStep::NeedInput
+    );
+    parser.push(
+        " shadow</p></template>light</my-card><script>
+           // Churn, so garbage is swept.
+           {
+             const t = document.body.appendChild(document.createElement('span'));
+             for (let i = 0; i < 1000; i++) t.textContent = i;
+             t.remove();
+           }
+         </script>",
+    );
+    let ParseStep::Script(script) = js.with_parser(&mut parser, |p, doc| p.resume(doc)) else {
+        panic!("expected the script");
+    };
+    let source = js.with_document(|doc| doc.text_content(script).unwrap());
+    js.run_script_element(script, &source, "https://example.com/")
+        .unwrap();
+    parser.push("<p>end");
+    assert_eq!(
+        js.with_parser(&mut parser, |p, doc| p.resume(doc)),
+        ParseStep::NeedInput
+    );
+    js.with_parser(&mut parser, |p, doc| p.finish(doc));
+    assert_eq!(
+        js.eval_json("document.querySelector('my-card').shadowRoot.innerHTML")
+            .unwrap()
+            .as_deref(),
+        Some("\"<p>in the shadow</p>\"")
+    );
+    // The template is gone: what is left is the document's tree and the
+    // shadow tree (its root, the p and its text).
+    js.run_script("document.body.append('x')", "touch.js")
+        .unwrap();
+    let tree = js.with_document(|doc| doc.descendants(doc.root()).count() + 1);
+    assert_eq!(js.with_document(Document::len), tree + 3);
+}
+
 /// A node moved or removed out of a detached tree may have held its last
 /// wrapper; the tree it leaves goes too.
 #[test]

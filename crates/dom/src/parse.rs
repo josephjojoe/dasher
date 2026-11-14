@@ -371,7 +371,7 @@ pub(crate) struct Sink<'a> {
     /// `<template shadowrootmode>` elements that became shadow roots, and
     /// those roots. Such a template is never inserted; its content is
     /// parsed into the shadow root, and it is released when parsing ends.
-    declarative_shadow: RefCell<Vec<(NodeId, NodeId)>>,
+    pub(crate) declarative_shadow: RefCell<Vec<(NodeId, NodeId)>>,
     /// The changes made to the tree, while they are being logged.
     pub(crate) log: RefCell<Option<ChangeLog>>,
 }

@@ -208,6 +208,10 @@ impl DocumentParser {
     /// [`finish`](Self::finish) was called.
     ///
     /// The document node is not listed: it is never released.
+    ///
+    /// [`finish`](Self::finish) releases some of the nodes listed before it
+    /// itself: the `<template shadowrootmode>` elements that became shadow
+    /// roots.
     pub fn held_nodes(&self) -> Vec<NodeId> {
         struct Collect(RefCell<Vec<NodeId>>);
         impl Tracer for Collect {
@@ -221,11 +225,14 @@ impl DocumentParser {
         }
         let collect = Collect(RefCell::default());
         self.parser.tokenizer.sink.trace_handles(&collect);
-        // The sink's own ids need no holding: the templates that became
-        // declarative shadow roots are never inserted, so never released
-        // but by the sink itself, and the text nodes it shrinks at the end
-        // are only looked at if they are still there.
+        // Of the sink's own ids, the templates that became declarative
+        // shadow roots are held until it frees them at the end: they are
+        // never inserted, so once html5ever is done with one, nothing else
+        // says it is in use. The text nodes the sink shrinks at the end are
+        // only looked at if they are still there.
         let mut nodes = collect.0.into_inner();
+        let sink = &self.parser.tokenizer.sink.sink;
+        nodes.extend(sink.declarative_shadow.borrow().iter().map(|&(t, _)| t));
         let root = self.parser.tokenizer.sink.sink.document;
         nodes.retain(|&n| n != root);
         nodes.sort_unstable();
