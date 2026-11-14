@@ -1297,6 +1297,18 @@ fn install_content<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
             insert_adjacent_html(&ctx, &d, element(&ctx, &d, &n)?, position, &html)
         },
     )?;
+    // `Range.createContextualFragment`: a new fragment parsed in the
+    // context of an element (none: a `<body>`), whose scripts can still run.
+    let d = Rc::clone(dom);
+    def(
+        obj,
+        "contextualFragment",
+        move |ctx: Ctx<'js>, context: Option<Node<'js>>, html: String| -> Result<Node<'js>> {
+            let context = context.map(|c| element(&ctx, &d, &c)).transpose()?;
+            let fragment = d.doc_mut().parse_contextual_fragment(context, &html);
+            wrap(&ctx, &d, fragment)
+        },
+    )?;
     let d = Rc::clone(dom);
     def(
         obj,

@@ -254,6 +254,41 @@ fn fragment_parsing_uses_the_context_element() {
 }
 
 #[test]
+fn contextual_fragment_scripts_can_still_run() {
+    let mut doc = Document::parse("<table><tbody><tr><td>1</td></tr></tbody></table>");
+    let scripts = |doc: &Document, fragment: NodeId| -> Vec<NodeId> {
+        doc.descendants(fragment)
+            .filter(|&n| doc.is_html(n, Name::SCRIPT))
+            .collect()
+    };
+    // No context, and the root element as context: parsed as in <body>.
+    let html = doc.document_element().unwrap();
+    for context in [None, Some(html)] {
+        let fragment =
+            doc.parse_contextual_fragment(context, "<tr><td>x</td></tr><script>a()</script>");
+        assert_eq!(doc.kind(fragment), NodeKind::DocumentFragment);
+        assert_eq!(doc.inner_html(fragment), "x<script>a()</script>");
+        let scripts = scripts(&doc, fragment);
+        assert_eq!(scripts.len(), 1);
+        assert!(!doc.script_already_started(scripts[0]));
+    }
+    // An element as context: its content model applies.
+    let row = find(&doc, Name::TR);
+    let fragment =
+        doc.parse_contextual_fragment(Some(row), "<td><div><script>b()</script></div></td>");
+    assert_eq!(
+        doc.inner_html(fragment),
+        "<td><div><script>b()</script></div></td>"
+    );
+    assert!(!doc.script_already_started(scripts(&doc, fragment)[0]));
+    // The plain fragment parser still marks them.
+    let fragment = doc.parse_fragment(row, "<td><script>c()</script></td>");
+    assert!(doc.script_already_started(scripts(&doc, fragment)[0]));
+    // The context is not touched.
+    assert_eq!(doc.inner_html(row), "<td>1</td>");
+}
+
+#[test]
 fn inner_html_replaces_children_and_marks_scripts() {
     let mut doc = Document::parse("<div id=d><span>old</span></div>");
     let div = find(&doc, Name::DIV);

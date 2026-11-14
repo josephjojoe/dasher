@@ -1335,3 +1335,26 @@ fn mixin_members_marked_unscopable_are_hidden_from_with() {
         r#"[["after","append","before","prepend","remove","replaceChildren","replaceWith"],null,["append","prepend","replaceChildren"],["after","before","remove","replaceWith"],["undefined","undefined","function"]]"#
     );
 }
+
+#[test]
+fn file_inputs_have_an_empty_file_list() {
+    let js = page("<!doctype html><input id=f type=file><input id=t>");
+    let out = eval(
+        &js,
+        r#"
+        const f = document.getElementById('f');
+        const made = document.createElement('input');
+        made.type = 'file';
+        let illegal;
+        try { new FileList(); } catch (e) { illegal = e.name; }
+        [typeof FileList, f.files instanceof FileList, f.files.length, f.files.item(0), f.files[0] === undefined,
+         f.files === f.files, made.files instanceof FileList, made.files === f.files, [...f.files].length,
+         Object.prototype.toString.call(f.files), document.getElementById('t').files,
+         ({}) instanceof FileList, illegal]
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"["function",true,0,null,true,true,true,false,0,"[object FileList]",null,false,"TypeError"]"#
+    );
+}

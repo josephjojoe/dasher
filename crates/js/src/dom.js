@@ -2515,7 +2515,12 @@
     },
     get indeterminate() { return !!state(this).indeterminate; },
     set indeterminate(v) { state(this).indeterminate = !!v; },
-    get files() { return null; },
+    // The selected files of a file input: always none, in one list per
+    // element. Null for every other type.
+    get files() {
+      if (inputType(this) !== 'file') return null;
+      return cached(this, 'files', () => internals.makeFileList([]));
+    },
     get list() {
       const id = N.getAttr(this, 'list');
       const el = id === null ? null : N.byId(documentNode, id);
@@ -3328,6 +3333,420 @@
   tag(NodeIterator, 'NodeIterator');
 
   // ---------------------------------------------------------------------
+  // Range. https://dom.spec.whatwg.org/#ranges
+  //
+  // A range here is not live: it does not follow changes other code makes
+  // to the tree. Its own methods (deleteContents, insertNode, ...) leave
+  // it where the specification says. Its rectangles are those of the
+  // closest element, as there is no text layout to measure.
+
+  // The data of a text or comment node, null for any other node.
+  const charData = (node) => N.data(node);
+
+  function nodeLength(node) {
+    const data = charData(node);
+    if (data !== null) return data.length;
+    let n = 0;
+    for (let child = N.nav(node, 1); child !== null; child = N.nav(child, 4)) n++;
+    return n;
+  }
+
+  function nodeIndex(node) {
+    let n = 0;
+    for (let prev = N.nav(node, 3); prev !== null; prev = N.nav(prev, 3)) n++;
+    return n;
+  }
+
+  function childAt(node, index) {
+    let child = N.nav(node, 1);
+    for (let i = 0; i < index && child !== null; i++) child = N.nav(child, 4);
+    return child;
+  }
+
+  // The child of `ancestor` that `node` is in, or is.
+  function childToward(ancestor, node) {
+    for (let parent = N.nav(node, 0); parent !== ancestor; parent = N.nav(node, 0)) node = parent;
+    return node;
+  }
+
+  // The node after `node` in tree order that is not one of its descendants.
+  function nodeAfter(node) {
+    for (; node !== null; node = N.nav(node, 0)) {
+      const next = N.nav(node, 4);
+      if (next !== null) return next;
+    }
+    return null;
+  }
+
+  // The position of boundary point A relative to B, both in one tree:
+  // -1 before, 0 equal, 1 after.
+  function comparePoints(nodeA, offsetA, nodeB, offsetB) {
+    if (nodeA === nodeB) return offsetA === offsetB ? 0 : offsetA < offsetB ? -1 : 1;
+    const position = N.compare(nodeA, nodeB);
+    // B comes before A in tree order (it may be A's ancestor).
+    if (position & 2) return -comparePoints(nodeB, offsetB, nodeA, offsetA);
+    // B is inside A: compare with the child of A that holds it.
+    if (position & 16 && nodeIndex(childToward(nodeA, nodeB)) < offsetA) return 1;
+    return -1;
+  }
+
+  function commonAncestor(a, b) {
+    while (!N.contains(a, b)) a = N.nav(a, 0);
+    return a;
+  }
+
+  const RANGE_DELETE = 0;
+  const RANGE_EXTRACT = 1;
+  const RANGE_CLONE = 2;
+
+  // Deletes, extracts or clones what lies between two boundary points.
+  // Returns a fragment holding it, or null when deleting.
+  function rangeContents(sc, so, ec, eo, mode) {
+    const fragment = mode === RANGE_DELETE ? null : N.createFragment();
+    const keep = (node) => N.insert(fragment, node, null);
+    // Takes data[from, to) of a text or comment node.
+    const takeData = (node, from, to) => {
+      const data = charData(node);
+      if (fragment !== null) {
+        const copy = cloneWithState(node, false);
+        N.setData(copy, data.slice(from, to));
+        keep(copy);
+      }
+      if (mode !== RANGE_CLONE) N.setData(node, data.slice(0, from) + data.slice(to));
+    };
+    // Takes the part of `child` between the two points, inside a copy of it.
+    const takePart = (child, startNode, startOffset, endNode, endOffset) => {
+      const inner = rangeContents(startNode, startOffset, endNode, endOffset, mode);
+      if (fragment === null) return;
+      const copy = cloneWithState(child, false);
+      keep(copy);
+      N.insert(copy, inner, null);
+    };
+
+    if (sc === ec && so === eo) return fragment;
+    if (sc === ec && charData(sc) !== null) {
+      takeData(sc, so, eo);
+      return fragment;
+    }
+    const common = commonAncestor(sc, ec);
+    // The children of `common` that the range covers in part (the ones
+    // holding its start and its end) and in full (the ones between).
+    const first = sc === common ? null : childToward(common, sc);
+    const last = ec === common ? null : childToward(common, ec);
+    const stop = last === null ? childAt(common, eo) : last;
+    const contained = [];
+    for (let n = first === null ? childAt(common, so) : N.nav(first, 4); n !== null && n !== stop; n = N.nav(n, 4)) {
+      if (fragment !== null && N.nodeType(n) === 10) {
+        throw domException('HierarchyRequestError', 'A doctype cannot be put in a document fragment.');
+      }
+      contained.push(n);
+    }
+    if (first !== null) {
+      if (charData(first) !== null) takeData(first, so, Infinity);
+      else takePart(first, sc, so, first, nodeLength(first));
+    }
+    for (const node of contained) {
+      if (mode === RANGE_DELETE) N.remove(node);
+      else keep(mode === RANGE_CLONE ? cloneWithState(node, true) : node);
+    }
+    if (last !== null) {
+      if (charData(last) !== null) takeData(last, 0, eo);
+      else takePart(last, last, 0, ec, eo);
+    }
+    return fragment;
+  }
+
+  let placeRange;
+
+  class Range {
+    #sc = documentNode;
+    #so = 0;
+    #ec = documentNode;
+    #eo = 0;
+    static {
+      placeRange = (range, sc, so, ec, eo) => {
+        range.#sc = sc;
+        range.#so = so;
+        range.#ec = ec;
+        range.#eo = eo;
+        return range;
+      };
+    }
+    get startContainer() { return this.#sc; }
+    get startOffset() { return this.#so; }
+    get endContainer() { return this.#ec; }
+    get endOffset() { return this.#eo; }
+    get collapsed() { return this.#sc === this.#ec && this.#so === this.#eo; }
+    get commonAncestorContainer() { return commonAncestor(this.#sc, this.#ec); }
+
+    #setBoundary(node, offset, start, what) {
+      if (N.nodeType(node) === 10) throw domException('InvalidNodeTypeError', "Failed to execute '" + what + "' on 'Range': the node is a doctype.");
+      offset >>>= 0;
+      if (offset > nodeLength(node)) throw domException('IndexSizeError', "Failed to execute '" + what + "' on 'Range': the offset " + offset + ' is larger than the node\'s length.');
+      const otherTree = N.rootNode(node) !== N.rootNode(this.#sc);
+      if (start) {
+        if (otherTree || comparePoints(node, offset, this.#ec, this.#eo) > 0) {
+          this.#ec = node;
+          this.#eo = offset;
+        }
+        this.#sc = node;
+        this.#so = offset;
+      } else {
+        if (otherTree || comparePoints(node, offset, this.#sc, this.#so) < 0) {
+          this.#sc = node;
+          this.#so = offset;
+        }
+        this.#ec = node;
+        this.#eo = offset;
+      }
+    }
+    #setBeside(node, after, start, what) {
+      const parent = N.nav(node, 0);
+      if (parent === null) throw domException('InvalidNodeTypeError', "Failed to execute '" + what + "' on 'Range': the node has no parent.");
+      this.#setBoundary(parent, nodeIndex(node) + (after ? 1 : 0), start, what);
+    }
+    setStart(node, offset) {
+      requireArgs(arguments, 2, "'setStart' on 'Range'");
+      this.#setBoundary(node, offset, true, 'setStart');
+    }
+    setEnd(node, offset) {
+      requireArgs(arguments, 2, "'setEnd' on 'Range'");
+      this.#setBoundary(node, offset, false, 'setEnd');
+    }
+    setStartBefore(node) {
+      requireArgs(arguments, 1, "'setStartBefore' on 'Range'");
+      this.#setBeside(node, false, true, 'setStartBefore');
+    }
+    setStartAfter(node) {
+      requireArgs(arguments, 1, "'setStartAfter' on 'Range'");
+      this.#setBeside(node, true, true, 'setStartAfter');
+    }
+    setEndBefore(node) {
+      requireArgs(arguments, 1, "'setEndBefore' on 'Range'");
+      this.#setBeside(node, false, false, 'setEndBefore');
+    }
+    setEndAfter(node) {
+      requireArgs(arguments, 1, "'setEndAfter' on 'Range'");
+      this.#setBeside(node, true, false, 'setEndAfter');
+    }
+    collapse(toStart = false) {
+      if (toStart) placeRange(this, this.#sc, this.#so, this.#sc, this.#so);
+      else placeRange(this, this.#ec, this.#eo, this.#ec, this.#eo);
+    }
+    selectNode(node) {
+      requireArgs(arguments, 1, "'selectNode' on 'Range'");
+      const parent = N.nav(node, 0);
+      if (parent === null) throw domException('InvalidNodeTypeError', "Failed to execute 'selectNode' on 'Range': the node has no parent.");
+      const index = nodeIndex(node);
+      placeRange(this, parent, index, parent, index + 1);
+    }
+    selectNodeContents(node) {
+      requireArgs(arguments, 1, "'selectNodeContents' on 'Range'");
+      if (N.nodeType(node) === 10) throw domException('InvalidNodeTypeError', "Failed to execute 'selectNodeContents' on 'Range': the node is a doctype.");
+      placeRange(this, node, 0, node, nodeLength(node));
+    }
+    compareBoundaryPoints(how, sourceRange) {
+      requireArgs(arguments, 2, "'compareBoundaryPoints' on 'Range'");
+      how = +how;
+      if (how !== 0 && how !== 1 && how !== 2 && how !== 3) {
+        throw domException('NotSupportedError', "Failed to execute 'compareBoundaryPoints' on 'Range': the comparison method is not one of the four constants.");
+      }
+      if (N.rootNode(this.#sc) !== N.rootNode(sourceRange.#sc)) {
+        throw domException('WrongDocumentError', "Failed to execute 'compareBoundaryPoints' on 'Range': the ranges are in different trees.");
+      }
+      // START_TO_END compares this range's end with the other's start,
+      // END_TO_START the reverse.
+      const mine = how === 0 || how === 3;
+      const theirs = how === 0 || how === 1;
+      return comparePoints(
+        mine ? this.#sc : this.#ec, mine ? this.#so : this.#eo,
+        theirs ? sourceRange.#sc : sourceRange.#ec, theirs ? sourceRange.#so : sourceRange.#eo,
+      );
+    }
+    cloneRange() {
+      return placeRange(new Range(), this.#sc, this.#so, this.#ec, this.#eo);
+    }
+    detach() {}
+    #checkPoint(node, offset, what) {
+      if (N.nodeType(node) === 10) throw domException('InvalidNodeTypeError', "Failed to execute '" + what + "' on 'Range': the node is a doctype.");
+      if (offset > nodeLength(node)) throw domException('IndexSizeError', "Failed to execute '" + what + "' on 'Range': the offset " + offset + ' is larger than the node\'s length.');
+    }
+    isPointInRange(node, offset) {
+      requireArgs(arguments, 2, "'isPointInRange' on 'Range'");
+      offset >>>= 0;
+      if (N.rootNode(node) !== N.rootNode(this.#sc)) return false;
+      this.#checkPoint(node, offset, 'isPointInRange');
+      return comparePoints(node, offset, this.#sc, this.#so) >= 0 && comparePoints(node, offset, this.#ec, this.#eo) <= 0;
+    }
+    comparePoint(node, offset) {
+      requireArgs(arguments, 2, "'comparePoint' on 'Range'");
+      offset >>>= 0;
+      if (N.rootNode(node) !== N.rootNode(this.#sc)) {
+        throw domException('WrongDocumentError', "Failed to execute 'comparePoint' on 'Range': the node is in a different tree.");
+      }
+      this.#checkPoint(node, offset, 'comparePoint');
+      if (comparePoints(node, offset, this.#sc, this.#so) < 0) return -1;
+      return comparePoints(node, offset, this.#ec, this.#eo) > 0 ? 1 : 0;
+    }
+    intersectsNode(node) {
+      requireArgs(arguments, 1, "'intersectsNode' on 'Range'");
+      if (N.rootNode(node) !== N.rootNode(this.#sc)) return false;
+      const parent = N.nav(node, 0);
+      if (parent === null) return true;
+      const index = nodeIndex(node);
+      return comparePoints(parent, index, this.#ec, this.#eo) < 0 && comparePoints(parent, index + 1, this.#sc, this.#so) > 0;
+    }
+
+    // Where the range ends up once its contents are gone.
+    #pointAfterRemoval() {
+      if (N.contains(this.#sc, this.#ec)) return [this.#sc, this.#so];
+      let node = this.#sc;
+      let parent = N.nav(node, 0);
+      while (!N.contains(parent, this.#ec)) {
+        node = parent;
+        parent = N.nav(node, 0);
+      }
+      return [parent, nodeIndex(node) + 1];
+    }
+    #remove(mode) {
+      const [node, offset] = this.#pointAfterRemoval();
+      const fragment = rangeContents(this.#sc, this.#so, this.#ec, this.#eo, mode);
+      placeRange(this, node, offset, node, offset);
+      return fragment;
+    }
+    deleteContents() {
+      this.#remove(RANGE_DELETE);
+    }
+    extractContents() {
+      return this.#remove(RANGE_EXTRACT);
+    }
+    cloneContents() {
+      return rangeContents(this.#sc, this.#so, this.#ec, this.#eo, RANGE_CLONE);
+    }
+    // What a live range does when `count` nodes go into `parent` at `index`.
+    #shift(parent, index, count) {
+      if (this.#sc === parent && this.#so > index) this.#so += count;
+      if (this.#ec === parent && this.#eo > index) this.#eo += count;
+    }
+    insertNode(node) {
+      requireArgs(arguments, 1, "'insertNode' on 'Range'");
+      const start = this.#sc;
+      const type = N.nodeType(start);
+      const isText = type === 3 || type === 4;
+      if (type === 7 || type === 8 || (isText && N.nav(start, 0) === null) || start === node) {
+        throw domException('HierarchyRequestError', "Failed to execute 'insertNode' on 'Range': a node cannot be inserted at the start of the range.");
+      }
+      const parent = isText ? N.nav(start, 0) : start;
+      if (N.contains(node, parent)) {
+        throw domException('HierarchyRequestError', "Failed to execute 'insertNode' on 'Range': the new node contains the insertion point.");
+      }
+      const collapsed = this.collapsed;
+      let reference;
+      if (isText) {
+        // Split the text; the part of the range past the split moves to
+        // the new text node.
+        const index = nodeIndex(start);
+        const offset = this.#so;
+        const data = N.data(start);
+        reference = N.createText(data.slice(offset));
+        N.insert(parent, reference, N.nav(start, 4));
+        N.setData(start, data.slice(0, offset));
+        if (this.#ec === start && this.#eo > offset) {
+          this.#ec = reference;
+          this.#eo -= offset;
+        }
+        this.#shift(parent, index, 1);
+      } else {
+        reference = childAt(start, this.#so);
+      }
+      if (node === reference) reference = N.nav(reference, 4);
+      if (N.nav(node, 0) !== null) N.remove(node);
+      const index = reference === null ? nodeLength(parent) : nodeIndex(reference);
+      const count = N.nodeType(node) === 11 ? nodeLength(node) : 1;
+      connected(N.insert(parent, node, reference));
+      this.#shift(parent, index, count);
+      if (collapsed) {
+        this.#ec = parent;
+        this.#eo = index + count;
+      }
+    }
+    surroundContents(newParent) {
+      requireArgs(arguments, 1, "'surroundContents' on 'Range'");
+      // A node other than text that the range covers only part of.
+      const holder = (node) => {
+        const type = N.nodeType(node);
+        return type === 3 || type === 4 ? N.nav(node, 0) : node;
+      };
+      if (holder(this.#sc) !== holder(this.#ec)) {
+        throw domException('InvalidStateError', "Failed to execute 'surroundContents' on 'Range': the range partially selects a node that is not text.");
+      }
+      const type = N.nodeType(newParent);
+      if (type === 9 || type === 10 || type === 11) {
+        throw domException('InvalidNodeTypeError', "Failed to execute 'surroundContents' on 'Range': the new parent is a document, doctype or fragment.");
+      }
+      const fragment = this.extractContents();
+      while (N.nav(newParent, 1) !== null) N.remove(N.nav(newParent, 1));
+      this.insertNode(newParent);
+      connected(N.insert(newParent, fragment, null));
+      this.selectNode(newParent);
+    }
+
+    // Parses markup as the children of the range's start element. Unlike
+    // innerHTML, the scripts in the result run when it is inserted.
+    createContextualFragment(string) {
+      requireArgs(arguments, 1, "'createContextualFragment' on 'Range'");
+      const start = this.#sc;
+      const type = N.nodeType(start);
+      let context = null;
+      if (type === 1) context = start;
+      else if (type === 3 || type === 4 || type === 8) context = N.nav(start, 5);
+      return N.contextualFragment(context, str(string));
+    }
+
+    toString() {
+      const sc = this.#sc;
+      const ec = this.#ec;
+      const isText = (node) => {
+        const type = N.nodeType(node);
+        return type === 3 || type === 4;
+      };
+      if (sc === ec && isText(sc)) return N.data(sc).slice(this.#so, this.#eo);
+      let out = '';
+      let node;
+      if (isText(sc)) out += N.data(sc).slice(this.#so);
+      if (charData(sc) !== null) node = nodeAfter(sc);
+      else node = childAt(sc, this.#so) || nodeAfter(sc);
+      const stop = charData(ec) !== null ? ec : childAt(ec, this.#eo) || nodeAfter(ec);
+      while (node !== null && node !== stop) {
+        if (isText(node)) out += N.data(node);
+        node = N.nav(node, 1) || nodeAfter(node);
+      }
+      if (isText(ec)) out += N.data(ec).slice(0, this.#eo);
+      return out;
+    }
+
+    #box() {
+      if (this.collapsed) return [0, 0, 0, 0];
+      const node = commonAncestor(this.#sc, this.#ec);
+      const el = N.nodeType(node) === 1 ? node : N.nav(node, 5);
+      return el === null ? [0, 0, 0, 0] : clientBox(el);
+    }
+    getBoundingClientRect() {
+      const b = this.#box();
+      return new DOMRect(b[0], b[1], b[2], b[3]);
+    }
+    getClientRects() {
+      const b = this.#box();
+      return new DOMRectList(KEY, b[2] === 0 && b[3] === 0 ? [] : [new DOMRect(b[0], b[1], b[2], b[3])]);
+    }
+  }
+  for (const [name, value] of [['START_TO_START', 0], ['START_TO_END', 1], ['END_TO_END', 2], ['END_TO_START', 3]]) {
+    defineProperty(Range, name, { value, enumerable: true });
+    defineProperty(Range.prototype, name, { value, enumerable: true });
+  }
+  tag(Range, 'Range');
+
+  // ---------------------------------------------------------------------
   // UI events.
 
   const uiEvents = {};
@@ -3789,7 +4208,7 @@
       return new Ctor('');
     }
     createRange() {
-      throw domException('NotSupportedError', 'Ranges are not supported.');
+      return placeRange(new Range(), this, 0, this, 0);
     }
     createTreeWalker(root, whatToShow = 0xFFFFFFFF, filter = null) {
       return new TreeWalker(KEY, root, whatToShow, filter);
@@ -4151,7 +4570,7 @@
     CSSStyleDeclaration, CSSStyleSheet, CSSRule, StyleSheetList, Element, HTMLElement, SVGElement,
     SVGGraphicsElement, SVGSVGElement, MathMLElement, Document, HTMLDocument, XMLDocument,
     DOMImplementation, DOMParser, FontFaceSet, DOMRect, DOMRectReadOnly, DOMRectList, TreeWalker,
-    NodeIterator, NodeFilter, Image, Audio, Option, getComputedStyle, ...I, ...uiEvents,
+    NodeIterator, NodeFilter, Range, Image, Audio, Option, getComputedStyle, ...I, ...uiEvents,
   });
   defineProperty(globalThis, 'document', { get: () => documentNode, enumerable: true, configurable: false });
 })

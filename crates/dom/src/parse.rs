@@ -253,6 +253,35 @@ impl Document {
         Ok(())
     }
 
+    /// `Range.createContextualFragment`: parses `html` as a fragment in the
+    /// context of `context`, or of a `<body>` element when there is none or
+    /// it is the `<html>` element. Returns a new document fragment holding
+    /// the result.
+    ///
+    /// Unlike the other fragment parsers, the scripts in the result are not
+    /// marked "already started": they run when the fragment is inserted
+    /// into the document. Pages use this to insert markup whose scripts
+    /// should run, which `innerHTML` does not do.
+    pub fn parse_contextual_fragment(&mut self, context: Option<NodeId>, html: &str) -> NodeId {
+        let fragment = match context {
+            Some(context) => self.parse_fragment_in(context, html, true),
+            None => {
+                let body = self.create_element_named(Name::NS_HTML, Name::BODY);
+                let fragment = self.parse_fragment(body, html);
+                self.release(body);
+                fragment
+            }
+        };
+        let scripts: Vec<NodeId> = self
+            .descendants(fragment)
+            .filter(|&n| self.is_html(n, Name::SCRIPT))
+            .collect();
+        for script in scripts {
+            self.clear_flag(script, flags::SCRIPT_ALREADY_STARTED);
+        }
+        fragment
+    }
+
     /// Fragment parsing in the context of `context`, substituting a `<body>`
     /// context when `context` is not an element, or (if `html_means_body`)
     /// is the `<html>` element. `outerHTML` substitutes only for fragment

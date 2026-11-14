@@ -412,6 +412,38 @@
   }
   tag(File, 'File');
 
+  // FileList. https://w3c.github.io/FileAPI/#filelist-section
+  // Only the engine makes one; nothing here selects files, so the list of
+  // an <input type=file> is always empty.
+
+  const FILE_LIST_KEY = Symbol('FileList');
+
+  class FileList {
+    #files;
+    constructor(key, files) {
+      if (key !== FILE_LIST_KEY) throw new TypeError('Illegal constructor');
+      this.#files = files;
+      files.forEach((file, i) => {
+        Object.defineProperty(this, i, { value: file, enumerable: true, configurable: true });
+      });
+    }
+    get length() {
+      return this.#files.length;
+    }
+    item(index) {
+      requireArgs(arguments, 1, "'item' on 'FileList'");
+      return this.#files[index >>> 0] || null;
+    }
+    [Symbol.iterator]() {
+      return this.#files.values();
+    }
+  }
+  tag(FileList, 'FileList');
+
+  function makeFileList(files) {
+    return new FileList(FILE_LIST_KEY, files);
+  }
+
   // FormData. https://xhr.spec.whatwg.org/#interface-formdata
 
   let formEntries;
@@ -1144,6 +1176,7 @@
     Headers,
     Blob,
     File,
+    FileList,
     FormData,
     Request,
     Response,
@@ -1155,6 +1188,7 @@
     File,
     FormData,
     makeBlob,
+    makeFileList,
     blobBytes,
     extractBody,
     decodeUtf8: decode,

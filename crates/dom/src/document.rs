@@ -434,6 +434,10 @@ impl Document {
         self.node_mut(id).flags |= flag;
     }
 
+    pub(crate) fn clear_flag(&mut self, id: NodeId, flag: u8) {
+        self.node_mut(id).flags &= !flag;
+    }
+
     /// An element's local name, or `None` for other nodes.
     pub fn local_name(&self, id: NodeId) -> Option<Name> {
         self.element(id).map(|e| e.local)

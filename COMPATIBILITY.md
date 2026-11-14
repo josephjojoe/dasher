@@ -30,7 +30,8 @@ view, where `querySelector` and `innerHTML` stop at shadow roots.
 | `XMLSerializer` | Undefined; use `outerHTML` |
 | DTD entities and processing instructions in XML documents | Entities a DTD declares are an error (as in browsers without the DTD); processing instructions are dropped |
 | `document.evaluate` / XPath | Undefined |
-| `Range` constructor | Undefined (`document.createRange()` exists) |
+| Live ranges, `StaticRange` | A `Range` works (boundary points, contents, `createContextualFragment`) but does not follow later changes to the tree, and its rectangles are those of its closest element; `StaticRange` and `AbstractRange` are undefined |
+| Choosing files | The `files` of an `<input type=file>` is a `FileList` that is always empty |
 | `FileReader` | Undefined; use `blob.text()` / `arrayBuffer()` |
 | Streaming fetch | Request bodies cannot be streams; response bodies arrive whole, then stream as one chunk |
 | BYOB stream readers | `getReader({ mode: 'byob' })` throws; byte streams act as default streams |
