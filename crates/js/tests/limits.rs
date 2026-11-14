@@ -194,7 +194,9 @@ fn a_catastrophic_regexp_is_stopped_by_the_deadline() {
         let js = page(RuntimeOptions::default());
         js.run_script("var s = 'a'.repeat(40) + '!';", "a.js")
             .unwrap();
-        js.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(50)));
+        js.set_deadline(Some(
+            std::time::Instant::now() + std::time::Duration::from_millis(50),
+        ));
         let started = std::time::Instant::now();
         let error = js.run_script(pattern, "b.js").unwrap_err();
         assert_eq!(error.kind, ErrorKind::Interrupted, "{pattern}: {error:?}");

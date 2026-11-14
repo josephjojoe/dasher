@@ -202,6 +202,9 @@ enum Start {
     Chars(Box<Chars>),
 }
 
+/// Inclusive ranges of characters.
+type Ranges = Vec<(u32, u32)>;
+
 /// A set of characters, as the matcher compares them: with the `i` flag
 /// the ranges hold canonical (case-folded) characters and a subject
 /// character is folded before it is looked up.
@@ -525,9 +528,7 @@ fn required_chars(code: &[u8], flags: c_int) -> Option<Chars> {
             op::GOTO | op::LOOKAHEAD | op::NEGATIVE_LOOKAHEAD => {
                 [target(code, pc + 1)?, usize::MAX]
             }
-            op::SPLIT_GOTO_FIRST | op::SPLIT_NEXT_FIRST | op::LOOP => {
-                [next, target(code, pc + 1)?]
-            }
+            op::SPLIT_GOTO_FIRST | op::SPLIT_NEXT_FIRST | op::LOOP => [next, target(code, pc + 1)?],
             op::SIMPLE_GREEDY_QUANT => {
                 let body = usize::try_from(u32_at(code, pc + 1)?).ok()?;
                 [next.checked_add(body)?, usize::MAX]
@@ -545,7 +546,15 @@ fn required_chars(code: &[u8], flags: c_int) -> Option<Chars> {
     let count = pcs.len();
     let succ: Vec<[usize; 2]> = succ
         .iter()
-        .map(|to| to.map(|pc| if pc == usize::MAX { usize::MAX } else { node_of[pc] as usize }))
+        .map(|to| {
+            to.map(|pc| {
+                if pc == usize::MAX {
+                    usize::MAX
+                } else {
+                    node_of[pc] as usize
+                }
+            })
+        })
         .collect();
 
     // Dominators, by Cooper, Harvey and Kennedy's iteration over reverse
@@ -623,7 +632,10 @@ fn required_chars(code: &[u8], flags: c_int) -> Option<Chars> {
                 let mut at = pc + 17;
                 loop {
                     match *code.get(at)? {
-                        op::LINE_START | op::LINE_END | op::WORD_BOUNDARY | op::NOT_WORD_BOUNDARY => {
+                        op::LINE_START
+                        | op::LINE_END
+                        | op::WORD_BOUNDARY
+                        | op::NOT_WORD_BOUNDARY => {
                             at += 1;
                         }
                         _ => break test_chars(code, at),
@@ -708,7 +720,7 @@ fn first_chars(code: &[u8]) -> Option<Vec<(u32, u32)>> {
 /// The one-character tests a match can begin with, from `from`, each with
 /// where it is and what it accepts. `None` when the pattern can begin
 /// with something else: see [`first_chars`].
-fn first_tests(code: &[u8], from: usize) -> Option<Vec<(usize, Vec<(u32, u32)>)>> {
+fn first_tests(code: &[u8], from: usize) -> Option<Vec<(usize, Ranges)>> {
     let mut tests = Vec::new();
     let mut seen = vec![false; code.len()];
     let mut todo = vec![from];
@@ -1117,9 +1129,11 @@ mod tests {
 
     fn required_of(source: &str, flags: &str) -> Option<Vec<u8>> {
         let (code, flags) = compiled(source, flags);
-        analyse(&code, flags)
-            .required
-            .map(|chars| (0..=255u8).filter(|&c| chars.latin1[usize::from(c)]).collect())
+        analyse(&code, flags).required.map(|chars| {
+            (0..=255u8)
+                .filter(|&c| chars.latin1[usize::from(c)])
+                .collect()
+        })
     }
 
     #[test]
@@ -1133,7 +1147,10 @@ mod tests {
         assert_eq!(required_of("(?:ab|cb)x?", ""), None);
         assert_eq!(required_of("x*[ab]", "").as_deref(), Some(&b"ab"[..]));
         assert_eq!(required_of(".q(?=@)", "").as_deref(), Some(&b"q"[..]));
-        assert_eq!(required_of("\\s+[=:]\\s*\\d", "i").as_deref(), Some(&b":="[..]));
+        assert_eq!(
+            required_of("\\s+[=:]\\s*\\d", "i").as_deref(),
+            Some(&b":="[..])
+        );
         // Nothing every match needs, or nothing rarer than the start.
         assert_eq!(required_of("a?b?", ""), None);
         assert_eq!(required_of("@\\w+", ""), None);
@@ -1227,7 +1244,10 @@ mod tests {
 
     #[test]
     fn truncated_bytecode_starts_anywhere() {
-        assert_eq!(analyse_start(&body(&[op::CHAR16, b'a']), 0), Start::Anywhere);
+        assert_eq!(
+            analyse_start(&body(&[op::CHAR16, b'a']), 0),
+            Start::Anywhere
+        );
         assert_eq!(
             analyse_start(&body(&[op::GOTO, 0xff, 0xff, 0xff, 0x7f]), 0),
             Start::Anywhere
@@ -1316,12 +1336,24 @@ mod tests {
     #[test]
     fn the_first_result_that_is_not_a_miss_ends_the_search() {
         let mut calls = 0;
-        let found = run(&only(&Start::Anywhere), Subject::Narrow(b"abc"), 0, 0, |at| {
-            calls += 1;
-            c_int::from(at == 1)
-        });
+        let found = run(
+            &only(&Start::Anywhere),
+            Subject::Narrow(b"abc"),
+            0,
+            0,
+            |at| {
+                calls += 1;
+                c_int::from(at == 1)
+            },
+        );
         assert_eq!((found, calls), (1, 2));
-        let failed = run(&only(&Start::Anywhere), Subject::Narrow(b"abc"), 0, 0, |_| -2);
+        let failed = run(
+            &only(&Start::Anywhere),
+            Subject::Narrow(b"abc"),
+            0,
+            0,
+            |_| -2,
+        );
         assert_eq!(failed, -2);
     }
 }

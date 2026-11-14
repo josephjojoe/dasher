@@ -747,6 +747,80 @@ values from `Trace`, which rquickjs does not expose. `a.href` pays for
 
 New loops: `children[i]`, `hidden` and `a.href`.
 
+### Regular expressions
+
+DAS-38 made the RegExp methods, the matcher and the search loop faster:
+see "RegExp methods, the matcher and the search plan at V8's speed" in
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)
+and [`crates/js/src/regexp.rs`](../js/src/regexp.rs). Release build on
+this machine, median of 5 runs; before is `main` at `d5e3456` with the two
+new loops added, and Node is 22 `--jitless`, which runs regexps on V8's
+interpreter:
+
+| benchmark | before ns/op | after ns/op | | Node `--jitless` | after ÷ Node |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| regexps | 6,190 | 1,095 | 5.7× | 531 | 2.1× |
+| regexps, page patterns | 13,980 | 4,275 | 3.3× | 2,641 | 1.6× |
+| regexps over page text | 2,254,570 | 344,077 | 6.6× | 612,597 | 0.56× |
+
+The two new loops are made of patterns and calls from recorded pages:
+user-agent sniffing, type checks, CSS name conversion, trimming, class
+lists, email checks and cookie lookups on short strings; and an email
+search, a keyword search and whitespace runs over 13 KB of text. Over
+text dasher is now faster than V8: an email search ends at once when the
+text has no `@`, and words are not retried suffix by suffix. On short
+strings what is left is mostly not the matcher. Three calls of methods
+that do nothing cost 174 ns in this loop against V8's 101; an `exec`
+result is an object, a property array, an element array and a string per
+group, allocated through the slab allocator (about 130 ns against V8's
+30); and each match of a `replace` with `g` costs about 60 ns against 25.
+
+Real pages, measured as in [Real pages](#real-pages) on the 17 recorded
+pages where regexps cost most (of the 142 recorded for DAS-30), with
+`--realtime` so that a page's timers fire as often whatever the speed,
+and `perf` call graphs: time with a RegExp method, the compiler, the
+matcher or the search hook on the stack. Several of these pages run at
+full CPU until the 60 s limit whatever dasher does, so the faster build
+spends the saving on more of the page's other work; "same work" scales its
+regexp time to the other work the slower build did.
+
+| page | CPU before | after | regexps before | after | same work | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| docker.com | 9.88 s | 7.85 s | 1.28 s | 0.23 s | 0.26 s | −79% |
+| soundcloud.com | 6.65 s | 5.10 s | 0.89 s | 0.19 s | 0.22 s | −75% |
+| twilio.com | 12.44 s | 11.57 s | 1.60 s | 0.37 s | 0.36 s | −78% |
+| cloudflare.com | 11.19 s | 9.16 s | 0.73 s | 0.19 s | 0.22 s | −70% |
+| salesforce.com | 55.06 s | 60.72 s | 3.88 s | 1.74 s | 1.51 s | −61% |
+| hp.com | 4.68 s | 3.92 s | 0.26 s | 0.10 s | 0.12 s | −54% |
+| samsung.com | 31.07 s | 33.48 s | 0.73 s | 0.21 s | 0.19 s | −74% |
+| hubspot.com | 55.94 s | 60.58 s | 0.73 s | 0.11 s | 0.10 s | −86% |
+| archive.org | 59.34 s | 60.24 s | 2.87 s | 1.01 s | 0.97 s | −66% |
+| squarespace.com | 11.63 s | 10.04 s | 0.41 s | 0.11 s | 0.13 s | −69% |
+| okta.com | 3.75 s | 2.04 s | 0.25 s | 0.06 s | 0.11 s | −55% |
+| figma.com | 7.17 s | 6.00 s | 0.15 s | 0.03 s | 0.03 s | −78% |
+| newrelic.com | 11.58 s | 10.32 s | 0.60 s | 0.23 s | 0.25 s | −58% |
+| theverge.com | 7.75 s | 6.75 s | 0.50 s | 0.10 s | 0.11 s | −78% |
+| techcrunch.com | 6.46 s | 5.83 s | 0.32 s | 0.14 s | 0.16 s | −51% |
+| engadget.com | 56.39 s | 60.33 s | 0.47 s | 0.28 s | 0.26 s | −44% |
+| coursera.org | 4.40 s | 4.19 s | 0.20 s | 0.11 s | 0.12 s | −43% |
+| **all 17** | **355.4 s** | **358.1 s** | **15.87 s** | **5.22 s** | **5.11 s** | **−68%** |
+
+Regexp time fell by two thirds: 67% as measured and 68% for the same
+work. What is left is mostly calls on short strings, at about V8's cost
+each: salesforce.com calls one `exec` of
+`\[object (Boolean|Number|String|Function|Array|Date|RegExp)\]` millions
+of times a minute, and a loop of it takes 1.1 times as long as in Node
+`--jitless` (2.2 times before).
+
+On the fixture suite peak RSS is 0.1 to 0.2 MiB higher, as much with the
+new paths turned off as on: it is the larger binary (66 KiB more), not
+what the paths keep. Growth over 100 sequential jobs stayed within its
+run-to-run noise (−0.08 to +0.21 MiB for either build).
+
+40,000 calls sampled from those pages and replayed through `exec` (the
+pattern, the subject and lastIndex of every 16th call) took 1.64 times as
+long as in Node before and 0.96 times after.
+
 ## Per-page limits
 
 Each page has two hard limits. Going over either one stops the page and

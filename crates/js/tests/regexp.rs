@@ -26,7 +26,10 @@ fn run(js: &JsRuntime, script: &str, name: &str) -> String {
 fn dashers_regexp_paths_give_the_engines_answers() {
     let fixtures = [
         ("regexp.js", include_str!("fixtures/regexp.js")),
-        ("regexp-methods.js", include_str!("fixtures/regexp-methods.js")),
+        (
+            "regexp-methods.js",
+            include_str!("fixtures/regexp-methods.js"),
+        ),
     ];
 
     let js = runtime();

@@ -383,8 +383,32 @@ poll for it (the repeat loop every 4,096 characters) or are bounded by the
 subject's length, and `crates/js/tests/limits.rs` runs nested repeats
 through each path against a 50 ms deadline.
 
-Measured on an AWS Graviton4 (aarch64), against Node 22 `--jitless`
-(V8's regexp interpreter):
+Measured on an AWS Graviton4 (aarch64), release build, against `main`
+at `d5e3456` and against Node 22 `--jitless` (V8's regexp interpreter);
+the tables are in `crates/bench/README.md` under "Regular expressions":
 
-MEASUREMENTS
+- `dasher-bench micro`: the `regexps` loop 6,190 to 1,095 ns (Node 531),
+  a loop of calls taken from real pages 13,980 to 4,275 ns (Node 2,641),
+  and searches over 13 KB of page text 2.25 to 0.34 ms (Node 0.61).
+- 17 recorded pages where regexps cost most, `--realtime`, `perf` call
+  graphs: time in regexps 15.9 to 5.2 s summed over the pages (67% less;
+  68% less for the same amount of the pages' other work), with 70 to 79%
+  less on the pages that scan their text for email addresses.
+- 40,000 calls sampled from those pages and replayed through `exec`: 1.64
+  times as long as in Node before, 0.96 times after.
+- 66 KiB more binary; peak RSS 0.1 to 0.2 MiB higher on the fixture
+  suite, the same with the paths turned off.
+
+`crates/js/tests/regexp.rs` runs 116 patterns over 36 subjects through
+every method, and 183 cases of methods on regexps a script has changed
+(own and prototype `exec`, each flag getter, `constructor`,
+`Symbol.species`, subclasses, odd `lastIndex` values, recompiling while
+`lastIndex` is read, every `$` form, `split` limits, named groups, result
+shapes), with dasher's paths and without, and expects the same output;
+planting a bug in any one of the paths makes it fail. V8 differs on 11
+of the 299, the same way with dasher's paths as without: they are
+QuickJS's own departures (where a `u` search starts when lastIndex is
+inside a surrogate pair, how often `replace` and `match` call the flag
+getters, `test` looking `exec` up before converting its argument, and an
+exec result's keys listing `groups` before `index` and `input`).
 

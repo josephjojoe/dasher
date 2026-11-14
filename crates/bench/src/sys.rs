@@ -124,8 +124,11 @@ mod tests {
         let before = rss();
         assert!(before > 0);
         let block = vec![1u8; 32 << 20];
-        assert!(rss() >= before + (16 << 20));
-        assert!(peak_rss() >= rss());
+        let now = rss();
+        assert!(now >= before + (16 << 20));
+        // Read after: other tests load pages meanwhile, and the high-water
+        // mark only rises.
+        assert!(peak_rss() >= now);
         drop(block);
     }
 }
