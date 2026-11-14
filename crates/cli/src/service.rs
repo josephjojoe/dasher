@@ -1,8 +1,11 @@
 //! `dasher serve` and `dasher lambda`: dasher as a service.
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
+
+use dasher::{ScriptCache, ScriptCacheOptions};
 
 use dasher_serve::{Config, LambdaConfig, RUNTIME_API_ENV, Server};
 
@@ -41,9 +44,16 @@ Options for serve (environment variables in brackets):
                                  and private addresses, which are refused
                                  by default; for testing against local
                                  servers [$DASHER_ALLOW_PRIVATE_ADDRESSES]
+      --script-cache <MiB>       memory for compiled scripts that later
+                                 jobs reuse; 0 turns the cache off
+                                 [$DASHER_SCRIPT_CACHE_MB; default: 32]
+      --script-cache-dir <dir>   keep compiled scripts in <dir> as well, so
+                                 a new process starts with them
+                                 [$DASHER_SCRIPT_CACHE_DIR]
   -h, --help                     print this help
 
-lambda reads $DASHER_ALLOW_PRIVATE_ADDRESSES too.";
+lambda reads $DASHER_ALLOW_PRIVATE_ADDRESSES, $DASHER_SCRIPT_CACHE_MB and
+$DASHER_SCRIPT_CACHE_DIR too.";
 
 /// Options for `dasher serve`.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +66,49 @@ pub struct ServeOptions {
     pub shutdown_timeout: Duration,
     pub auth_token: Option<String>,
     pub allow_private_addresses: bool,
+    pub script_cache: ScriptCacheSettings,
+}
+
+/// The script cache's size and directory, from options or the
+/// environment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptCacheSettings {
+    /// In MiB; 0 turns the cache off.
+    pub mib: usize,
+    pub dir: Option<PathBuf>,
+}
+
+impl Default for ScriptCacheSettings {
+    fn default() -> Self {
+        Self {
+            mib: dasher::DEFAULT_SCRIPT_CACHE_BYTES / (1024 * 1024),
+            dir: None,
+        }
+    }
+}
+
+impl ScriptCacheSettings {
+    fn from_env(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let mut settings = Self::default();
+        let from_env = |var: &str| env(var).filter(|v| !v.trim().is_empty());
+        if let Some(mib) = from_env("DASHER_SCRIPT_CACHE_MB") {
+            settings.mib = number("$DASHER_SCRIPT_CACHE_MB", &mib)?;
+        }
+        settings.dir = from_env("DASHER_SCRIPT_CACHE_DIR").map(PathBuf::from);
+        Ok(settings)
+    }
+
+    /// The cache these describe; none with neither memory nor a directory.
+    pub fn cache(&self) -> Option<ScriptCache> {
+        if self.mib == 0 && self.dir.is_none() {
+            return None;
+        }
+        Some(ScriptCache::new(ScriptCacheOptions {
+            memory_bytes: self.mib.saturating_mul(1024 * 1024),
+            dir: self.dir.clone(),
+            ..ScriptCacheOptions::default()
+        }))
+    }
 }
 
 impl Default for ServeOptions {
@@ -69,6 +122,7 @@ impl Default for ServeOptions {
             shutdown_timeout: dasher_serve::DEFAULT_SHUTDOWN_TIMEOUT,
             auth_token: None,
             allow_private_addresses: false,
+            script_cache: ScriptCacheSettings::default(),
         }
     }
 }
@@ -95,6 +149,7 @@ pub fn parse_serve(
     }
     options.auth_token = from_env("DASHER_AUTH_TOKEN");
     options.allow_private_addresses = allow_private_addresses(env)?;
+    options.script_cache = ScriptCacheSettings::from_env(env)?;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -123,6 +178,8 @@ pub fn parse_serve(
             "--shutdown-timeout" => options.shutdown_timeout = seconds(&name, &value("seconds")?)?,
             "--auth-token" => options.auth_token = Some(value("a token")?),
             "--allow-private-addresses" => options.allow_private_addresses = true,
+            "--script-cache" => options.script_cache.mib = number(&name, &value("MiB")?)?,
+            "--script-cache-dir" => options.script_cache.dir = Some(value("a directory")?.into()),
             _ => return Err(format!("unknown serve option {name}")),
         }
         if inline.is_some() {
@@ -178,6 +235,7 @@ pub fn serve(options: &ServeOptions) -> ExitCode {
         auth_token: options.auth_token.clone(),
         shutdown_timeout: options.shutdown_timeout,
         block_private_addresses: !options.allow_private_addresses,
+        script_cache: options.script_cache.cache(),
         ..Config::default()
     };
     let addr = SocketAddr::new(options.host, options.port);
@@ -209,8 +267,16 @@ pub fn lambda() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let script_cache = match ScriptCacheSettings::from_env(&env) {
+        Ok(settings) => settings.cache(),
+        Err(message) => {
+            eprintln!("dasher: {message}");
+            return ExitCode::from(2);
+        }
+    };
     let config = LambdaConfig {
         block_private_addresses: !allow_private,
+        script_cache,
         ..LambdaConfig::default()
     };
     block_on(async move {
@@ -272,8 +338,17 @@ mod tests {
             ("DASHER_MAX_QUEUE", "0"),
             ("DASHER_MAX_TIMEOUT", "60"),
             ("DASHER_AUTH_TOKEN", "tok"),
+            ("DASHER_SCRIPT_CACHE_MB", "8"),
+            ("DASHER_SCRIPT_CACHE_DIR", "/tmp/scripts"),
         ];
         let options = parse(&[], &env).unwrap().unwrap();
+        assert_eq!(
+            options.script_cache,
+            ScriptCacheSettings {
+                mib: 8,
+                dir: Some("/tmp/scripts".into())
+            }
+        );
         assert!(!options.allow_private_addresses);
         assert_eq!(options.port, 9000);
         assert_eq!(options.max_concurrency, 2);
@@ -296,6 +371,9 @@ mod tests {
                 "2.5",
                 "--auth-token",
                 "other",
+                "--script-cache=0",
+                "--script-cache-dir",
+                "/var/cache/dasher",
             ],
             &env,
         )
@@ -309,6 +387,17 @@ mod tests {
         assert_eq!(options.shutdown_timeout, Duration::from_millis(2500));
         assert_eq!(options.auth_token.as_deref(), Some("other"));
         assert!(!options.allow_private_addresses);
+        assert_eq!(options.script_cache.mib, 0);
+        assert_eq!(
+            options.script_cache.dir.as_deref(),
+            Some("/var/cache/dasher".as_ref())
+        );
+        // memory off, but still a directory
+        assert_eq!(
+            options.script_cache.cache().unwrap().options().memory_bytes,
+            0
+        );
+        assert!(ScriptCacheSettings { mib: 0, dir: None }.cache().is_none());
 
         let allowed = |args: &[&str], value: &str| {
             parse(args, &[("DASHER_ALLOW_PRIVATE_ADDRESSES", value)])
@@ -334,6 +423,10 @@ mod tests {
         assert!(err(&["--max-concurrency", "0"], &[]).contains("positive"));
         assert!(err(&["--max-timeout", "0"], &[]).contains("seconds"));
         assert!(err(&[], &[("PORT", "http")]).contains("$PORT"));
+        assert!(
+            err(&[], &[("DASHER_SCRIPT_CACHE_MB", "lots")]).contains("$DASHER_SCRIPT_CACHE_MB")
+        );
+        assert!(err(&["--script-cache", "-1"], &[]).contains("whole number"));
         assert!(
             err(&[], &[("DASHER_ALLOW_PRIVATE_ADDRESSES", "maybe")])
                 .contains("$DASHER_ALLOW_PRIVATE_ADDRESSES")

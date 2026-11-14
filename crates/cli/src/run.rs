@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use dasher::{
     AutoScrollOptions, Browser, ClockMode, DEFAULT_PAGE_TIME_BUDGET, Error, GotoOptions, JsonValue,
-    Navigation, NetworkIdle, Page, SettleOptions, WorkBudget,
+    Navigation, NetworkIdle, Page, ScriptCache, ScriptCacheOptions, SettleOptions, WorkBudget,
 };
 use dasher_serve::report::{
     console_json, error_json, error_message, level_name, scroll_json, settle_name,
@@ -82,9 +82,16 @@ async fn run(options: &Options) -> ExitCode {
     };
     // The process is about to exit and the output is written. Freeing the
     // page object by object first was 5% of a heavy page's CPU time, so
-    // leave its memory for the OS to take back.
-    #[allow(clippy::mem_forget)]
-    std::mem::forget(page);
+    // leave its memory for the OS to take back. Scripts the cache
+    // directory should hold compiled anew are compiled once it is freed.
+    let work = page.take_script_cache_work();
+    if work.is_empty() {
+        #[allow(clippy::mem_forget)]
+        std::mem::forget(page);
+    } else {
+        drop(page);
+        work.run();
+    }
     code
 }
 
@@ -117,6 +124,13 @@ fn browser(options: &Options) -> dasher::Result<Browser> {
     if let Some(nodes) = options.max_dom_nodes {
         builder = builder.max_dom_nodes((nodes > 0).then_some(nodes));
     }
+    // One page: a cache in memory would only be filled for nothing.
+    builder = builder.script_cache(options.script_cache_dir.clone().map(|dir| {
+        ScriptCache::new(ScriptCacheOptions {
+            dir: Some(dir),
+            ..ScriptCacheOptions::default()
+        })
+    }));
     builder.build()
 }
 

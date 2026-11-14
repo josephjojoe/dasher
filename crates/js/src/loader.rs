@@ -15,9 +15,9 @@ use rquickjs::{Ctx, Function, JsLifetime, Object, Value};
 use crate::dom::{self, HeldNode};
 use crate::error::ScriptError;
 use crate::events::{self, HostTarget};
-use crate::modules;
 use crate::remote::{PendingOperation, TaskSender};
-use crate::runtime::{JsRuntime, Shared, eval_options};
+use crate::runtime::{JsRuntime, Shared};
+use crate::script_cache::Origin;
 
 /// `document.readyState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -330,8 +330,12 @@ impl JsRuntime {
             let hooks = LoaderHooks::get(ctx)?;
             let script = dom::wrap(ctx, &self.shared().dom, element)?;
             let previous: Value<'_> = hooks.set_current_script.call((script,))?;
-            let source = modules::rewrite_classic(source);
-            let result = ctx.eval_with_options::<(), _>(&*source, eval_options(url));
+            let origin = if self.shared().dom.doc().has_attribute(element, "src") {
+                Origin::External
+            } else {
+                Origin::Inline
+            };
+            let result = self.eval_classic(ctx, source, url, origin);
             // Take the exception off the context before calling back into JS.
             let thrown = result.is_err().then(|| ctx.catch());
             hooks.set_current_script.call::<_, ()>((previous,))?;

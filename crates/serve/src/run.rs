@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use dasher::{
     AutoScrollOptions, Browser, ClockMode, ConsoleLevel, Error, GotoOptions, JsonValue, LoadError,
-    NetworkIdle, Page, SettleOptions,
+    NetworkIdle, Page, ScriptCache, SettleOptions,
 };
 use serde_json::{Map, json};
 
@@ -54,6 +54,11 @@ pub struct RunOptions {
     /// On by default; turn it off only to scrape servers on a private
     /// network or localhost, such as test fixtures.
     pub block_private_addresses: bool,
+    /// Compiled scripts shared by the jobs' pages (see
+    /// [`BrowserBuilder::script_cache`](dasher::BrowserBuilder::script_cache)).
+    /// `None` by default here: each job compiles its scripts. The service
+    /// and the Lambda runtime pass the one from their config.
+    pub script_cache: Option<ScriptCache>,
 }
 
 impl Default for RunOptions {
@@ -63,6 +68,7 @@ impl Default for RunOptions {
             deadline: None,
             blocked: METADATA_BLOCKS.iter().map(|&s| s.to_owned()).collect(),
             block_private_addresses: true,
+            script_cache: None,
         }
     }
 }
@@ -230,7 +236,9 @@ async fn run_page(
 }
 
 fn browser(job: &Job, options: &RunOptions) -> dasher::Result<Browser> {
-    let mut builder = Browser::builder().block_private_addresses(options.block_private_addresses);
+    let mut builder = Browser::builder()
+        .block_private_addresses(options.block_private_addresses)
+        .script_cache(options.script_cache.clone());
     if let Some(user_agent) = &job.user_agent {
         builder = builder.user_agent(user_agent);
     }

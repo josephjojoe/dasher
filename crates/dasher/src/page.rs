@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use dasher_css::SelectorList;
 use dasher_dom::{Document, NodeId, ShadowRoots};
 use dasher_js::{
-    ConsoleLevel, ConsoleMessage, Evaluation, RunLimits, RunOutcome, RuntimeOptions, ScriptError,
-    StorageStore, WindowOptions,
+    ConsoleLevel, ConsoleMessage, Evaluation, RunLimits, RunOutcome, RuntimeOptions,
+    ScriptCacheWork, ScriptError, StorageStore, WindowOptions,
 };
 use dasher_net::{Cookie, Session, Url};
 use dasher_page::{
@@ -653,6 +653,22 @@ impl Page {
                 dom_nodes: js.with_document(Document::len),
             }
         })
+    }
+
+    /// Settles the page's account with the browser's
+    /// [`ScriptCache`](crate::ScriptCache) now rather than when it is
+    /// dropped, and returns the cache entries left to make again.
+    ///
+    /// A page notes which functions of its cached scripts ran, and when it
+    /// is dropped, compiles again the scripts whose entries lacked them. A
+    /// process about to exit, which leaves the page for the OS to free
+    /// rather than freeing it, calls this first and runs what it returns:
+    /// usually nothing, once the cache has seen the page's scripts twice.
+    pub fn take_script_cache_work(&self) -> ScriptCacheWork {
+        self.inner
+            .as_ref()
+            .map(|p| p.js().take_script_cache_work())
+            .unwrap_or_default()
     }
 
     // -----------------------------------------------------------------

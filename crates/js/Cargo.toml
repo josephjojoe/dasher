@@ -30,6 +30,9 @@ rquickjs.workspace = true
 smallvec = "1"
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 url = "2"
+# Already linked for Content-Encoding by dasher-net; compresses the script
+# cache's compiled code.
+zstd = { version = "0.14", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # mmap and friends, for the JS heap's slab allocator.

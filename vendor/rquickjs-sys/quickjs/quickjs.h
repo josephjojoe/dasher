@@ -449,6 +449,10 @@ JS_EXTERN void JS_SetMaxStackSize(JSRuntime *rt, size_t stack_size);
    used to check stack overflow. */
 JS_EXTERN void JS_UpdateStackTop(JSRuntime *rt);
 JS_EXTERN JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque);
+/* dasher: replaces the allocator functions with ones that manage the same
+   blocks (see quickjs.c) */
+JS_EXTERN void JS_SetMallocFunctions(JSRuntime *rt, const JSMallocFunctions *mf,
+                                     void *opaque);
 JS_EXTERN void JS_FreeRuntime(JSRuntime *rt);
 JS_EXTERN void *JS_GetRuntimeOpaque(JSRuntime *rt);
 JS_EXTERN void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque);
@@ -1059,6 +1063,35 @@ JS_EXTERN void JS_SetCanBlock(JSRuntime *rt, bool can_block);
 /* dasher: compile functions on their first call (true, the default) or all
    at once when their script is compiled */
 JS_EXTERN void JS_SetLazyFunctions(JSRuntime *rt, bool enable);
+/* dasher: a script compiled for an embedder's cache of compiled scripts,
+   or read back from it. While it is set (JS_SetScriptSource):
+   - JS_Eval of exactly 'buf' (buf[len] == '\0') shares the text: with
+     retain and release, every function compiled from it points into 'buf'
+     and the text is retained once per runtime that uses it and released
+     when its last function goes. 'hints' (ascending, as given to the lazy
+     compile hook) name functions to compile with the script, not on their
+     first call.
+   - JS_ReadObject with JS_READ_OBJ_SCRIPT reads what JS_WriteObject wrote
+     with JS_WRITE_OBJ_SCRIPT: the functions' text is this one, and their
+     file name 'filename'.
+   'tag' is passed to the lazy compile hook when a function of the script
+   is compiled on its first call (0: not passed). */
+typedef struct JSScriptSource {
+    const char *buf;
+    size_t len;
+    const char *filename;
+    uint64_t tag;
+    void (*retain)(void *opaque);
+    void (*release)(void *opaque);
+    void *opaque;
+    const uint32_t *hints;
+    size_t hint_count;
+} JSScriptSource;
+/* 'src' must stay valid until it is unset with NULL */
+JS_EXTERN void JS_SetScriptSource(JSRuntime *rt, const JSScriptSource *src);
+typedef void JSLazyCompileHook(void *opaque, uint64_t tag, uint32_t start);
+JS_EXTERN void JS_SetLazyCompileHook(JSRuntime *rt, JSLazyCompileHook *hook,
+                                     void *opaque);
 /* set the [IsHTMLDDA] internal slot */
 JS_EXTERN void JS_SetIsHTMLDDA(JSContext *ctx, JSValueConst obj);
 
@@ -1104,6 +1137,10 @@ typedef struct JSSABTab {
 #define JS_WRITE_OBJ_REFERENCE (1 << 3) /* allow object references to encode arbitrary object graph */
 #define JS_WRITE_OBJ_STRIP_SOURCE  (1 << 4) /* do not write source code information */
 #define JS_WRITE_OBJ_STRIP_DEBUG   (1 << 5) /* do not write debug information */
+/* dasher: a compiled script for JS_SetScriptSource: functions not compiled
+   yet are written as they are, and the script's text and file name are
+   left out */
+#define JS_WRITE_OBJ_SCRIPT        (1 << 6)
 JS_EXTERN uint8_t *JS_WriteObject(JSContext *ctx, size_t *psize, JSValueConst obj, int flags);
 JS_EXTERN uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
                                    int flags, JSSABTab *psab_tab);
@@ -1112,6 +1149,7 @@ JS_EXTERN uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst o
 #define JS_READ_OBJ_ROM_DATA  (0)      /* avoid duplicating 'buf' data (obsolete, broken by ICs) */
 #define JS_READ_OBJ_SAB       (1 << 2) /* allow SharedArrayBuffer */
 #define JS_READ_OBJ_REFERENCE (1 << 3) /* allow object references */
+#define JS_READ_OBJ_SCRIPT    (1 << 6) /* dasher: see JS_WRITE_OBJ_SCRIPT */
 JS_EXTERN JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len, int flags);
 JS_EXTERN JSValue JS_ReadObject2(JSContext *ctx, const uint8_t *buf, size_t buf_len,
                                  int flags, JSSABTab *psab_tab);

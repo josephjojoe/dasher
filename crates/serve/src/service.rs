@@ -51,6 +51,12 @@ pub struct Config {
     pub block_private_addresses: bool,
     /// Whether to log a line to stderr per job.
     pub log: bool,
+    /// Compiled scripts kept for later jobs (see
+    /// [`BrowserBuilder::script_cache`](dasher::BrowserBuilder::script_cache)):
+    /// by default a cache in memory of
+    /// [`DEFAULT_SCRIPT_CACHE_BYTES`](dasher::DEFAULT_SCRIPT_CACHE_BYTES).
+    /// `None` compiles every script from its text.
+    pub script_cache: Option<dasher::ScriptCache>,
 }
 
 impl Default for Config {
@@ -64,6 +70,9 @@ impl Default for Config {
             blocked: RunOptions::default().blocked,
             block_private_addresses: true,
             log: true,
+            script_cache: Some(dasher::ScriptCache::new(
+                dasher::ScriptCacheOptions::default(),
+            )),
         }
     }
 }
@@ -131,6 +140,7 @@ impl Service {
             deadline: None,
             blocked: self.config.blocked.clone(),
             block_private_addresses: self.config.block_private_addresses,
+            script_cache: self.config.script_cache.clone(),
         };
         let log = self.config.log;
         let running = Arc::clone(&self.running);

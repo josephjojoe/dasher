@@ -32,6 +32,7 @@ use crate::modules::{self, ModuleState};
 use crate::net::{self, NetState};
 use crate::random;
 use crate::remote::Remote;
+use crate::script_cache::{Origin, PageScripts, ScriptCache};
 use crate::urls;
 use crate::window::{self, WindowOptions, WindowState};
 
@@ -82,6 +83,9 @@ pub struct RuntimeOptions {
     /// Requests run as Tokio tasks: on the runtime the request is started
     /// from, or else on the one current when the `JsRuntime` was created.
     pub network: Option<Session>,
+    /// Compiled scripts shared with other pages (see [`ScriptCache`]).
+    /// `None`, the default here, compiles every script from its text.
+    pub script_cache: Option<ScriptCache>,
 }
 
 impl Default for RuntimeOptions {
@@ -98,6 +102,7 @@ impl Default for RuntimeOptions {
             frame_interval: DEFAULT_FRAME_INTERVAL,
             window: WindowOptions::default(),
             network: None,
+            script_cache: None,
         }
     }
 }
@@ -142,6 +147,8 @@ pub(crate) struct Shared {
     pub(crate) dom: Rc<DomState>,
     pub(crate) loader: LoaderState,
     pub(crate) modules: ModuleState,
+    /// The scripts this page used from the script cache, if it has one.
+    pub(crate) scripts: Option<Rc<PageScripts>>,
 }
 
 impl Shared {
@@ -171,6 +178,7 @@ impl Shared {
             dom: Rc::new(dom),
             loader: LoaderState::default(),
             modules: ModuleState::default(),
+            scripts: None,
         }
     }
 
@@ -545,6 +553,19 @@ pub struct JsRuntime {
     context: Context,
     runtime: Runtime,
     shared: Rc<Shared>,
+    /// Dropped last, once the engine is gone: makes the script cache
+    /// entries this page has reason to make.
+    _scripts: FinishScripts,
+}
+
+struct FinishScripts(Option<Rc<PageScripts>>);
+
+impl Drop for FinishScripts {
+    fn drop(&mut self) {
+        if let Some(scripts) = &self.0 {
+            scripts.finish().run();
+        }
+    }
 }
 
 impl JsRuntime {
@@ -561,20 +582,31 @@ impl JsRuntime {
             runtime.set_gc_threshold(threshold);
         }
 
-        let shared = Rc::new(Shared::new(&options, heap, url));
+        let mut shared = Shared::new(&options, heap, url);
+        let eager = cfg!(feature = "replay") && std::env::var_os("DASHER_EAGER_JS").is_some();
+        shared.scripts = options
+            .script_cache
+            .clone()
+            .map(|cache| PageScripts::new(cache, !eager));
+        let shared = Rc::new(shared);
         let handler_shared = Rc::clone(&shared);
         runtime.set_interrupt_handler(Some(Box::new(move || handler_shared.should_interrupt())));
         runtime.set_host_promise_rejection_tracker(Some(Box::new(track_rejection)));
 
         let context = Context::full(&runtime).map_err(internal)?;
+        context.with(|ctx| heap::attach(&ctx, &shared.heap));
         let js = Self {
             context,
             runtime,
+            _scripts: FinishScripts(shared.scripts.clone()),
             shared,
         };
         #[cfg(feature = "replay")]
-        if std::env::var_os("DASHER_EAGER_JS").is_some() {
+        if eager {
             js.with(|ctx| eager_functions(&ctx));
+        }
+        if let Some(scripts) = &js.shared.scripts {
+            js.with(|ctx| scripts.attach(&ctx));
         }
         js.with(|ctx| install(&ctx, &js.shared, &options).map_err(|e| js.shared.capture(&ctx, e)))?;
         Ok(js)
@@ -608,11 +640,27 @@ impl JsRuntime {
     /// an `error` event, and recorded in the error log unless a listener
     /// cancels that event.
     pub fn run_script(&self, source: &str, name: &str) -> Result<(), ScriptError> {
-        let source = modules::rewrite_classic(source);
-        let result =
-            self.run_task(|ctx| ctx.eval_with_options::<(), _>(&*source, eval_options(name)));
+        let result = self.run_task(|ctx| self.eval_classic(ctx, source, name, Origin::External));
         self.perform_microtask_checkpoint();
         result
+    }
+
+    /// Evaluates a classic script as a global script, through the script
+    /// cache when the page has one.
+    pub(crate) fn eval_classic(
+        &self,
+        ctx: &Ctx<'_>,
+        source: &str,
+        name: &str,
+        origin: Origin,
+    ) -> rquickjs::Result<()> {
+        let source = modules::rewrite_classic(source);
+        if let Some(scripts) = &self.shared.scripts
+            && scripts.eval_classic(ctx, &source, name, origin)?
+        {
+            return Ok(());
+        }
+        ctx.eval_with_options::<(), _>(&*source, eval_options(name))
     }
 
     /// Evaluates `source` and returns its completion value serialized with
@@ -862,6 +910,23 @@ impl JsRuntime {
         usize::try_from(self.runtime.memory_usage().malloc_size).unwrap_or(0)
     }
 
+    /// Settles the page's account with its script cache now, rather than
+    /// when it is dropped, and returns the entries left to make again.
+    ///
+    /// A page notes which functions of the cached scripts it ran, and when
+    /// it is dropped, compiles again the scripts whose entries lacked them
+    /// (see [`ScriptCache`]). A process about to exit, which leaves its
+    /// pages for the OS to free rather than freeing them, calls this
+    /// instead and [runs](crate::ScriptCacheWork::run) what it returns:
+    /// usually nothing, once the cache has seen the page's scripts twice.
+    /// Without a cache it returns nothing to do.
+    pub fn take_script_cache_work(&self) -> crate::ScriptCacheWork {
+        match &self.shared.scripts {
+            Some(scripts) => scripts.finish(),
+            None => crate::ScriptCacheWork::default(),
+        }
+    }
+
     /// Runs the cycle collector now, then frees the detached DOM nodes
     /// that are no longer reachable from JS.
     pub fn run_gc(&self) {
@@ -880,6 +945,9 @@ impl Drop for JsRuntime {
         self.shared.modules.abort_all();
         // The DOM may outlive the engine (in a `HeldNode`).
         self.shared.dom.set_runtime(std::ptr::null_mut());
+        if self.shared.scripts.is_some() {
+            self.with(|ctx| PageScripts::detach(&ctx));
+        }
     }
 }
 

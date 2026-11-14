@@ -90,6 +90,12 @@ crates:
   [rustls](https://crates.io/crates/rustls) (no OpenSSL), on
   [tokio](https://crates.io/crates/tokio).
 
+Compiled scripts are kept across pages in a bounded cache, keyed by a
+hash of each script's text (32 MiB by default, optionally on disk too),
+so a site visited again skips most of its compiling: 20% less CPU on
+heavy pages from the third visit. See
+[crates/bench/README.md](crates/bench/README.md#the-script-cache).
+
 Data structures favour compactness: arena/index-based nodes, interned names,
 no per-node reference counting. Each `Page` owns its JS runtime and DOM, and
 dropping the page frees all of it. The target artifact is a single static

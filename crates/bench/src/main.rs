@@ -18,6 +18,7 @@
 
 mod fixtures;
 mod micro;
+mod pages;
 mod report;
 mod sys;
 
@@ -34,6 +35,8 @@ use crate::report::{Budgets, Results};
 const USAGE: &str = "\
 usage: dasher-bench [options]
        dasher-bench micro [options]   (CPU per operation; see `micro --help`)
+       dasher-bench pages [options]   (recorded real pages in one process;
+                                       see `pages --help`)
 
 Loads each fixture page in a fresh process and reports peak RSS, per-page
 memory, time to settle, idle RSS, memory over sequential jobs, cold start
@@ -66,6 +69,7 @@ fn main() -> ExitCode {
         Some("child-page") => child(|| child_page(&args[1..])),
         Some("child-jobs") => child(|| child_jobs(&args[1..])),
         Some("micro") => micro::main(&args[1..]),
+        Some("pages") => pages::main(&args[1..]),
         _ => match parse(&args) {
             Ok(Some(options)) => run(&options),
             Ok(None) => {
@@ -277,7 +281,21 @@ fn current_thread_runtime() -> Result<tokio::runtime::Runtime, String> {
 /// A browser as a service would hold one: built, with the JS glue
 /// compiled, before the first job.
 fn ready_browser() -> Result<Browser, String> {
-    let browser = Browser::new().map_err(|e| e.to_string())?;
+    let mut builder = Browser::builder();
+    // The default script cache, or one of $DASHER_SCRIPT_CACHE_MB (0: none),
+    // to see what the cache costs.
+    if let Some(mib) = std::env::var("DASHER_SCRIPT_CACHE_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        builder = builder.script_cache((mib > 0).then(|| {
+            dasher::ScriptCache::new(dasher::ScriptCacheOptions {
+                memory_bytes: mib << 20,
+                ..dasher::ScriptCacheOptions::default()
+            })
+        }));
+    }
+    let browser = builder.build().map_err(|e| e.to_string())?;
     dasher::precompile().map_err(|e| e.to_string())?;
     Ok(browser)
 }
@@ -352,12 +370,21 @@ fn child_jobs(args: &[String]) -> Result<Value, String> {
         }
         Ok::<_, String>(())
     })?;
+    // The pages' compiled scripts stay in the browser's script cache, and
+    // count towards the RSS between jobs.
+    let cache = browser
+        .script_cache()
+        .map(dasher::ScriptCache::stats)
+        .unwrap_or_default();
     Ok(json!({
         "jobs": n,
         "idle_rss": idle_rss,
         "rss": rss,
         "peak_rss": sys::peak_rss(),
         "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+        "script_cache_bytes": cache.bytes,
+        "script_cache_hits": cache.hits,
+        "script_cache_misses": cache.misses,
     }))
 }
 
