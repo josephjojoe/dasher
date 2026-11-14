@@ -567,6 +567,74 @@ python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
 Its tagName figure (72 ns here, 60 in the audit) puts this machine about
 1.2 times slower than the audit's for Lightpanda.
 
+### Language fast paths
+
+DAS-36 added the fast paths in
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)
+("Fast paths for calls, object creation, copying, iteration and async",
+and "`i++` on a `let` stays an int add"). Same machine and build settings
+as the baseline; before is `main` at `6a9393e` with the engine source of
+`cfa9030`, after is the change, run back to back, median of 5 runs, on a
+machine under load from other builds. Node is the `--jitless` column of
+the baseline table.
+
+| benchmark | before ns/op | after ns/op | | after ÷ Node |
+| --- | ---: | ---: | ---: | ---: |
+| function call | 57.7 | 46.3 | 1.25× | 1.5× |
+| create+call closure | 186 | 158 | 1.18× | 1.6× |
+| integer loop | 36.0 | 25.1 | 1.43× | 1.6× |
+| object literal | 267 | 111 | 2.41× | 3.4× |
+| spread and Object.assign | 904 | 524 | 1.73× | 3.6× |
+| destructuring and rest/spread | 1,284 | 877 | 1.46× | 2.6× |
+| apply and arguments | 391 | 301 | 1.30× | 2.3× |
+| map/filter/reduce | 2,247 | 1,696 | 1.32× | 2.5× |
+| concat.apply | 865 | 518 | 1.67× | 2.6× |
+| Map/Set | 284 | 224 | 1.27× | 2.2× |
+| class instantiation | 288 | 276 | 1.04× | 2.9× |
+| promise chain | 1,383 | 1,082 | 1.28× | 3.7× |
+| async/await | 817 | 329 | 2.48× | 2.4× |
+| for-in and Object.keys | 1,317 | 552 | 2.39× | 3.2× |
+| tagName (a native getter) | 99.9 | 82.5 | 1.21× | |
+| nodeType (a native getter) | 89.3 | 73.2 | 1.22× | |
+
+Every other language row moved by 2 to 27%, from the cheaper `i++` and
+C calls in their loops, and the DOM rows by 0 to 26%: a native getter or
+method is now called without entering the interpreter. The aim was 1.3
+times V8 without its JIT, and these stay 1.5 to 3.7 times. What is left
+is mostly allocation and freeing of each object, property access through
+the prototype chain (`this.x = …` in a constructor, a method looked up
+on a prototype; DAS-32's inline caches) and garbage collection (the
+promise chain keeps 100,000 promises alive; DAS-46).
+
+The thirteen heavy recorded pages ([Real pages](#real-pages)), the same
+two builds, five runs of each alternating, median CPU seconds and peak
+RSS:
+
+| page | CPU before | after | | peak RSS before | after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| theverge.com | 6.92 s | 6.43 s | −7.1% | 162.7 MiB | 162.1 MiB |
+| techcrunch.com | 5.59 | 5.23 | −6.4% | 96.2 | 97.4 |
+| wired.com | 5.12 | 4.82 | −5.9% | 188.9 | 190.2 |
+| yahoo.com | 4.61 | 4.02 | −12.8% | 80.7 | 81.6 |
+| cloud.google.com | 3.80 | 3.56 | −6.3% | 76.8 | 75.9 |
+| zillow.com | 2.89 | 2.75 | −4.8% | 113.2 | 114.3 |
+| airbnb.com | 2.57 | 2.41 | −6.2% | 124.8 | 125.5 |
+| bbc.com/news | 1.95 | 1.75 | −10.3% | 51.2 | 52.6 |
+| nytimes.com | 1.88 | 1.86 | −1.1% | 123.1 | 120.0 |
+| timesofindia | 1.09 | 1.03 | −5.5% | 52.2 | 52.3 |
+| github.com | 1.01 | 0.99 | −2.0% | 53.4 | 53.8 |
+| espn.com | 0.68 | 0.66 | −2.9% | 53.3 | 53.1 |
+| edition.cnn.com | 0.59 | 0.59 | 0% | 75.2 | 75.4 |
+| **all thirteen** | **38.70 s** | **36.10 s** | **−6.7%** | **1252 MiB** | **1254 MiB** |
+
+Every page rendered the same number of elements with both builds, apart
+from cloud.google.com, whose count varies from run to run with either.
+cloud.google.com's CPU time also falls into two modes, about 2.6 and 3.6
+s, from run to run, so its row says little. Peak RSS moved within the
+run-to-run spread of 1 to 3 MiB. A first version, which kept the shape
+of every object literal site from its first run, cost zillow.com 3 to 4
+MiB; sites now keep a shape only from their second run.
+
 ## Per-page limits
 
 Each page has two hard limits. Going over either one stops the page and

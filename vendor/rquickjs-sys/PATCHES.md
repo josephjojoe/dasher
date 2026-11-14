@@ -383,3 +383,18 @@ their bits, which is what SameValueZero gives for those pairs, and calls
 `js_same_value_zero()` for every other pair. Map/Set loop: 241 to 193
 ns. `fixtures/collections.js` gained ints against the same numbers as
 doubles, -0, NaN and symbols.
+
+### What these changes measure together
+
+In dasher (`dasher-bench micro`, Graviton4, median of 5 runs, against the
+same build with the engine source before them): function call 57.7 to
+46.3 ns, integer loop 36.0 to 25.1, object literal 267 to 111, spread and
+Object.assign 904 to 524, destructuring and rest/spread 1284 to 877,
+apply and arguments 391 to 301, concat.apply 865 to 518, Map/Set 284 to
+224, promise chain 1383 to 1082, async/await 817 to 329, for-in and
+Object.keys 1317 to 552, and native DOM getters such as `nodeType` 89 to
+73. On the thirteen heavy recorded pages, five runs of each build
+alternating: 6.7% less CPU time summed over the pages (38.70 to
+36.10 s), 4 to 13% less on all but three, and peak RSS within the
+run-to-run spread (1252 to 1254 MiB summed). The tables are in
+`crates/bench/README.md`, "Language fast paths".
