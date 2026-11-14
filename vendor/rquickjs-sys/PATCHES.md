@@ -217,3 +217,164 @@ iteration, the integer loop 31.5 to 21.8 ns, a method call 75 to 65 ns.
 `crates/js/tests/fixtures/increments.js` applies `++` and `--` to 22
 kinds of value, at the int limits and in the TDZ, and gives the same
 answers with and without the change and under V8.
+
+## Fast paths for calls, object creation, copying, iteration and async
+
+The changes below share a rule: each fast path is taken only when what
+it skips cannot be seen by a script, and otherwise the general path runs
+unchanged. Each has a differential script in `crates/js/tests/fixtures/`
+run by `crates/js/tests/runtime.rs`; the expected output in the test is
+what the engine gave before the change, and each script was also run
+under V8 (`node`), with the differences noted in the script, all of
+which QuickJS had before. test262 (tc39/test262 at its 2026-11-13 head,
+41,841 tests, built with assertions on) fails the same 118 tests with
+and without them.
+
+Times are from a standalone `qjs` built from this source (gcc `-O2`,
+glibc `malloc`) on the Graviton4 the micro-benchmarks ran on, before and
+after each change, on the loops of `crates/bench/micro/language.js`; the
+dasher figures for all of them together are at the end. The machine was
+shared with other builds, so single figures carry a few percent of
+noise.
+
+One thing to know when changing any of them: a shape that is not hashed
+belongs to one object and is changed in place, and `add_property()`
+asserts that nothing else references it. Only hashed shapes may be held
+or shared (`object_shapes`, `c_function_shape`, the for-in iterator,
+the source of a bulk copy). Holding an unhashed one crashed two real
+pages before this was caught; the `qjs` used for differential runs must
+be built without `NDEBUG` to see it.
+
+### `quickjs/quickjs.c`: object literals are made from the shape their site ended with
+
+A literal whose properties are all `name: value` or `name` (no spread,
+computed key, method, accessor or `__proto__`) is compiled with a site
+number: `OP_object_site` at the start and `OP_object_site_end` at the
+end, through the temporary opcodes `object_start` and `object_end`
+(new opcodes go after all others in `quickjs-opcode.h`, so no opcode is
+renumbered and the precompiled builtins stay valid). The first time a
+site's literal ends, the shape of its object is noted in
+`JSFunctionBytecode.object_shapes`, if it is a hashed shape with
+Object.prototype and only configurable, writable, enumerable data
+properties. After that `OP_object_site` allocates the object with that
+shape and every value undefined, and `OP_define_field` stores into a
+property that is already there and is configurable, writable and
+enumerable, which is all a definition with those attributes does to it.
+Until the literal ends only its frame can reach the object, so its
+property order and attributes are all a script can see of the change,
+and those are the same. Class fields go through the same
+`OP_define_field`.
+
+Upstream each literal cloned the empty shape and grew it one property
+at a time, reallocating the shape and the property array, because the
+intermediate shapes die with their object. Object literal loop: 287 to
+108 ns. `fixtures/object_literals.js`.
+
+### `quickjs/quickjs.c`: spread, object rest and Object.assign copy an ordinary source in bulk
+
+`js_copy_data_properties_fast()` handles a source that is an ordinary
+object with a hashed shape and no array-index key: it holds the shape,
+walks it for the enumerable string keys and then the symbols (the order
+`JS_GetOwnPropertyNamesInternal` gives), reads each value from its slot
+while the source still has that shape and with a get once it does not,
+and defines or sets each on the target. That is what the general path
+does without the key list it allocates and the lookup per key; like
+upstream it reads a key that a getter deleted during the copy as
+undefined. An empty ordinary target with the source's prototype,
+copying a source of plain data properties, takes the source's shape and
+values whole; for Object.assign only if nothing on the prototype chain
+has any of the keys. Spread and Object.assign loop: 908 to 627 ns.
+`fixtures/copying.js`.
+
+### `quickjs/quickjs.c`: arrays skip the iterator protocol when it is the engine's
+
+`js_array_iterator_untouched()` says whether iterating an array would
+use the engine's iterator: a fast array with no own Symbol.iterator,
+whose prototype is the realm's Array.prototype, whose Symbol.iterator is
+a data property holding the original `values`, with
+%ArrayIteratorPrototype%.next a data property holding the original. It
+does the lookups a get would do. Then:
+
+- `for_of_start` (for-of, array destructuring, `yield*`) makes the
+  iterator directly instead of getting Symbol.iterator, calling it and
+  getting `next`. The iterator is still a real one, so `return` and
+  everything else behave as before.
+- `append` (spread into an array or a call) copies the elements at once
+  into the array being built, and makes no iterator: nothing of it could
+  be seen.
+- `define_array_el` adds the next element of a fast array in place, as
+  `JS_CreateProperty` would.
+- `apply` with a fast array of up to 16 elements copies them to the C
+  stack instead of an allocated list, still duplicating each.
+- `concat` copies a fast array's elements at once into a fast result,
+  and `JS_ArraySpeciesCreate` makes a plain array directly when the
+  `constructor` and Symbol.species gets would find the realm's Array
+  and its original species getter.
+- `map` sizes its result once and `map` and `filter` add each result in
+  place (`js_array_append_fast()`).
+
+Destructuring and rest/spread loop: 1252 to 898 ns; concat.apply: 942
+to 601; apply and arguments: 369 to 289; map/filter/reduce: 2231 to
+1767. `fixtures/array_iteration.js`, which also replaces the iterator,
+`next`, `constructor` and Symbol.species and puts an index on
+Array.prototype to see the general path.
+
+### `quickjs/quickjs.c`: functions are named and made without definitions
+
+`OP_set_name` stores the name when the function's `name` is still the
+empty string, only configurable, that a new function is made with. And
+the context keeps `c_function_shape`, the shape `length` and `name` give
+a function made in C (`js_function_set_properties()`: C functions,
+C function data, promise resolving functions), noted the first time and
+then taken by every such function with its two values stored in place.
+Create and call a closure: 183 to 172 ns.
+
+### `quickjs/quickjs.c`: promises and async functions allocate less per step
+
+- A promise capability for the realm's own Promise is made without the
+  executor function (`js_promise_new_capability_direct()`): the executor
+  is the engine's and only keeps the two functions it is given, and
+  Promise's `prototype` cannot change. Promise.prototype.then,
+  Promise.resolve and the rest take it.
+- An async call keeps the promise it returned and settles it with
+  `js_promise_settle()`, the body of a resolving function, instead of
+  making the two resolving functions nobody else can reach.
+- The two functions an await passes to the awaited promise are made at
+  the first await of a call and reused by every later one
+  (`JSAsyncFunctionData.resume_funcs`); they only ever go to
+  `perform_promise_then()` on an engine promise.
+
+Promise chain loop: 977 to 629 ns; async/await: 994 to 384.
+`fixtures/promises.js` records the order in which some forty reactions
+run, which V8 gives the same.
+
+### `quickjs/quickjs.c`: for-in and Object.keys read an ordinary object's shape
+
+For an ordinary object of plain data properties with string keys and a
+hashed shape, the for-in iterator takes the object's shape for its own
+key list instead of adding each key to itself, and `js_for_in_next()`
+skips the check that a key still exists while the object keeps that
+shape. Ordinary prototypes are checked for enumerable keys from their
+shapes instead of an allocated key list. `Object.keys`,
+`Object.values` and `Object.getOwnPropertyNames` of such an object fill
+an array of the right size from the shape. for-in and Object.keys loop
+(dasher): 1326 to 594 ns. `fixtures/enumeration.js`.
+
+### `quickjs/quickjs.c`: C functions are called without entering the interpreter
+
+`JS_CallInternal` is now a small inline function that sends anything
+but bytecode to its class's call handler, with the interrupt check and
+the not-a-function error upstream makes first, and calls the interpreter
+(`JS_CallInterpreter`) only for bytecode. Upstream every call of a C
+function, a DOM getter or a bound function went through the
+interpreter's entry, which saves every callee-saved register and sets up
+a frame of over a kilobyte. A loop of `Math.abs` and `indexOf` calls:
+1.19 to 1.04 s; JS-to-JS calls unchanged.
+
+### `quickjs/quickjs.c`: Map and Set compare int and object keys inline
+
+`map_find_record()` decides two ints, or two objects or symbols, by
+their bits, which is what SameValueZero gives for those pairs, and calls
+`js_same_value_zero()` for every other pair. Map/Set loop: 241 to 193
+ns. `fixtures/collections.js` gained ints against the same numbers as
+doubles, -0, NaN and symbols.
