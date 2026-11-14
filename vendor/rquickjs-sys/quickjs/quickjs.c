@@ -23775,6 +23775,7 @@ static int new_label_fd(JSFunctionDef *fd)
     int label;
     LabelSlot *ls;
 
+    /* dasher: see js_resize_array_fd() */
     if (js_resize_array_fd(fd->ctx, (void *)&fd->label_slots,
                             sizeof(fd->label_slots[0]),
                             &fd->label_size, fd->label_count + 1))
@@ -23842,6 +23843,7 @@ static int cpool_add(JSParseState *s, JSValue val)
 {
     JSFunctionDef *fd = s->cur_func;
 
+    /* dasher: see js_resize_array_fd() */
     if (js_resize_array_fd(s->ctx, (void *)&fd->cpool, sizeof(fd->cpool[0]),
                         &fd->cpool_size, fd->cpool_count + 1))
         return -1;
@@ -24171,6 +24173,7 @@ static int add_var(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
                             JS_MAX_LOCAL_VARS - 1);
         return -1;
     }
+    /* dasher: see js_resize_array_fd() */
     if (js_resize_array_fd(ctx, (void **)&fd->vars, sizeof(fd->vars[0]),
                         &fd->var_size, fd->var_count + 1))
         return -1;
@@ -24255,6 +24258,7 @@ static int add_arg(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
                             JS_MAX_LOCAL_VARS - 1);
         return -1;
     }
+    /* dasher: see js_resize_array_fd() */
     if (js_resize_array_fd(ctx, (void **)&fd->args, sizeof(fd->args[0]),
                         &fd->arg_size, fd->arg_count + 1))
         return -1;
@@ -25174,6 +25178,7 @@ static int js_skip_elem_add(JSSkipElem *elem, const char *state, size_t level,
 
 /* XXX: no longer works if regexps are present. Could use previous
    regexp parsing heuristics to handle most cases */
+/* dasher: 'ask' is a SKIP_ASK_xxx */
 static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                                        bool no_line_terminator, int ask)
 {
@@ -25252,7 +25257,7 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                 s->token.line_num = r->last_line;
                 s->token.col_num = r->last_col;
                 last_tok = ')';
-                if (use_elem)
+                if (use_elem) /* dasher */
                     js_skip_elem_end_function(&elem[level - 1]);
                 goto next;
             }
@@ -25265,7 +25270,7 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                 goto done;
             open_pos[level] = s->token.ptr - s->buf_start + 1;
             open_bits[level] = 0;
-            if (use_elem)
+            if (use_elem) /* dasher */
                 js_skip_elem_open(&elem[level], s->token.val, open_cand);
             state[level++] = s->token.val;
             break;
@@ -25316,7 +25321,7 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                 if (level >= sizeof(state))
                     goto done;
                 open_bits[level] = 0;
-                if (use_elem)
+                if (use_elem) /* dasher */
                     js_skip_elem_open(&elem[level], '`', false);
                 state[level++] = '`';
             }
@@ -25394,7 +25399,7 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
         }
     }
     if (0) {
-    bail:
+    bail: /* dasher: see SKIP_ASK_ALL */
         tok = TOK_ERROR;
     }
  done:
@@ -25407,6 +25412,7 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
     return tok;
 }
 
+/* dasher: upstream's function, which asks for everything */
 static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_terminator)
 {
     return js_parse_skip_parens_token2(s, pbits, no_line_terminator, SKIP_ASK_ALL);
@@ -28459,6 +28465,7 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         }
         return 0;
     } else if (s->token.val == '(' &&
+               /* dasher: may stop early, see SKIP_ASK_ARROW */
                js_parse_skip_parens_token2(s, NULL, true, SKIP_ASK_ARROW) == TOK_ARROW) {
         return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
                                       JS_FUNC_NORMAL, JS_ATOM_NULL,
@@ -28481,6 +28488,7 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         if (next_token(s))
             return -1;
         if ((s->token.val == '(' &&
+             /* dasher: may stop early, see SKIP_ASK_ARROW */
              js_parse_skip_parens_token2(s, NULL, true, SKIP_ASK_ARROW) == TOK_ARROW) ||
             (s->token.val == TOK_IDENT && !s->token.u.ident.is_reserved &&
              peek_token(s, true) == TOK_ARROW)) {
@@ -32269,7 +32277,7 @@ static JSFunctionDef *js_new_function_def(JSContext *ctx,
 
     fd->is_eval = is_eval;
     fd->is_func_expr = is_func_expr;
-    js_dbuf_init_size(ctx, &fd->byte_code, 64);
+    js_dbuf_init_size(ctx, &fd->byte_code, 64); /* dasher */
     fd->last_opcode_pos = -1;
     fd->func_name = JS_ATOM_NULL;
     fd->var_object_idx = -1;
@@ -32903,6 +32911,7 @@ static int add_closure_var(JSContext *ctx, JSFunctionDef *s,
         return -1;
     }
 
+    /* dasher: see js_resize_array_fd() */
     if (js_resize_array_fd(ctx, (void **)&s->closure_var,
                         sizeof(s->closure_var[0]),
                         &s->closure_var_size, s->closure_var_count + 1))
