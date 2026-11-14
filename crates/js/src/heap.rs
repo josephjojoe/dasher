@@ -402,4 +402,46 @@ mod tests {
         drop(runtime);
         assert_eq!(heap.used.get(), 0, "everything allocated was freed");
     }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_vendor = "apple"
+    ))]
+    #[test]
+    fn attached_runtime_keeps_the_books_and_the_limit() {
+        let (runtime, heap) = new_runtime(Some(16 * 1024 * 1024)).unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        // Blocks made before attaching are freed through the direct path.
+        context.with(|ctx| {
+            ctx.eval::<(), _>("globalThis.early = 'e'.repeat(1 << 16)")
+                .unwrap();
+            attach(&ctx, &heap);
+        });
+        let before = heap.used.get();
+        context.with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.big = 'x'.repeat(1 << 20); \
+                 globalThis.list = Array.from({ length: 10000 }, (_, i) => ({ i }))",
+            )
+            .unwrap()
+        });
+        assert!(heap.used.get() >= before + (1 << 20));
+        context.with(|ctx| {
+            ctx.eval::<(), _>(
+                "delete globalThis.big; delete globalThis.list; delete globalThis.early",
+            )
+            .unwrap()
+        });
+        assert!(heap.used.get() < before + (1 << 20));
+        // The limit still holds on the direct path.
+        let refused =
+            context.with(|ctx| ctx.eval::<(), _>("'y'.repeat(32 * 1024 * 1024)").is_err());
+        assert!(refused);
+        assert!(heap.take_refused());
+        drop(context);
+        drop(runtime);
+        assert_eq!(heap.used.get(), 0, "everything allocated was freed");
+    }
 }
