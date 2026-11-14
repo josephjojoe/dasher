@@ -830,15 +830,33 @@ thread_local! {
         RefCell::new((0..CACHE_SLOTS).map(|_| None).collect());
 }
 
+/// A hash of a pattern's bytecode, eight bytes at a time.
+fn code_hash(code: &[u8]) -> u64 {
+    let mut hash = code.len() as u64;
+    let mut mix = |word: [u8; 8]| {
+        hash = (hash.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    };
+    let mut rest = code;
+    while let Some((word, tail)) = rest.split_first_chunk::<8>() {
+        mix(*word);
+        rest = tail;
+    }
+    let mut last = [0; 8];
+    last[..rest.len()].copy_from_slice(rest);
+    mix(last);
+    hash
+}
+
 /// The [`Plan`] of a pattern, worked out the first time it is searched
 /// with, and in full once it has been searched with a few times. A set of
-/// slots is found by where the bytecode is, and a slot is
-/// checked by what the bytecode is, so a pattern freed and another put at
-/// its address is noticed. A new plan goes in the set's last slot and the
+/// slots is found by what the bytecode is, and so is a slot in it: the
+/// same pattern has the same plan wherever its bytecode is, in this page
+/// or the next. (Finding the set by where the bytecode is would keep
+/// plans of freed patterns, a different lot each time the heap is laid
+/// out differently.) A new plan goes in the set's last slot and the
 /// others move up, so the set keeps the patterns used last.
 fn plan_of(code: &[u8], flags: c_int) -> Rc<Plan> {
-    let hash = (code.as_ptr().addr() ^ code.len()).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    let set = (hash >> 40) % (CACHE_SLOTS / CACHE_WAYS) * CACHE_WAYS;
+    let set = (code_hash(code) >> 40) as usize % (CACHE_SLOTS / CACHE_WAYS) * CACHE_WAYS;
     CACHE.with_borrow_mut(|cache| {
         let ways = &mut cache[set..set + CACHE_WAYS];
         for way in ways.iter_mut().flatten() {
