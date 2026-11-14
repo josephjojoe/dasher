@@ -461,6 +461,10 @@ struct JSContext {
        for a normal function that has a `prototype`. */
     JSShape *closure_shape[JS_CLOSURE_SHAPE_COUNT];
     JSShape *arguments_shape[2]; /* strict, sloppy */
+    /* dasher: `length` then `name`, both only configurable, on
+       Function.prototype: what js_function_set_properties() gives the
+       functions the engine makes in C (see there) */
+    JSShape *c_function_shape;
 
     JSValue *class_proto;
     JSValue function_proto;
@@ -720,6 +724,8 @@ typedef struct JSFunctionBytecode {
        from on its first call (see js_lazy_compile) */
     uint8_t is_lazy : 1;
     /* XXX: 4 bits available */
+    /* dasher: slots in object_shapes; in what was padding */
+    uint16_t object_shape_count;
     uint8_t *byte_code_buf; /* (self pointer) */
     int byte_code_len;
     JSAtom func_name;
@@ -743,6 +749,12 @@ typedef struct JSFunctionBytecode {
     /* dasher: when not NULL, `source` points into this shared copy of the
        whole script instead of being a block of its own */
     struct JSSourceText *source_text;
+    /* dasher: for each object literal site (OP_object_site), the shape
+       its object had when the literal ended, or NULL until it has ended
+       twice (see OP_object_site_end).
+       Grown on demand, so bytecode read back with JS_ReadObject starts
+       with none. */
+    JSShape **object_shapes; /* object_shape_count slots */
     /* dasher: while is_lazy, the JSLazyInfo it is compiled from. Once a
        lazy function is compiled, the block its cpool, vardefs, closure_var
        and code live in (they are not in this one), or NULL. */
@@ -886,6 +898,13 @@ typedef struct JSAsyncFunctionState {
 typedef struct JSAsyncFunctionData {
     JSGCObjectHeader header; /* must come first */
     JSValue resolving_funcs[2];
+    /* dasher: the functions an await passes to the awaited promise to
+       resume this call, made at the first await and used by every one
+       after it; undefined until then and once the call has ended */
+    JSValue resume_funcs[2];
+    /* dasher: the promise the call returned, settled directly when the
+       call ends (resolving_funcs stay undefined) */
+    JSValue promise;
     bool is_active; /* true if the async function state is valid */
     JSAsyncFunctionState func_state;
 } JSAsyncFunctionData;
@@ -1194,9 +1213,9 @@ static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
 static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,
                                       JSValueConst this_obj,
                                       int argc, JSValueConst *argv, int flags);
-static JSValue JS_CallInternal(JSContext *ctx, JSValueConst func_obj,
-                               JSValueConst this_obj, JSValueConst new_target,
-                               int argc, JSValueConst *argv, int flags);
+static inline JSValue JS_CallInternal(JSContext *ctx, JSValueConst func_obj,
+                                      JSValueConst this_obj, JSValueConst new_target,
+                                      int argc, JSValueConst *argv, int flags);
 static JSValue JS_CallConstructorInternal(JSContext *ctx,
                                           JSValueConst func_obj,
                                           JSValueConst new_target,
@@ -2658,6 +2677,8 @@ static void JS_MarkContext(JSRuntime *rt, JSContext *ctx,
         if (ctx->closure_shape[i])
             mark_func(rt, &ctx->closure_shape[i]->header);
     }
+    if (ctx->c_function_shape)
+        mark_func(rt, &ctx->c_function_shape->header);
     for(i = 0; i < 2; i++) {
         if (ctx->arguments_shape[i])
             mark_func(rt, &ctx->arguments_shape[i]->header);
@@ -2735,6 +2756,7 @@ void JS_FreeContext(JSContext *ctx)
     /* dasher */
     for(i = 0; i < JS_CLOSURE_SHAPE_COUNT; i++)
         js_free_shape_null(ctx->rt, ctx->closure_shape[i]);
+    js_free_shape_null(ctx->rt, ctx->c_function_shape);
     for(i = 0; i < 2; i++)
         js_free_shape_null(ctx->rt, ctx->arguments_shape[i]);
 
@@ -5473,11 +5495,48 @@ JSValue JS_NewObject(JSContext *ctx)
 static void js_function_set_properties(JSContext *ctx, JSValue func_obj,
                                        JSAtom name, int len)
 {
+    JSObject *p = JS_VALUE_GET_OBJ(func_obj);
+    JSShape *sh = ctx->c_function_shape;
+
+    /* dasher: a function made in C with Function.prototype and no
+       properties yet takes the shape the first such function was given
+       here, and the two values are stored in place. */
+    if (sh && p->shape->prop_count == 0 && p->shape->proto == sh->proto &&
+        p->extensible) {
+        JSValue name_val = JS_AtomToString(ctx, name);
+        if (JS_IsException(name_val))
+            return;
+        if (p->shape->prop_size != sh->prop_size) {
+            JSProperty *new_prop = js_realloc(ctx, p->prop,
+                                              sizeof(new_prop[0]) * sh->prop_size);
+            if (!new_prop) {
+                JS_FreeValue(ctx, name_val);
+                return;
+            }
+            p->prop = new_prop;
+        }
+        js_free_shape(ctx->rt, p->shape);
+        p->shape = js_dup_shape(sh);
+        p->prop[0].u.value = js_int32(len);
+        p->prop[1].u.value = name_val;
+        return;
+    }
     /* ES6 feature non compatible with ES5.1: length is configurable */
     JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_length, js_int32(len),
                            JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_name,
                            JS_AtomToString(ctx, name), JS_PROP_CONFIGURABLE);
+    /* dasher: note the shape for next time, if both went in */
+    sh = p->shape;
+    if (!ctx->c_function_shape && sh->is_hashed && sh->prop_count == 2 &&
+        sh->deleted_prop_count == 0 &&
+        JS_VALUE_GET_TAG(ctx->function_proto) == JS_TAG_OBJECT &&
+        sh->proto == JS_VALUE_GET_OBJ(ctx->function_proto) &&
+        sh->prop[0].atom == JS_ATOM_length &&
+        sh->prop[0].flags == JS_PROP_CONFIGURABLE &&
+        sh->prop[1].atom == JS_ATOM_name &&
+        sh->prop[1].flags == JS_PROP_CONFIGURABLE)
+        ctx->c_function_shape = js_dup_shape(sh);
 }
 
 static bool js_class_has_bytecode(JSClassID class_id)
@@ -6383,6 +6442,11 @@ static force_inline void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
             for(i = 0; i < b->cpool_count; i++) {
                 JS_MarkValue(rt, b->cpool[i], mark_func);
             }
+            /* dasher: the shapes noted for object literals */
+            for(i = 0; i < b->object_shape_count; i++) {
+                if (b->object_shapes[i])
+                    mark_func(rt, &b->object_shapes[i]->header);
+            }
             if (b->realm)
                 mark_func(rt, &b->realm->header);
         }
@@ -6402,6 +6466,9 @@ static force_inline void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
                 async_func_mark(rt, &s->func_state, mark_func);
             JS_MarkValue(rt, s->resolving_funcs[0], mark_func);
             JS_MarkValue(rt, s->resolving_funcs[1], mark_func);
+            JS_MarkValue(rt, s->resume_funcs[0], mark_func); /* dasher */
+            JS_MarkValue(rt, s->resume_funcs[1], mark_func);
+            JS_MarkValue(rt, s->promise, mark_func);
         }
         break;
     case JS_GC_OBJ_TYPE_SHAPE:
@@ -15629,6 +15696,49 @@ static JSValue js_build_mapped_arguments(JSContext *ctx, int argc,
     return JS_EXCEPTION;
 }
 
+/* dasher: true if 'p' is an ordinary object whose own properties are
+   all plain data properties with string keys that are not array indices
+   (deleted slots allowed). Its own keys in order are then just the
+   shape's, which is what for-in and Object.keys list. */
+static bool js_shape_is_plain_strings(JSContext *ctx, JSObject *p)
+{
+    JSShape *sh = p->shape;
+    JSShapeProperty *prs;
+    uint32_t idx;
+    int i;
+
+    if (p->class_id != JS_CLASS_OBJECT || sh->has_small_array_index)
+        return false;
+    for(i = 0, prs = sh->prop; i < sh->prop_count; i++, prs++) {
+        if (prs->atom == JS_ATOM_NULL)
+            continue;
+        if ((prs->flags & JS_PROP_TMASK) ||
+            JS_AtomGetKind(ctx, prs->atom) != JS_ATOM_KIND_STRING ||
+            JS_AtomIsArrayIndex(ctx, &idx, prs->atom))
+            return false;
+    }
+    return true;
+}
+
+/* dasher: true if 'p' certainly has no enumerable string-keyed own
+   property, judged from its shape alone; false if it may have one or is
+   exotic, which the general check then decides. */
+static bool js_shape_has_no_enumerable(JSContext *ctx, JSObject *p)
+{
+    JSShape *sh = p->shape;
+    JSShapeProperty *prs;
+    int i;
+
+    if (p->is_exotic)
+        return false;
+    for(i = 0, prs = sh->prop; i < sh->prop_count; i++, prs++) {
+        if (prs->atom != JS_ATOM_NULL && (prs->flags & JS_PROP_ENUMERABLE) &&
+            JS_AtomGetKind(ctx, prs->atom) == JS_ATOM_KIND_STRING)
+            return false;
+    }
+    return true;
+}
+
 static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
 {
     JSObject *p;
@@ -15671,13 +15781,18 @@ static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
             break;
         if (JS_IsException(obj1))
             goto fail;
-        if (JS_GetOwnPropertyNamesInternal(ctx, &tab_atom, &tab_atom_count,
-                                           JS_VALUE_GET_OBJ(obj1),
-                                           JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY)) {
-            JS_FreeValue(ctx, obj1);
-            goto fail;
+        /* dasher: an ordinary prototype is checked from its shape */
+        if (js_shape_has_no_enumerable(ctx, JS_VALUE_GET_OBJ(obj1))) {
+            tab_atom_count = 0;
+        } else {
+            if (JS_GetOwnPropertyNamesInternal(ctx, &tab_atom, &tab_atom_count,
+                                               JS_VALUE_GET_OBJ(obj1),
+                                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY)) {
+                JS_FreeValue(ctx, obj1);
+                goto fail;
+            }
+            js_free_prop_enum(ctx, tab_atom, tab_atom_count);
         }
-        js_free_prop_enum(ctx, tab_atom, tab_atom_count);
         if (tab_atom_count != 0) {
             JS_FreeValue(ctx, obj1);
             goto slow_path;
@@ -15703,6 +15818,28 @@ static JSValue build_for_in_iterator(JSContext *ctx, JSValue obj)
         /* for fast arrays, we only store the number of elements */
         it->is_array = true;
         it->array_length = p->u.array.count;
+    } else if (p->shape->is_hashed && js_shape_is_plain_strings(ctx, p)) {
+        /* dasher: the iterator takes the object's shape for its own, so
+           its keys are the object's in order without adding each one.
+           js_for_in_next() skips the slots that are deleted or not
+           enumerable, as the key list would have left them out, and the
+           values are null, as each key's would be. The iterator is never
+           seen by scripts, so the prototype the shape names does not
+           matter. Only a hashed shape can be shared: an unhashed one
+           belongs to its object alone. */
+        JSObject *pe = JS_VALUE_GET_OBJ(enum_obj);
+        JSShape *sh = p->shape;
+        JSProperty *new_prop;
+        if (pe->shape->prop_size != sh->prop_size) {
+            new_prop = js_realloc(ctx, pe->prop, sizeof(new_prop[0]) * sh->prop_size);
+            if (!new_prop)
+                goto fail;
+            pe->prop = new_prop;
+        }
+        for(i = 0; i < sh->prop_count; i++)
+            pe->prop[i].u.value = JS_NULL;
+        js_free_shape(ctx->rt, pe->shape);
+        pe->shape = js_dup_shape(sh);
     } else {
     normal_case:
         if (JS_GetOwnPropertyNamesInternal(ctx, &tab_atom, &tab_atom_count, p,
@@ -15797,8 +15934,12 @@ static __exception int js_for_in_next(JSContext *ctx, JSValue *sp)
         // check if the property was deleted unless we're dealing with a proxy
         JSValue obj = it->obj;
         if (JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT) {
-            JSObject *p = JS_VALUE_GET_OBJ(obj);
-            if (p->class_id == JS_CLASS_PROXY)
+            JSObject *p1 = JS_VALUE_GET_OBJ(obj);
+            if (p1->class_id == JS_CLASS_PROXY)
+                break;
+            /* dasher: an object that still has the shape the iterator
+               took (see build_for_in_iterator) still has every key */
+            if (!it->is_array && p1->shape == p->shape)
                 break;
         }
         ret = JS_HasProperty(ctx, obj, prop);
@@ -15983,12 +16124,74 @@ static int JS_IteratorClose(JSContext *ctx, JSValueConst enum_obj,
     return res;
 }
 
+static JSValue js_array_iterator_next(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv,
+                                      int *pdone, int magic);
+static JSValue js_create_array_iterator(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv, int magic);
+
+/* dasher: true if iterating the array 'val' would use the engine's own
+   array iterator: it is a fast array with no own Symbol.iterator, its
+   prototype is the realm's Array.prototype, whose Symbol.iterator is a
+   data property holding the original `values`, and
+   %ArrayIteratorPrototype%.next is a data property holding the original
+   `next`. The lookups are the ones a get would do, without the get. When
+   it returns true, *pnext (if not NULL) is that `next`, not duplicated. */
+static bool js_array_iterator_untouched(JSContext *ctx, JSValueConst val,
+                                        JSValueConst *pnext)
+{
+    JSObject *p, *proto;
+    JSShapeProperty *prs;
+    JSProperty *pr;
+    JSCFunctionType values = { .generic_magic = js_create_array_iterator };
+    JSCFunctionType next = { .iterator_next = js_array_iterator_next };
+
+    if (JS_VALUE_GET_TAG(val) != JS_TAG_OBJECT)
+        return false;
+    p = JS_VALUE_GET_OBJ(val);
+    if (p->class_id != JS_CLASS_ARRAY || !p->fast_array ||
+        find_own_property1(p, JS_ATOM_Symbol_iterator))
+        return false;
+    proto = p->shape->proto;
+    if (!proto || JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_ARRAY]) != JS_TAG_OBJECT ||
+        proto != JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_ARRAY]))
+        return false;
+    prs = find_own_property(&pr, proto, JS_ATOM_Symbol_iterator);
+    if (!prs || (prs->flags & JS_PROP_TMASK) ||
+        !JS_IsCFunction(ctx, pr->u.value, values.generic, JS_ITERATOR_KIND_VALUE))
+        return false;
+    if (JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_ARRAY_ITERATOR]) != JS_TAG_OBJECT)
+        return false;
+    proto = JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_ARRAY_ITERATOR]);
+    prs = find_own_property(&pr, proto, JS_ATOM_next);
+    if (!prs || (prs->flags & JS_PROP_TMASK) ||
+        !JS_IsCFunction(ctx, pr->u.value, next.generic, 0))
+        return false;
+    if (pnext)
+        *pnext = pr->u.value;
+    return true;
+}
+
 /* obj -> enum_rec (3 slots) */
 static __exception int js_for_of_start(JSContext *ctx, JSValue *sp,
                                        bool is_async)
 {
     JSValue op1, obj, method;
+    JSValueConst next;
     op1 = sp[-1];
+    /* dasher: an array with the engine's own iterator gets that iterator
+       made directly, without the get of Symbol.iterator, the call and the
+       get of `next` that would find the same. */
+    if (!is_async && js_array_iterator_untouched(ctx, op1, &next)) {
+        obj = js_create_array_iterator(ctx, op1, 0, NULL,
+                                       JS_ITERATOR_KIND_VALUE);
+        if (JS_IsException(obj))
+            return -1;
+        JS_FreeValue(ctx, op1);
+        sp[-1] = obj;
+        sp[0] = js_dup(next);
+        return 0;
+    }
     obj = JS_GetIterator(ctx, op1, is_async);
     if (JS_IsException(obj))
         return -1;
@@ -16141,6 +16344,49 @@ static __exception int js_append_enumerate(JSContext *ctx, JSValue *sp)
 
     pos = JS_VALUE_GET_INT(sp[-2]);
 
+    /* dasher: a fast array with the engine's own iterator, its length
+       matching its elements, is read straight from its elements; nothing
+       of the iterator can be seen. Into a fast array being built at its
+       end, the elements go in all at once. */
+    if (js_array_iterator_untouched(ctx, sp[-1], NULL)) {
+        JSObject *ps = JS_VALUE_GET_OBJ(sp[-1]), *pt;
+        uint32_t len, count = ps->u.array.count;
+        if (JS_VALUE_GET_TAG(ps->prop[0].u.value) == JS_TAG_INT &&
+            (uint32_t)JS_VALUE_GET_INT(ps->prop[0].u.value) == count) {
+            pt = JS_VALUE_GET_TAG(sp[-3]) == JS_TAG_OBJECT ?
+                JS_VALUE_GET_OBJ(sp[-3]) : NULL;
+            if (pt && pt != ps && pt->class_id == JS_CLASS_ARRAY &&
+                pt->fast_array && pt->extensible &&
+                pt->u.array.count == pos &&
+                JS_VALUE_GET_TAG(pt->prop[0].u.value) == JS_TAG_INT &&
+                (uint32_t)JS_VALUE_GET_INT(pt->prop[0].u.value) == pos &&
+                (get_shape_prop(pt->shape)->flags & JS_PROP_WRITABLE) &&
+                count <= INT32_MAX - pos) {
+                len = pos + count;
+                if (len > pt->u.array.u1.size &&
+                    expand_fast_array(ctx, pt, len))
+                    return -1;
+                for(i = 0; i < count; i++)
+                    pt->u.array.u.values[pos + i] = js_dup(ps->u.array.u.values[i]);
+                pt->u.array.count = len;
+                pt->prop[0].u.value = js_int32(len);
+                sp[-2] = js_int32(len);
+                return 0;
+            }
+            /* the elements are read before any is defined, as the
+               iterator would read each before its definition, which
+               cannot run code on a fresh array */
+            for(i = 0; i < ps->u.array.count; i++) {
+                if (JS_DefinePropertyValueUint32(ctx, sp[-3], pos++,
+                                                 js_dup(ps->u.array.u.values[i]),
+                                                 JS_PROP_C_W_E) < 0)
+                    return -1;
+            }
+            sp[-2] = js_int32(pos);
+            return 0;
+        }
+    }
+
     /* XXX: further optimisations:
        - use ctx->array_proto_values?
        - check if array_iterator_prototype next method is built-in and
@@ -16211,6 +16457,151 @@ exception:
     return -1;
 }
 
+/* dasher: true if no object on the prototype chain of 'p' (not 'p'
+   itself) has a property 'atom', and none is exotic, so that setting
+   'atom' on 'p' when 'p' lacks it can only add a data property. */
+static bool js_proto_chain_lacks(JSObject *p, JSAtom atom)
+{
+    for(p = p->shape->proto; p != NULL; p = p->shape->proto) {
+        if (p->is_exotic || find_own_property1(p, atom))
+            return false;
+    }
+    return true;
+}
+
+/* dasher: JS_CopyDataProperties() for a source that is an ordinary
+   object (spread, object rest, Object.assign) without the list of keys
+   and a lookup for each. Returns 1 if done, 0 if the general path must
+   do it (nothing has been copied then) and -1 on exception.
+
+   It does what the general path does, in the same order: the keys are
+   the source's enumerable own keys when the copy starts, strings first
+   and then symbols, and each value is read with a get. The source's
+   shape is held while copying, which keeps it from being changed in
+   place, so while the source still has that shape its values are read
+   from their slots; once a setter or getter has changed it, every
+   remaining value is read with JS_GetProperty as the general path does.
+   A source with an array index for a key takes the general path, which
+   puts those keys first. */
+static int js_copy_data_properties_fast(JSContext *ctx, JSValueConst target,
+                                        JSObject *p, JSObject *pexcl,
+                                        bool setprop)
+{
+    JSShape *sh = p->shape;
+    JSShapeProperty *prs;
+    JSObject *pt;
+    JSValue val;
+    uint32_t idx;
+    int i, pass, ret, n_sym = 0, n_enum = 0;
+    bool plain = true; /* every key a string with an ordinary C_W_E value */
+
+    /* An unhashed shape belongs to its object alone and is changed in
+       place (add_property() asserts it has no other reference), so only
+       a hashed one can be held. */
+    if (p->class_id != JS_CLASS_OBJECT || sh->has_small_array_index ||
+        !sh->is_hashed)
+        return 0;
+    for(i = 0, prs = sh->prop; i < sh->prop_count; i++, prs++) {
+        if (prs->atom == JS_ATOM_NULL)
+            continue;
+        if (JS_AtomIsArrayIndex(ctx, &idx, prs->atom))
+            return 0;
+        switch(JS_AtomGetKind(ctx, prs->atom)) {
+        case JS_ATOM_KIND_STRING:
+            break;
+        case JS_ATOM_KIND_SYMBOL:
+            n_sym++;
+            plain = false;
+            break;
+        default:
+            plain = false;
+            continue;
+        }
+        if (prs->flags & JS_PROP_ENUMERABLE)
+            n_enum++;
+        if (prs->flags != JS_PROP_C_W_E)
+            plain = false;
+    }
+    if (n_enum == 0)
+        return 1;
+
+    /* An empty ordinary target with the source's prototype, copying every
+       key of a source of plain data properties, ends with the source's
+       shape: take it, and the values. Setting a key on the target can only
+       add it if nothing on the prototype chain has that key. */
+    if (plain && !pexcl && JS_VALUE_GET_TAG(target) == JS_TAG_OBJECT &&
+        (pt = JS_VALUE_GET_OBJ(target)) != p &&
+        pt->class_id == JS_CLASS_OBJECT && pt->extensible &&
+        pt->shape->prop_count == 0 && pt->shape->proto == sh->proto &&
+        sh->is_hashed && sh->deleted_prop_count == 0) {
+        bool ok = true;
+        if (setprop) {
+            for(i = 0; i < sh->prop_count && ok; i++)
+                ok = js_proto_chain_lacks(p, sh->prop[i].atom);
+        }
+        if (ok) {
+            JSProperty *new_prop;
+            if (pt->shape->prop_size != sh->prop_size) {
+                new_prop = js_realloc(ctx, pt->prop,
+                                      sizeof(new_prop[0]) * sh->prop_size);
+                if (!new_prop)
+                    return -1;
+                pt->prop = new_prop;
+            }
+            js_free_shape(ctx->rt, pt->shape);
+            pt->shape = js_dup_shape(sh);
+            for(i = 0; i < sh->prop_count; i++)
+                pt->prop[i].u.value = js_dup(p->prop[i].u.value);
+            return 1;
+        }
+    }
+
+    js_dup_shape(sh);
+    ret = 1;
+    for(pass = 0; pass < 2 && ret > 0; pass++) {
+        if (pass == 1 && n_sym == 0)
+            break;
+        for(i = 0; i < sh->prop_count; i++) {
+            JSAtom atom = sh->prop[i].atom;
+            int flags = sh->prop[i].flags;
+            JSAtomKindEnum kind;
+            if (atom == JS_ATOM_NULL || !(flags & JS_PROP_ENUMERABLE))
+                continue;
+            kind = JS_AtomGetKind(ctx, atom);
+            if (kind != (pass == 0 ? JS_ATOM_KIND_STRING : JS_ATOM_KIND_SYMBOL))
+                continue;
+            if (pexcl) {
+                int r = JS_GetOwnPropertyInternal(ctx, NULL, pexcl, atom);
+                if (r) {
+                    if (r < 0) {
+                        ret = -1;
+                        break;
+                    }
+                    continue;
+                }
+            }
+            if (p->shape == sh && !(flags & JS_PROP_TMASK))
+                val = js_dup(p->prop[i].u.value);
+            else
+                val = JS_GetProperty(ctx, JS_MKPTR(JS_TAG_OBJECT, p), atom);
+            if (JS_IsException(val)) {
+                ret = -1;
+                break;
+            }
+            if (setprop)
+                ret = JS_SetProperty(ctx, target, atom, val);
+            else
+                ret = JS_DefinePropertyValue(ctx, target, atom, val,
+                                             JS_PROP_C_W_E);
+            if (ret < 0)
+                break;
+            ret = 1;
+        }
+    }
+    js_free_shape(ctx->rt, sh);
+    return ret;
+}
+
 static __exception int JS_CopyDataProperties(JSContext *ctx,
                                              JSValue target,
                                              JSValue source,
@@ -16233,6 +16624,11 @@ static __exception int JS_CopyDataProperties(JSContext *ctx,
         pexcl = JS_VALUE_GET_OBJ(excluded);
 
     p = JS_VALUE_GET_OBJ(source);
+
+    /* dasher: an ordinary source is copied without a key list */
+    ret = js_copy_data_properties_fast(ctx, target, p, pexcl, setprop);
+    if (ret != 0)
+        return ret < 0 ? -1 : 0;
 
     gpn_flags = JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK | JS_GPN_ENUM_ONLY;
     if (p->is_exotic) {
@@ -16817,8 +17213,50 @@ static bool needs_backtrace(JSValue exc)
     return !find_own_property1(p, JS_ATOM_stack);
 }
 
+/* dasher: notes the shape the object literal at 'site' of 'b' ended with,
+   for OP_object_site to make the next one with. Only a hashed shape with
+   Object.prototype and nothing but configurable, writable and enumerable
+   data properties is kept: the shape a run of define_field ops gives. The
+   reference held here keeps it from being changed in place. Failing to
+   note it only means the next literal is built the long way. */
+static void js_note_object_shape(JSContext *ctx, JSFunctionBytecode *b,
+                                 int site, JSValueConst obj)
+{
+    JSObject *p;
+    JSShape *sh;
+    int i;
+
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return;
+    p = JS_VALUE_GET_OBJ(obj);
+    sh = p->shape;
+    if (p->class_id != JS_CLASS_OBJECT || !sh->is_hashed ||
+        sh->deleted_prop_count != 0 || sh->prop_count == 0 ||
+        JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_OBJECT]) != JS_TAG_OBJECT ||
+        sh->proto != JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_OBJECT]))
+        return;
+    for(i = 0; i < sh->prop_count; i++) {
+        if (sh->prop[i].flags != JS_PROP_C_W_E)
+            return;
+    }
+    if (site >= b->object_shape_count) {
+        JSShape **tab;
+        int n = min_int(max_int(site + 1, b->object_shape_count * 2), 0xffff);
+        tab = js_realloc_rt(ctx->rt, b->object_shapes, sizeof(tab[0]) * n);
+        if (!tab)
+            return;
+        for(i = b->object_shape_count; i < n; i++)
+            tab[i] = NULL;
+        b->object_shapes = tab;
+        b->object_shape_count = n;
+    }
+    b->object_shapes[site] = js_dup_shape(sh);
+}
+
 /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
-static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+/* dasher: called through JS_CallInternal(), which calls C functions and
+   the other classes with a call handler itself */
+static no_inline JSValue JS_CallInterpreter(JSContext *caller_ctx, JSValueConst func_obj,
                                JSValueConst this_obj, JSValueConst new_target,
                                int argc, JSValueConst *argv, int flags)
 {
@@ -17053,6 +17491,55 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             *sp++ = JS_NewObject(ctx);
             if (unlikely(JS_IsException(sp[-1])))
                 goto exception;
+            BREAK;
+        CASE(OP_object_site):
+            /* dasher: an object literal with fixed keys. Once one has run,
+               the next is made with the shape it ended with, every
+               property already in place and undefined, and each
+               define_field that follows stores its value in place. Until
+               the literal ends nothing but this frame can reach the
+               object, so the order of the properties and their attributes
+               are all a script can see, and those are the same. */
+            {
+                int site = get_u16(pc);
+                JSShape *sh;
+                pc += 2;
+                if (likely(site < b->object_shape_count) &&
+                    (sh = b->object_shapes[site]) != NULL) {
+                    JSValue obj;
+                    JSProperty *pr;
+                    obj = JS_NewObjectFromShape(ctx, js_dup_shape(sh),
+                                                JS_CLASS_OBJECT);
+                    if (unlikely(JS_IsException(obj)))
+                        goto exception;
+                    pr = JS_VALUE_GET_OBJ(obj)->prop;
+                    for(i = 0; i < sh->prop_count; i++)
+                        pr[i].u.value = JS_UNDEFINED;
+                    *sp++ = obj;
+                } else {
+                    *sp++ = JS_NewObject(ctx);
+                    if (unlikely(JS_IsException(sp[-1])))
+                        goto exception;
+                }
+            }
+            BREAK;
+        CASE(OP_object_site_end):
+            /* dasher: the first end of a literal only turns this into
+               object_site_note, so that a site that runs once, as most
+               of a large bundle's do, costs no table slot and keeps no
+               shape. Keeping them cost 3 to 4 MiB of peak memory on
+               some pages. */
+            pc[-1] = OP_object_site_note;
+            pc += 2;
+            BREAK;
+        CASE(OP_object_site_note):
+            {
+                int site = get_u16(pc);
+                pc += 2;
+                if (unlikely(site >= b->object_shape_count ||
+                             !b->object_shapes[site]))
+                    js_note_object_shape(ctx, b, site, sp[-1]);
+            }
             BREAK;
         CASE(OP_special_object):
             {
@@ -18321,6 +18808,24 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 atom = get_u32(pc);
                 pc += 4;
 
+                /* dasher: an existing plain data property that is
+                   configurable, writable and enumerable takes the value
+                   as it is, which is all a definition with those
+                   attributes does to it. This is every property of an
+                   object made by OP_object_site. */
+                if (likely(JS_VALUE_GET_TAG(sp[-2]) == JS_TAG_OBJECT)) {
+                    JSObject *p1 = JS_VALUE_GET_OBJ(sp[-2]);
+                    JSShapeProperty *prs;
+                    JSProperty *pr;
+                    if (p1->class_id == JS_CLASS_OBJECT &&
+                        (prs = find_own_property(&pr, p1, atom)) != NULL &&
+                        prs->flags == JS_PROP_C_W_E) {
+                        set_value(ctx, &pr->u.value, sp[-1]);
+                        sp--;
+                        BREAK;
+                    }
+                }
+
                 ret = JS_DefinePropertyValue(ctx, sp[-2], atom, sp[-1],
                                              JS_PROP_C_W_E | JS_PROP_THROW);
                 sp--;
@@ -18335,6 +18840,26 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 JSAtom atom;
                 atom = get_u32(pc);
                 pc += 4;
+
+                /* dasher: a function just made has its `name` already, an
+                   empty string that is only configurable; naming it sets
+                   that value, as the definition would. */
+                if (likely(JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_OBJECT &&
+                           atom != JS_ATOM_NULL)) {
+                    JSShapeProperty *prs;
+                    JSProperty *pr;
+                    prs = find_own_property(&pr, JS_VALUE_GET_OBJ(sp[-1]),
+                                            JS_ATOM_name);
+                    if (prs && prs->flags == JS_PROP_CONFIGURABLE &&
+                        JS_VALUE_GET_TAG(pr->u.value) == JS_TAG_STRING &&
+                        JS_VALUE_GET_STRING(pr->u.value)->len == 0) {
+                        JSValue name = JS_AtomToString(ctx, atom);
+                        if (unlikely(JS_IsException(name)))
+                            goto exception;
+                        set_value(ctx, &pr->u.value, name);
+                        BREAK;
+                    }
+                }
 
                 ret = JS_DefineObjectName(ctx, sp[-1], atom, JS_PROP_CONFIGURABLE);
                 if (unlikely(ret < 0))
@@ -18576,6 +19101,22 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         CASE(OP_define_array_el):
             {
                 int ret;
+                /* dasher: the next element of a fast array being built
+                   is added in place, as JS_CreateProperty would add it */
+                if (likely(JS_VALUE_GET_TAG(sp[-3]) == JS_TAG_OBJECT &&
+                           JS_VALUE_GET_TAG(sp[-2]) == JS_TAG_INT)) {
+                    JSObject *p1 = JS_VALUE_GET_OBJ(sp[-3]);
+                    if (p1->class_id == JS_CLASS_ARRAY && p1->fast_array &&
+                        p1->extensible &&
+                        JS_VALUE_GET_INT(sp[-2]) == p1->u.array.count) {
+                        ret = add_fast_array_element(ctx, p1, sp[-1],
+                                                     JS_PROP_THROW);
+                        sp -= 1;
+                        if (unlikely(ret < 0))
+                            goto exception;
+                        BREAK;
+                    }
+                }
                 ret = JS_DefinePropertyValueValue(ctx, sp[-3], js_dup(sp[-2]), sp[-1],
                                                   JS_PROP_C_W_E | JS_PROP_THROW);
                 sp -= 1;
@@ -18866,6 +19407,26 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             BREAK;
         CASE(OP_post_inc):
         CASE(OP_post_dec):
+            /* dasher: an int that stays an int needs no conversion. This
+               is the `i++` of a `for (let i ...)` loop, which the
+               optimizer cannot turn into inc_loc because `i` is read
+               with get_loc_check. */
+            if (likely(JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_INT)) {
+                int val = JS_VALUE_GET_INT(sp[-1]);
+                if (opcode == OP_post_inc) {
+                    if (likely(val != INT32_MAX)) {
+                        sp[0] = js_int32(val + 1);
+                        sp++;
+                        BREAK;
+                    }
+                } else {
+                    if (likely(val != INT32_MIN)) {
+                        sp[0] = js_int32(val - 1);
+                        sp++;
+                        BREAK;
+                    }
+                }
+            }
             sf->cur_pc = pc;
             if (js_post_inc_slow(ctx, sp, opcode))
                 goto exception;
@@ -19373,6 +19934,31 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
     return ret_val;
 }
 
+/* dasher: a call to anything but bytecode goes to its class's call
+   handler without entering the interpreter, whose entry saves every
+   register and sets up a frame of over a kilobyte. The checks are the
+   ones the interpreter makes first, in the same order. */
+static inline JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                                      JSValueConst this_obj, JSValueConst new_target,
+                                      int argc, JSValueConst *argv, int flags)
+{
+    if (likely(JS_VALUE_GET_TAG(func_obj) == JS_TAG_OBJECT)) {
+        JSObject *p = JS_VALUE_GET_OBJ(func_obj);
+        if (p->class_id != JS_CLASS_BYTECODE_FUNCTION) {
+            JSClassCall *call_func;
+            if (js_poll_interrupts(caller_ctx))
+                return JS_EXCEPTION;
+            call_func = caller_ctx->rt->class_array[p->class_id].call;
+            if (!call_func)
+                return JS_ThrowTypeErrorNotAFunction(caller_ctx);
+            return call_func(caller_ctx, func_obj, this_obj, argc,
+                             argv, flags);
+        }
+    }
+    return JS_CallInterpreter(caller_ctx, func_obj, this_obj, new_target,
+                              argc, argv, flags);
+}
+
 JSValue JS_Call(JSContext *ctx, JSValueConst func_obj, JSValueConst this_obj,
                 int argc, JSValueConst *argv)
 {
@@ -19823,9 +20409,16 @@ static JSValue js_call_generator_function(JSContext *ctx, JSValueConst func_obj,
 
 static void js_async_function_terminate(JSRuntime *rt, JSAsyncFunctionData *s)
 {
+    int i;
     if (s->is_active) {
         async_func_free(rt, &s->func_state);
         s->is_active = false;
+    }
+    /* dasher: they hold references to 's' */
+    for(i = 0; i < 2; i++) {
+        JSValue f = s->resume_funcs[i];
+        s->resume_funcs[i] = JS_UNDEFINED;
+        JS_FreeValueRT(rt, f);
     }
 }
 
@@ -19834,6 +20427,7 @@ static void js_async_function_free0(JSRuntime *rt, JSAsyncFunctionData *s)
     js_async_function_terminate(rt, s);
     JS_FreeValueRT(rt, s->resolving_funcs[0]);
     JS_FreeValueRT(rt, s->resolving_funcs[1]);
+    JS_FreeValueRT(rt, s->promise); /* dasher */
     remove_gc_object(&s->header);
     js_free_rt(rt, s);
 }
@@ -19888,6 +20482,29 @@ static int js_async_function_resolve_create(JSContext *ctx,
     return 0;
 }
 
+static JSValue js_promise_new_pending(JSContext *ctx);
+static void js_promise_settle(JSContext *ctx, JSValueConst promise,
+                              JSValueConst resolution, bool is_reject);
+
+/* dasher: resolves or rejects the promise an async call returned, as
+   calling the resolving function of its capability would. Those
+   functions are never seen by scripts, so the call keeps the promise
+   instead of making them. */
+static JSValue js_async_function_settle(JSContext *ctx,
+                                        JSAsyncFunctionData *s,
+                                        JSValueConst value, bool is_reject)
+{
+    if (!JS_IsUndefined(s->promise)) {
+        JSValue promise = s->promise;
+        s->promise = JS_UNDEFINED; /* settled once */
+        js_promise_settle(ctx, promise, value, is_reject);
+        JS_FreeValue(ctx, promise);
+        return JS_UNDEFINED;
+    }
+    return JS_Call(ctx, s->resolving_funcs[is_reject], JS_UNDEFINED,
+                   1, &value);
+}
+
 static bool js_async_function_resume(JSContext *ctx, JSAsyncFunctionData *s)
 {
     bool is_success = true;
@@ -19900,8 +20517,7 @@ static bool js_async_function_resume(JSContext *ctx, JSAsyncFunctionData *s)
             is_success = false;
         } else {
             JSValue error = JS_GetException(ctx);
-            ret2 = JS_Call(ctx, s->resolving_funcs[1], JS_UNDEFINED,
-                           1, vc(&error));
+            ret2 = js_async_function_settle(ctx, s, error, true);
             JS_FreeValue(ctx, error);
         resolved:
             if (unlikely(JS_IsException(ret2))) {
@@ -19920,12 +20536,11 @@ static bool js_async_function_resume(JSContext *ctx, JSAsyncFunctionData *s)
         s->func_state.frame.cur_sp[-1] = JS_UNDEFINED;
         if (JS_IsUndefined(func_ret)) {
             /* function returned */
-            ret2 = JS_Call(ctx, s->resolving_funcs[0], JS_UNDEFINED,
-                           1, vc(&value));
+            ret2 = js_async_function_settle(ctx, s, value, false);
             JS_FreeValue(ctx, value);
             goto resolved;
         } else {
-            JSValue promise, resolving_funcs[2], resolving_funcs1[2];
+            JSValue promise, resolving_funcs1[2];
             int i, res;
 
             /* await */
@@ -19935,7 +20550,13 @@ static bool js_async_function_resume(JSContext *ctx, JSAsyncFunctionData *s)
             JS_FreeValue(ctx, value);
             if (JS_IsException(promise))
                 goto fail;
-            if (js_async_function_resolve_create(ctx, s, resolving_funcs)) {
+            /* dasher: one pair of resume functions serves every await of
+               the call. They only ever go to perform_promise_then() on
+               an engine promise, so no script can tell them apart. */
+            if (JS_IsUndefined(s->resume_funcs[0]) &&
+                js_async_function_resolve_create(ctx, s, s->resume_funcs)) {
+                s->resume_funcs[0] = JS_UNDEFINED;
+                s->resume_funcs[1] = JS_UNDEFINED;
                 JS_FreeValue(ctx, promise);
                 goto fail;
             }
@@ -19945,11 +20566,9 @@ static bool js_async_function_resume(JSContext *ctx, JSAsyncFunctionData *s)
             for(i = 0; i < 2; i++)
                 resolving_funcs1[i] = JS_UNDEFINED;
             res = perform_promise_then(ctx, promise,
-                                       vc(resolving_funcs),
+                                       vc(s->resume_funcs),
                                        vc(resolving_funcs1));
             JS_FreeValue(ctx, promise);
-            for(i = 0; i < 2; i++)
-                JS_FreeValue(ctx, resolving_funcs[i]);
             if (res)
                 goto fail;
         }
@@ -19999,10 +20618,15 @@ static JSValue js_async_function_call(JSContext *ctx, JSValueConst func_obj,
     s->is_active = false;
     s->resolving_funcs[0] = JS_UNDEFINED;
     s->resolving_funcs[1] = JS_UNDEFINED;
+    s->resume_funcs[0] = JS_UNDEFINED; /* dasher */
+    s->resume_funcs[1] = JS_UNDEFINED;
+    s->promise = JS_UNDEFINED;
 
-    promise = JS_NewPromiseCapability(ctx, s->resolving_funcs);
+    /* dasher: see js_async_function_settle() */
+    promise = js_promise_new_pending(ctx);
     if (JS_IsException(promise))
         goto fail;
+    s->promise = js_dup(promise);
 
     if (async_func_init(ctx, &s->func_state, func_obj, this_obj, argc, argv)) {
     fail:
@@ -20765,6 +21389,7 @@ typedef struct JSFunctionDef {
     char *source;  /* raw source, utf-8 encoded; points into source_text */
     int source_len;
     JSSourceText *source_text; /* dasher: counted reference, or NULL */
+    int object_site_count; /* dasher: object literal sites numbered so far */
 
     JSModuleDef *module; /* != NULL when parsing a module */
 
@@ -23877,11 +24502,19 @@ static __exception int js_parse_object_literal(JSParseState *s)
     const uint8_t *start_ptr;
     int start_line, start_col, prop_type;
     bool has_proto;
+    bool fixed_keys; /* dasher */
+    int site_pos, prop_count; /* dasher */
 
     if (next_token(s))
         goto fail;
-    /* XXX: add an initial length that will be patched back */
-    emit_op(s, OP_object);
+    /* dasher: a literal whose properties are all `name: value` or
+       `name` gets a site (see OP_object_site); the operand is patched
+       once that is known. */
+    emit_op(s, OP_object_start);
+    site_pos = s->cur_func->byte_code.size;
+    emit_u16(s, 0xffff);
+    fixed_keys = true;
+    prop_count = 0;
     has_proto = false;
     while (s->token.val != '}') {
         /* specific case for getter/setter */
@@ -23889,7 +24522,9 @@ static __exception int js_parse_object_literal(JSParseState *s)
         start_line = s->token.line_num;
         start_col = s->token.col_num;
 
+        prop_count++;
         if (s->token.val == TOK_ELLIPSIS) {
+            fixed_keys = false;
             if (next_token(s))
                 return -1;
             if (js_parse_assign_expr(s))
@@ -23920,6 +24555,7 @@ static __exception int js_parse_object_literal(JSParseState *s)
             JSFunctionKindEnum func_kind;
             int op_flags;
 
+            fixed_keys = false;
             func_kind = JS_FUNC_NORMAL;
             if (is_getset) {
                 func_type = JS_PARSE_FUNC_GETTER + prop_type - PROP_TYPE_GET;
@@ -23954,10 +24590,12 @@ static __exception int js_parse_object_literal(JSParseState *s)
             if (js_parse_assign_expr(s))
                 goto fail;
             if (name == JS_ATOM_NULL) {
+                fixed_keys = false;
                 set_object_name_computed(s);
                 emit_op(s, OP_define_array_el);
                 emit_op(s, OP_drop);
             } else if (name == JS_ATOM___proto__) {
+                fixed_keys = false;
                 if (has_proto) {
                     js_parse_error(s, "duplicate __proto__ property name");
                     goto fail;
@@ -23980,6 +24618,14 @@ static __exception int js_parse_object_literal(JSParseState *s)
     }
     if (js_parse_expect(s, '}'))
         goto fail;
+    /* dasher: number the site, and mark where the literal ends */
+    if (fixed_keys && prop_count > 0 &&
+        s->cur_func->object_site_count < 0xffff) {
+        int site = s->cur_func->object_site_count++;
+        put_u16(s->cur_func->byte_code.buf + site_pos, site);
+        emit_op(s, OP_object_end);
+        emit_u16(s, site);
+    }
     return 0;
  fail:
     JS_FreeAtom(s->ctx, name);
@@ -34016,6 +34662,17 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                     if (line2 >= 0) line_num = line2;
                     break;
                 }
+                /* dasher: dup put_loc_check(n) drop -> put_loc_check(n),
+                   the assignment statement to a `let` variable */
+                if (code_match(&cc, pos_next, OP_put_loc_check, -1, OP_drop, -1)) {
+                    if (cc.line_num >= 0) line_num = cc.line_num;
+                    if (cc.col_num >= 0) col_num = cc.col_num;
+                    add_pc2line_info(s, bc_out.size, line_num, col_num);
+                    dbuf_putc(&bc_out, OP_put_loc_check);
+                    dbuf_put_u16(&bc_out, cc.idx);
+                    pos_next = cc.pos;
+                    break;
+                }
             }
             goto no_change;
 
@@ -34150,6 +34807,18 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                    post_inc perm4 put_array_el drop -> inc put_array_el
                  */
                 int op1, idx;
+                /* dasher: post_inc put_loc_check(n) drop -> inc put_loc_check(n),
+                   the `i++` of a `for (let i ...)` loop */
+                if (code_match(&cc, pos_next, OP_put_loc_check, -1, OP_drop, -1)) {
+                    if (cc.line_num >= 0) line_num = cc.line_num;
+                    if (cc.col_num >= 0) col_num = cc.col_num;
+                    add_pc2line_info(s, bc_out.size, line_num, col_num);
+                    dbuf_putc(&bc_out, OP_dec + (op - OP_post_dec));
+                    dbuf_putc(&bc_out, OP_put_loc_check);
+                    dbuf_put_u16(&bc_out, cc.idx);
+                    pos_next = cc.pos;
+                    break;
+                }
                 if (code_match(&cc, pos_next, M3(OP_put_loc, OP_put_arg, OP_put_var_ref), -1, OP_drop, -1)) {
                     if (cc.line_num >= 0) line_num = cc.line_num;
                     if (cc.col_num >= 0) col_num = cc.col_num;
@@ -34229,6 +34898,15 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
             }
             goto no_change;
 
+        case OP_object_start:
+            /* dasher: a literal with a site, or a plain OP_object */
+            if (get_u16(bc_buf + pos + 1) != 0xffff) {
+                add_pc2line_info(s, bc_out.size, line_num, col_num);
+                dbuf_putc(&bc_out, OP_object_site);
+                dbuf_put_u16(&bc_out, get_u16(bc_buf + pos + 1));
+                break;
+            }
+            /* fall through */
         case OP_object:
             if (code_match(&cc, pos_next, OP_null, OP_set_proto, -1)) {
                 if (cc.line_num >= 0) line_num = cc.line_num;
@@ -34239,7 +34917,18 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                 pos_next = cc.pos;
                 break;
             }
+            if (op == OP_object_start) {
+                add_pc2line_info(s, bc_out.size, line_num, col_num);
+                dbuf_putc(&bc_out, OP_object);
+                break;
+            }
             goto no_change;
+
+        case OP_object_end:
+            add_pc2line_info(s, bc_out.size, line_num, col_num);
+            dbuf_putc(&bc_out, OP_object_site_end);
+            dbuf_put_u16(&bc_out, get_u16(bc_buf + pos + 1));
+            break;
 
         default:
         no_change:
@@ -35209,6 +35898,11 @@ static void free_function_bytecode(JSRuntime *rt, JSFunctionBytecode *b)
     }
     for(i = 0; i < b->cpool_count; i++)
         JS_FreeValueRT(rt, b->cpool[i]);
+
+    /* dasher: the shapes noted for object literals */
+    for(i = 0; i < b->object_shape_count; i++)
+        js_free_shape_null(rt, b->object_shapes[i]);
+    js_free_rt(rt, b->object_shapes);
 
     for(i = 0; i < b->closure_var_count; i++) {
         JSClosureVar *cv = &b->closure_var[i];
@@ -40063,6 +40757,52 @@ static JSValue JS_GetOwnPropertyNames2(JSContext *ctx, JSValueConst obj1,
     if (JS_IsException(obj))
         return JS_EXCEPTION;
     p = JS_VALUE_GET_OBJ(obj);
+    /* dasher: the keys or values of an ordinary object of plain data
+       properties with string keys come straight from its shape, in its
+       order, into an array of the right size. Nothing the general path
+       does on the way can run code for such an object. */
+    if ((kind == JS_ITERATOR_KIND_KEY || kind == JS_ITERATOR_KIND_VALUE) &&
+        (flags & ~JS_GPN_ENUM_ONLY) == JS_GPN_STRING_MASK &&
+        js_shape_is_plain_strings(ctx, p)) {
+        JSShape *sh = p->shape;
+        JSObject *pr;
+        uint32_t n = 0;
+        for(i = 0; i < sh->prop_count; i++) {
+            if (sh->prop[i].atom != JS_ATOM_NULL &&
+                (!(flags & JS_GPN_ENUM_ONLY) ||
+                 (sh->prop[i].flags & JS_PROP_ENUMERABLE)))
+                n++;
+        }
+        r = JS_NewArray(ctx);
+        if (JS_IsException(r))
+            goto exception_fast;
+        pr = JS_VALUE_GET_OBJ(r);
+        if (n > 0 && expand_fast_array(ctx, pr, n))
+            goto exception_fast;
+        for(i = j = 0; i < sh->prop_count; i++) {
+            JSAtom atom = sh->prop[i].atom;
+            if (atom == JS_ATOM_NULL ||
+                ((flags & JS_GPN_ENUM_ONLY) &&
+                 !(sh->prop[i].flags & JS_PROP_ENUMERABLE)))
+                continue;
+            if (kind == JS_ITERATOR_KIND_KEY) {
+                val = JS_AtomToString(ctx, atom);
+                if (JS_IsException(val))
+                    goto exception_fast;
+            } else {
+                val = js_dup(p->prop[i].u.value);
+            }
+            pr->u.array.u.values[j++] = val;
+            pr->u.array.count = j;
+            pr->prop[0].u.value = js_int32(j);
+        }
+        JS_FreeValue(ctx, obj);
+        return r;
+    exception_fast:
+        JS_FreeValue(ctx, r);
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
     if (JS_GetOwnPropertyNamesInternal(ctx, &atoms, &len, p, flags & ~JS_GPN_ENUM_ONLY))
         goto exception;
     r = JS_NewArray(ctx);
@@ -41026,6 +41766,31 @@ static JSValue js_function_apply(JSContext *ctx, JSValueConst this_val,
          JS_VALUE_GET_TAG(array_arg) == JS_TAG_NULL) && magic != 2) {
         return JS_Call(ctx, this_val, this_arg, 0, NULL);
     }
+    /* dasher: a short fast array or arguments object, its length
+       matching its elements, is copied to the C stack instead of a list
+       allocated for the call. Each value is still duplicated: the callee
+       may change the array while it runs. For an array the length is
+       its own `length` slot, which is what the get would read. */
+    if (JS_VALUE_GET_TAG(array_arg) == JS_TAG_OBJECT) {
+        JSObject *p = JS_VALUE_GET_OBJ(array_arg);
+        JSValue stack_tab[16];
+        uint32_t i;
+        if (p->class_id == JS_CLASS_ARRAY && p->fast_array &&
+            p->u.array.count <= countof(stack_tab) &&
+            JS_VALUE_GET_TAG(p->prop[0].u.value) == JS_TAG_INT &&
+            JS_VALUE_GET_INT(p->prop[0].u.value) == p->u.array.count) {
+            len = p->u.array.count;
+            for(i = 0; i < len; i++)
+                stack_tab[i] = js_dup(p->u.array.u.values[i]);
+            if (magic & 1)
+                ret = JS_CallConstructor2(ctx, this_val, this_arg, len, vc(stack_tab));
+            else
+                ret = JS_Call(ctx, this_val, this_arg, len, vc(stack_tab));
+            for(i = 0; i < len; i++)
+                JS_FreeValue(ctx, stack_tab[i]);
+            return ret;
+        }
+    }
     tab = build_arg_list(ctx, &len, array_arg);
     if (!tab)
         return JS_EXCEPTION;
@@ -41687,6 +42452,46 @@ static JSValue js_get_this(JSContext *ctx, JSValueConst this_val)
     return js_dup(this_val);
 }
 
+static JSValue js_get_this(JSContext *ctx, JSValueConst this_val);
+
+/* dasher: true if ArraySpeciesCreate(obj) would construct the realm's own
+   Array: 'obj' is an Array with no own `constructor`, its prototype is
+   Array.prototype, whose `constructor` is a data property holding Array,
+   and Array's own Symbol.species is the original getter, which returns
+   Array. Those are the gets and the call the general path makes. */
+static bool js_array_species_is_array(JSContext *ctx, JSValueConst obj)
+{
+    JSObject *p, *proto, *ctor;
+    JSShapeProperty *prs;
+    JSProperty *pr;
+    JSObject *getter;
+
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return false;
+    p = JS_VALUE_GET_OBJ(obj);
+    if (p->class_id != JS_CLASS_ARRAY ||
+        JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_ARRAY]) != JS_TAG_OBJECT ||
+        JS_VALUE_GET_TAG(ctx->array_ctor) != JS_TAG_OBJECT)
+        return false;
+    proto = JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_ARRAY]);
+    if (p->shape->proto != proto ||
+        find_own_property1(p, JS_ATOM_constructor))
+        return false;
+    ctor = JS_VALUE_GET_OBJ(ctx->array_ctor);
+    prs = find_own_property(&pr, proto, JS_ATOM_constructor);
+    if (!prs || (prs->flags & JS_PROP_TMASK) ||
+        JS_VALUE_GET_TAG(pr->u.value) != JS_TAG_OBJECT ||
+        JS_VALUE_GET_OBJ(pr->u.value) != ctor)
+        return false;
+    prs = find_own_property(&pr, ctor, JS_ATOM_Symbol_species);
+    if (!prs || (prs->flags & JS_PROP_TMASK) != JS_PROP_GETSET)
+        return false;
+    getter = pr->u.getset.getter;
+    return getter && getter->class_id == JS_CLASS_C_FUNCTION &&
+        getter->u.cfunc.cproto == JS_CFUNC_getter &&
+        getter->u.cfunc.c_function.getter == js_get_this;
+}
+
 static JSValue JS_ArraySpeciesCreate(JSContext *ctx, JSValueConst obj,
                                      JSValueConst len_val)
 {
@@ -41694,6 +42499,9 @@ static JSValue JS_ArraySpeciesCreate(JSContext *ctx, JSValueConst obj,
     int res;
     JSContext *realm;
 
+    /* dasher: a plain array makes a plain array */
+    if (js_array_species_is_array(ctx, obj))
+        return js_array_constructor(ctx, JS_UNDEFINED, 1, &len_val);
     res = js_is_array(ctx, obj);
     if (res < 0)
         return JS_EXCEPTION;
@@ -41889,6 +42697,32 @@ static JSValue js_array_concat(JSContext *ctx, JSValueConst this_val,
                 JS_ThrowTypeError(ctx, "Array loo long");
                 goto exception;
             }
+            /* dasher: a fast array, its length matching its elements, goes
+               at the end of a fast result in one copy. Reading and
+               defining its elements one by one would run no code. */
+            if (JS_VALUE_GET_TAG(e) == JS_TAG_OBJECT &&
+                JS_VALUE_GET_TAG(arr) == JS_TAG_OBJECT) {
+                JSObject *pe = JS_VALUE_GET_OBJ(e), *pa = JS_VALUE_GET_OBJ(arr);
+                if (pe->class_id == JS_CLASS_ARRAY && pe->fast_array &&
+                    len == pe->u.array.count &&
+                    pa != pe && pa->class_id == JS_CLASS_ARRAY &&
+                    pa->fast_array && pa->extensible &&
+                    pa->u.array.count == n &&
+                    JS_VALUE_GET_TAG(pa->prop[0].u.value) == JS_TAG_INT &&
+                    JS_VALUE_GET_INT(pa->prop[0].u.value) == n &&
+                    (get_shape_prop(pa->shape)->flags & JS_PROP_WRITABLE) &&
+                    n + len <= INT32_MAX) {
+                    if (n + len > pa->u.array.u1.size &&
+                        expand_fast_array(ctx, pa, n + len))
+                        goto exception;
+                    for (k = 0; k < len; k++)
+                        pa->u.array.u.values[n + k] = js_dup(pe->u.array.u.values[k]);
+                    n += len;
+                    pa->u.array.count = n;
+                    pa->prop[0].u.value = js_int32(n);
+                    continue;
+                }
+            }
             for (k = 0; k < len; k++, n++) {
                 res = JS_TryGetPropertyInt64(ctx, e, k, &val);
                 if (res < 0)
@@ -41968,6 +42802,23 @@ static JSValue js_typed_array___speciesCreate(JSContext *ctx,
                                               JSValueConst this_val,
                                               int argc, JSValueConst *argv);
 
+/* dasher: defines element 'idx' of 'arr' as JS_CreateProperty would when
+   'arr' is an extensible fast array whose elements end at 'idx': it is
+   added in place. Returns 1 if done ('val' taken), 0 if the general path
+   must do it ('val' kept), -1 on exception ('val' freed). */
+static int js_array_append_fast(JSContext *ctx, JSValueConst arr,
+                                int64_t idx, JSValue val)
+{
+    JSObject *p;
+    if (JS_VALUE_GET_TAG(arr) != JS_TAG_OBJECT)
+        return 0;
+    p = JS_VALUE_GET_OBJ(arr);
+    if (p->class_id != JS_CLASS_ARRAY || !p->fast_array || !p->extensible ||
+        idx != p->u.array.count || idx >= INT32_MAX)
+        return 0;
+    return add_fast_array_element(ctx, p, val, JS_PROP_THROW) < 0 ? -1 : 1;
+}
+
 static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv, int special)
 {
@@ -42011,6 +42862,15 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
         ret = JS_ArraySpeciesCreate(ctx, obj, js_int64(len));
         if (JS_IsException(ret))
             goto exception;
+        /* dasher: room for every element at once, for a plain result of
+           a modest length; the length itself is already set */
+        if (len > 0 && len <= 65536 && JS_VALUE_GET_TAG(ret) == JS_TAG_OBJECT) {
+            JSObject *pr = JS_VALUE_GET_OBJ(ret);
+            if (pr->class_id == JS_CLASS_ARRAY && pr->fast_array &&
+                pr->u.array.count == 0 && pr->u.array.u1.size < len &&
+                expand_fast_array(ctx, pr, len))
+                goto exception;
+        }
         break;
     case special_filter:
         ret = JS_ArraySpeciesCreate(ctx, obj, js_int32(0));
@@ -42068,9 +42928,15 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
                 }
                 break;
             case special_map:
-                if (JS_DefinePropertyValueInt64(ctx, ret, k, res,
-                                                JS_PROP_C_W_E | JS_PROP_THROW) < 0)
-                    goto exception;
+                {
+                    int r = js_array_append_fast(ctx, ret, k, res); /* dasher */
+                    if (r < 0)
+                        goto exception;
+                    if (r == 0 &&
+                        JS_DefinePropertyValueInt64(ctx, ret, k, res,
+                                                    JS_PROP_C_W_E | JS_PROP_THROW) < 0)
+                        goto exception;
+                }
                 break;
             case special_map | special_TA:
                 if (JS_SetPropertyValue(ctx, ret, js_int32(k), res, JS_PROP_THROW) < 0)
@@ -42079,9 +42945,15 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
             case special_filter:
             case special_filter | special_TA:
                 if (JS_ToBoolFree(ctx, res)) {
-                    if (JS_DefinePropertyValueInt64(ctx, ret, n++, js_dup(val),
+                    JSValue v = js_dup(val);
+                    int r = js_array_append_fast(ctx, ret, n, v); /* dasher */
+                    if (r < 0)
+                        goto exception;
+                    if (r == 0 &&
+                        JS_DefinePropertyValueInt64(ctx, ret, n, v,
                                                     JS_PROP_C_W_E | JS_PROP_THROW) < 0)
                         goto exception;
+                    n++;
                 }
                 break;
             default:
@@ -50975,6 +51847,19 @@ static JSMapRecord *map_find_record(JSContext *ctx, JSMapState *s,
     h = map_hash_key(ctx, key) & (s->hash_size - 1);
     list_for_each(el, &s->hash_table[h]) {
         mr = list_entry(el, JSMapRecord, hash_link);
+        /* dasher: two ints, or two objects or symbols, are the same
+           value zero exactly when their bits are equal; every other pair
+           of keys is compared in full */
+        if (JS_VALUE_GET_TAG(mr->key) == JS_VALUE_GET_TAG(key) &&
+            (JS_VALUE_GET_TAG(key) == JS_TAG_INT ||
+             JS_VALUE_GET_TAG(key) == JS_TAG_OBJECT ||
+             JS_VALUE_GET_TAG(key) == JS_TAG_SYMBOL)) {
+            if (JS_VALUE_GET_TAG(key) == JS_TAG_INT ?
+                JS_VALUE_GET_INT(mr->key) == JS_VALUE_GET_INT(key) :
+                JS_VALUE_GET_PTR(mr->key) == JS_VALUE_GET_PTR(key))
+                return mr;
+            continue;
+        }
         if (js_same_value_zero(ctx, mr->key, key))
             return mr;
     }
@@ -52676,9 +53561,21 @@ static JSValue js_promise_resolve_function_call(JSContext *ctx,
         printf("\n");
     }
 #endif
+    js_promise_settle(ctx, s->promise, resolution, is_reject);
+    return JS_UNDEFINED;
+}
+
+/* dasher: what a resolving function does once it is known not to have
+   been called before, split out for js_async_function_settle() */
+static void js_promise_settle(JSContext *ctx, JSValueConst promise,
+                              JSValueConst resolution, bool is_reject)
+{
+    JSValueConst args[3];
+    JSValue then;
+
     if (is_reject || !JS_IsObject(resolution)) {
         goto done;
-    } else if (js_same_value(ctx, resolution, s->promise)) {
+    } else if (js_same_value(ctx, resolution, promise)) {
         JS_ThrowTypeError(ctx, "promise self resolution");
         goto fail_reject;
     }
@@ -52687,20 +53584,19 @@ static JSValue js_promise_resolve_function_call(JSContext *ctx,
         JSValue error;
     fail_reject:
         error = JS_GetException(ctx);
-        fulfill_or_reject_promise(ctx, s->promise, error, true);
+        fulfill_or_reject_promise(ctx, promise, error, true);
         JS_FreeValue(ctx, error);
     } else if (!JS_IsFunction(ctx, then)) {
         JS_FreeValue(ctx, then);
     done:
-        fulfill_or_reject_promise(ctx, s->promise, resolution, is_reject);
+        fulfill_or_reject_promise(ctx, promise, resolution, is_reject);
     } else {
-        args[0] = s->promise;
+        args[0] = promise;
         args[1] = resolution;
         args[2] = then;
         JS_EnqueueJob(ctx, js_promise_resolve_thenable_job, 3, args);
         JS_FreeValue(ctx, then);
     }
-    return JS_UNDEFINED;
 }
 
 static void js_promise_finalizer(JSRuntime *rt, JSValueConst val)
@@ -52825,6 +53721,58 @@ static JSValue js_promise_executor_new(JSContext *ctx)
                                0, 2, func_data);
 }
 
+/* dasher: what `new Promise(executor)` gives for the realm's own Promise,
+   with the resolving functions it would pass to the executor returned in
+   'resolving_funcs' instead. See js_new_promise_capability(). */
+/* dasher: a pending promise of the realm's own Promise, as its
+   constructor makes one, without resolving functions. 'resolving_funcs',
+   if not NULL, receives them, made before the promise hook runs as the
+   constructor makes them. */
+static JSValue js_promise_new_pending2(JSContext *ctx, JSValue *resolving_funcs)
+{
+    JSValue obj;
+    JSPromiseData *s;
+    JSRuntime *rt = ctx->rt;
+    int i;
+
+    obj = js_create_from_ctor(ctx, JS_UNDEFINED, JS_CLASS_PROMISE);
+    if (JS_IsException(obj))
+        return JS_EXCEPTION;
+    s = js_mallocz(ctx, sizeof(*s));
+    if (!s)
+        goto fail;
+    s->promise_state = JS_PROMISE_PENDING;
+    s->is_handled = false;
+    for(i = 0; i < 2; i++)
+        init_list_head(&s->promise_reactions[i]);
+    s->promise_result = JS_UNDEFINED;
+    JS_SetOpaqueInternal(obj, s);
+    if (resolving_funcs && js_create_resolving_functions(ctx, resolving_funcs, obj))
+        goto fail;
+    if (rt->promise_hook) {
+        JSValueConst parent_promise = JS_UNDEFINED;
+        if (rt->parent_promise)
+            parent_promise = rt->parent_promise->value;
+        rt->promise_hook(ctx, JS_PROMISE_HOOK_INIT, obj, parent_promise,
+                         rt->promise_hook_opaque);
+    }
+    return obj;
+ fail:
+    JS_FreeValue(ctx, obj);
+    return JS_EXCEPTION;
+}
+
+static JSValue js_promise_new_pending(JSContext *ctx)
+{
+    return js_promise_new_pending2(ctx, NULL);
+}
+
+static JSValue js_promise_new_capability_direct(JSContext *ctx,
+                                                JSValue *resolving_funcs)
+{
+    return js_promise_new_pending2(ctx, resolving_funcs);
+}
+
 static JSValue js_new_promise_capability(JSContext *ctx,
                                          JSValue *resolving_funcs,
                                          JSValueConst ctor)
@@ -52832,6 +53780,16 @@ static JSValue js_new_promise_capability(JSContext *ctx,
     JSValue executor, result_promise;
     JSCFunctionDataRecord *s;
     int i;
+
+    /* dasher: for the realm's own Promise the executor is the engine's,
+       and all it does is keep the two functions it is given. Its
+       `prototype` cannot change, so constructing it with that executor
+       makes the same promise as making it here. */
+    if (JS_IsUndefined(ctor) ||
+        (JS_VALUE_GET_TAG(ctor) == JS_TAG_OBJECT &&
+         JS_VALUE_GET_TAG(ctx->promise_ctor) == JS_TAG_OBJECT &&
+         JS_VALUE_GET_OBJ(ctor) == JS_VALUE_GET_OBJ(ctx->promise_ctor)))
+        return js_promise_new_capability_direct(ctx, resolving_funcs);
 
     executor = js_promise_executor_new(ctx);
     if (JS_IsException(executor))
