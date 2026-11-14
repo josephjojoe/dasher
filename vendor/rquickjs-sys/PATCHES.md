@@ -509,9 +509,10 @@ into atoms and building strings it then threw away; 19% interning names
 (`__JS_FindAtom`, `parse_ident`, `__JS_NewAtom`), part of it inside the
 lookahead; 10% dropping the functions not compiled yet (`js_lazy_drop`);
 6% in the eight nested calls `js_parse_expr_binary` makes for every
-operand; and 10% growing buffers and tables a few bytes at a time. Compiling every function with
-its script spends a further 40% in the passes after parsing
-(`resolve_variables`, `resolve_labels`, `compute_stack_size`). The
+operand; and 10% growing buffers and tables a few bytes at a time.
+Compiling every function with its script spends a further 40% in the
+passes after parsing (`resolve_variables`, `resolve_labels`,
+`compute_stack_size`). The
 changes below take the largest of these costs out. None of them changes
 the bytecode: every script of the corpus compiles to the same bytes
 (`JS_WriteObject`) with and without them, lazily and eagerly.
