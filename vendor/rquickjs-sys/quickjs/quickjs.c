@@ -21078,6 +21078,24 @@ static __exception int js_parse_string(JSParseState *s, int sep,
     /* dasher: the bracket lookahead only needs to know where it ends */
     if (s->in_skip)
         b = NULL;
+    /* dasher: a quoted string of ASCII without escapes, the common case,
+       is copied as it is */
+    if (b && sep != '`') {
+        const uint8_t *q = p;
+        while (q < s->buf_end && *q != sep && *q != '\\' && *q != '\n' &&
+               *q != '\r' && *q < 0x80)
+            q++;
+        if (q < s->buf_end && *q == sep && q > p) {
+            str = js_new_string8_len(s->ctx, (const char *)p, q - p);
+            if (JS_IsException(str))
+                return -1;
+            token->val = TOK_STRING;
+            token->u.str.sep = sep;
+            token->u.str.str = str;
+            *pp = q + 1;
+            return 0;
+        }
+    }
     /* string */
     if (b && string_buffer_init(s->ctx, b, 32))
         goto fail;
