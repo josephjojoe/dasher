@@ -719,6 +719,8 @@ typedef struct JSFunctionBytecode {
     uint8_t arguments_allowed : 1;
     uint8_t backtrace_barrier : 1; /* stop backtrace on this function */
     /* XXX: 5 bits available */
+    /* dasher: slots in object_shapes; in what was padding */
+    uint16_t object_shape_count;
     uint8_t *byte_code_buf; /* (self pointer) */
     int byte_code_len;
     JSAtom func_name;
@@ -743,11 +745,11 @@ typedef struct JSFunctionBytecode {
        whole script instead of being a block of its own */
     struct JSSourceText *source_text;
     /* dasher: for each object literal site (OP_object_site), the shape
-       its object had when the literal ended, or NULL until one has run.
+       its object had when the literal ended, or NULL until it has ended
+       twice (see OP_object_site_end).
        Grown on demand, so bytecode read back with JS_ReadObject starts
        with none. */
-    JSShape **object_shapes;
-    int object_shape_count;
+    JSShape **object_shapes; /* object_shape_count slots */
 } JSFunctionBytecode;
 
 /* dasher: the text of one compiled script, shared by every function that
@@ -17068,7 +17070,7 @@ static void js_note_object_shape(JSContext *ctx, JSFunctionBytecode *b,
     }
     if (site >= b->object_shape_count) {
         JSShape **tab;
-        int n = max_int(site + 1, b->object_shape_count * 2);
+        int n = min_int(max_int(site + 1, b->object_shape_count * 2), 0xffff);
         tab = js_realloc_rt(ctx->rt, b->object_shapes, sizeof(tab[0]) * n);
         if (!tab)
             return;
@@ -17348,6 +17350,15 @@ static no_inline JSValue JS_CallInterpreter(JSContext *caller_ctx, JSValueConst 
             }
             BREAK;
         CASE(OP_object_site_end):
+            /* dasher: the first end of a literal only turns this into
+               object_site_note, so that a site that runs once, as most
+               of a large bundle's do, costs no table slot and keeps no
+               shape. Keeping them cost 3 to 4 MiB of peak memory on
+               some pages. */
+            pc[-1] = OP_object_site_note;
+            pc += 2;
+            BREAK;
+        CASE(OP_object_site_note):
             {
                 int site = get_u16(pc);
                 pc += 2;

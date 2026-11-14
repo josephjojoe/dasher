@@ -376,6 +376,7 @@ DEF( typeof_is_function, 1, 1, 1, none)
    literal ended with last time, and object_site_end notes that shape. */
 DEF(    object_site, 3, 0, 1, u16)
 DEF(object_site_end, 3, 1, 1, u16)
+DEF(object_site_note, 3, 1, 1, u16) /* object_site_end once it has run */
 
 #undef DEF
 #undef def
