@@ -23525,10 +23525,74 @@ static void js_skip_memo_free(JSParseState *s)
 }
 
 
-/* XXX: improve speed with early bailout */
+/* dasher: what a caller of js_parse_skip_parens_token2() asks.
+   SKIP_ASK_ALL reads to the token after the bracket. The other two let the
+   scan stop early, returning TOK_ERROR, once the bracket's contents rule
+   out what the caller is testing for: SKIP_ASK_ARROW at '(' for an arrow
+   function's parameters (is the next token '=>'?), SKIP_ASK_PATTERN at '['
+   or '{' for a destructuring assignment (is the next token '='?). Only
+   contents that no valid program has there stop the scan, so a valid
+   program is parsed as before; an invalid one may get a different
+   message for the same error. */
+#define SKIP_ASK_ALL     0
+#define SKIP_ASK_ARROW   1
+#define SKIP_ASK_PATTERN 2
+
+/* dasher: a token that cannot be part of a destructuring target written
+   directly in the pattern (outside brackets), unless it follows '.' */
+static bool js_skip_not_in_target(int tok, int prev)
+{
+    switch (tok) {
+    case '+': case '-': case '*': case '%': case '<': case '>':
+    case '&': case '|': case '^': case '!': case '~': case '?':
+    case TOK_MUL_ASSIGN: case TOK_MOD_ASSIGN: case TOK_PLUS_ASSIGN:
+    case TOK_MINUS_ASSIGN: case TOK_SHL_ASSIGN: case TOK_SAR_ASSIGN:
+    case TOK_SHR_ASSIGN: case TOK_AND_ASSIGN: case TOK_XOR_ASSIGN:
+    case TOK_OR_ASSIGN: case TOK_POW_ASSIGN: case TOK_LAND_ASSIGN:
+    case TOK_LOR_ASSIGN: case TOK_DOUBLE_QUESTION_MARK_ASSIGN:
+    case TOK_DEC: case TOK_INC: case TOK_SHL: case TOK_SAR: case TOK_SHR:
+    case TOK_LT: case TOK_LTE: case TOK_GT: case TOK_GTE: case TOK_EQ:
+    case TOK_STRICT_EQ: case TOK_NEQ: case TOK_STRICT_NEQ: case TOK_LAND:
+    case TOK_LOR: case TOK_POW: case TOK_ARROW: case TOK_DOUBLE_QUESTION_MARK:
+    case TOK_QUESTION_MARK_DOT:
+        return true;
+    case TOK_IN: case TOK_INSTANCEOF: case TOK_TYPEOF: case TOK_VOID:
+    case TOK_DELETE: case TOK_YIELD: case TOK_AWAIT:
+        /* a keyword after '.' is a property name */
+        return prev != '.' && prev != TOK_QUESTION_MARK_DOT;
+    default:
+        return false;
+    }
+}
+
+/* dasher: whether an element of a destructuring pattern, from its first
+   and last tokens written directly in the pattern ('prev' is the one
+   before 'last'), cannot be a target: a target ends with a name, ']', ')'
+   or '}', and one that starts with 'function' or 'class' and ends with
+   '}' is a function or class expression */
+static bool js_skip_not_target(int first, int last, int prev)
+{
+    switch (last) {
+    case TOK_NUMBER:
+    case TOK_STRING:
+    case TOK_TEMPLATE:
+    case TOK_REGEXP:
+        return true;
+    case TOK_NULL:
+    case TOK_TRUE:
+    case TOK_FALSE:
+        return prev != '.' && prev != TOK_QUESTION_MARK_DOT;
+    case '}':
+        return first == TOK_FUNCTION || first == TOK_CLASS;
+    default:
+        return false;
+    }
+}
+
 /* XXX: no longer works if regexps are present. Could use previous
    regexp parsing heuristics to handle most cases */
-static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_terminator)
+static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
+                                       bool no_line_terminator, int ask)
 {
     char state[256];
     /* dasher: for each open bracket, where it is and what is inside it */
@@ -23542,6 +23606,12 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
     bool memo = (size_t)(s->buf_end - s->buf_start) < UINT32_MAX - 1;
     uint32_t closed_pos = 0; /* the bracket the last token closed, if any */
     int closed_bits = 0;
+    /* dasher: for 'ask', the element of the outer bracket being read:
+       whether it is past its '=' (a default value, which may hold
+       anything), whether it is past the key of an object property, and
+       its first, last and last but one tokens outside brackets */
+    bool in_default = false, in_value = s->token.val == '[';
+    int first_tok = 0, last_tok2 = 0, prev_tok2 = 0;
 
     if (memo && (s->token.val == '(' || s->token.val == '[' ||
                  s->token.val == '{')) {
@@ -23562,6 +23632,47 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
     last_tok = 0;
     s->in_skip++;
     for (;;) {
+        if (ask && level == 2) {
+            /* dasher: a token directly inside the bracket */
+            int t = s->token.val;
+            if (t == ',') {
+                if (ask == SKIP_ASK_PATTERN && !in_default && in_value &&
+                    js_skip_not_target(first_tok, last_tok2, prev_tok2))
+                    goto bail;
+                in_default = false;
+                in_value = state[1] == '[';
+                first_tok = last_tok2 = prev_tok2 = 0;
+            } else if (in_default) {
+            } else if (t == '=') {
+                in_default = true;
+            } else if (ask == SKIP_ASK_ARROW) {
+                /* parameters: names, patterns, '...' and defaults */
+                if (t != TOK_IDENT && t != TOK_ELLIPSIS && t != '[' &&
+                    t != '{' && t != ')')
+                    goto bail;
+            } else if (!in_value) {
+                /* an object property's key: a method if '(' follows */
+                if (t == '(')
+                    goto bail;
+                if (t == ':' || t == TOK_ELLIPSIS)
+                    in_value = true;
+            } else if (t == TOK_ELLIPSIS && !first_tok) {
+            } else if (t != ']' && t != '}') {
+                if (js_skip_not_in_target(t, last_tok2))
+                    goto bail;
+                if (!first_tok)
+                    first_tok = t;
+                prev_tok2 = last_tok2;
+                last_tok2 = t;
+            }
+        } else if (ask == SKIP_ASK_PATTERN && level == 3 && in_value &&
+                   !in_default && (s->token.val == ')' ||
+                                   s->token.val == ']' ||
+                                   s->token.val == '}')) {
+            /* dasher: the end of a bracket directly inside it */
+            prev_tok2 = last_tok2;
+            last_tok2 = state[2] == '`' ? TOK_TEMPLATE : s->token.val;
+        }
         /* dasher: a function an earlier parse dropped is skipped whole, as
            the parse that follows will skip it */
         if (s->token.val == '(' && level >= 2 && s->cur_func->lazy_record) {
@@ -23579,6 +23690,11 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
                 s->token.line_num = r->last_line;
                 s->token.col_num = r->last_col;
                 last_tok = ')';
+                if (ask == SKIP_ASK_PATTERN && level == 2 && in_value &&
+                    !in_default) {
+                    prev_tok2 = last_tok2;
+                    last_tok2 = '}';
+                }
                 goto next;
             }
         }
@@ -23712,6 +23828,10 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
             break;
         }
     }
+    if (0) {
+    bail:
+        tok = TOK_ERROR;
+    }
  done:
     s->in_skip--;
     if (pbits) {
@@ -23720,6 +23840,11 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
     if (js_parse_seek_token(s, &pos))
         return -1;
     return tok;
+}
+
+static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_terminator)
+{
+    return js_parse_skip_parens_token2(s, pbits, no_line_terminator, SKIP_ASK_ALL);
 }
 
 static void set_object_name(JSParseState *s, JSAtom name)
@@ -25730,7 +25855,8 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
     case '[':
         {
             int skip_bits;
-            if (js_parse_skip_parens_token(s, &skip_bits, false) == '=') {
+            /* dasher: may stop early, see SKIP_ASK_PATTERN */
+            if (js_parse_skip_parens_token2(s, &skip_bits, false, SKIP_ASK_PATTERN) == '=') {
                 if (js_parse_destructuring_element(s, 0, false, false, skip_bits & SKIP_HAS_ELLIPSIS, true, false) < 0)
                     return -1;
             } else {
@@ -26821,7 +26947,7 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         }
         return 0;
     } else if (s->token.val == '(' &&
-               js_parse_skip_parens_token(s, NULL, true) == TOK_ARROW) {
+               js_parse_skip_parens_token2(s, NULL, true, SKIP_ASK_ARROW) == TOK_ARROW) {
         return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
                                       JS_FUNC_NORMAL, JS_ATOM_NULL,
                                       s->token.ptr, s->token.line_num,
@@ -26843,7 +26969,7 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         if (next_token(s))
             return -1;
         if ((s->token.val == '(' &&
-             js_parse_skip_parens_token(s, NULL, true) == TOK_ARROW) ||
+             js_parse_skip_parens_token2(s, NULL, true, SKIP_ASK_ARROW) == TOK_ARROW) ||
             (s->token.val == TOK_IDENT && !s->token.u.ident.is_reserved &&
              peek_token(s, true) == TOK_ARROW)) {
             return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
