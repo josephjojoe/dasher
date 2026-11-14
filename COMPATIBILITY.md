@@ -38,7 +38,6 @@ view, where `querySelector` and `innerHTML` stop at shadow roots.
 | `crypto.subtle` beyond `digest()` | Every other method rejects with `NotSupportedError` |
 | `Intl.Segmenter`, `Intl.DisplayNames`; locales other than en-US | Both are undefined; every locale formats as en-US. `Intl.Locale` has no `getWeekInfo()`, `getTextInfo()` or the other `get…()` methods, and `maximize()` and `minimize()` leave all but about fifty languages as they are |
 | Performance timeline (`performance.timing`, entries from `mark`/`measure`) | `performance.timing` is undefined; `mark` and `measure` record nothing; `performance.now()` works |
-| Inline event handler attributes (`onclick="..."`, `<body onload>`) | Not run from markup |
 | `<meta http-equiv="refresh">` | Not followed |
 | iframes | Not loaded |
 | Workers, service workers, `indexedDB`, `caches`, WebAssembly | Absent, so feature detection takes its fallback path |
