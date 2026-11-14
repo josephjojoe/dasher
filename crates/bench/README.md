@@ -122,10 +122,18 @@ long before the targets are at risk:
 | idle RSS | 8 MiB | 3.9 MiB (6.7 MiB with glibc) |
 | peak RSS: static, large, spa, feed | 12, 28, 20, 16 MiB | 6.7, 17.1, 11.1, 9.1 MiB |
 | RSS growth over sequential jobs | 0.75 MiB | 0.00 to 0.07 MiB |
-| binary size | 6 MiB | 5.25 MiB |
+| binary size | 8 MiB | 7.10 MiB (x86_64, as CI builds it) |
 
 Times are reported but not budgeted, because they depend too much on the
 runner.
+
+The binary size budget was 6 MiB until 2026-11-14, set when the x86_64
+musl build CI makes was 5.40 MiB. That build is now 7.10 MiB. The
+1.7 MiB came from what was added in between, not from one mistake: the
+largest parts are the DOM and web API bindings in dasher-js (0.35 MiB of
+code), QuickJS built at `opt-level = 2` instead of for size (0.25 MiB),
+zstd for the script cache, and the HTTP service. The budget keeps the
+margin it had, about 1.1 times the measurement.
 
 Real SPAs are heavier than the fixture: bigger bundles and more data. The
 fixture needs a 5 MiB JS heap and about 11 MiB of RSS in all, which leaves room
