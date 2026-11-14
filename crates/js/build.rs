@@ -26,7 +26,10 @@ fn main() {
             hash.write(&bytes);
         }
     }
-    println!("cargo:rustc-env=DASHER_ENGINE_ID={:016x}{:016x}", hash.a, hash.b);
+    println!(
+        "cargo:rustc-env=DASHER_ENGINE_ID={:016x}{:016x}",
+        hash.a, hash.b
+    );
 }
 
 /// Two FNV-1a hashes with different offsets: 128 bits, enough to tell

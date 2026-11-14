@@ -178,6 +178,15 @@ impl Results {
                 mib(jobs["peak_rss"].as_u64().unwrap_or(0)),
                 jobs["elapsed_ms"].as_f64().unwrap_or(0.0) / 1000.0,
             );
+            if let Some(bytes) = jobs["script_cache_bytes"].as_u64() {
+                let _ = writeln!(
+                    s,
+                    "| {n} sequential jobs: script cache at the end (part of the RSS above), hits / misses | {:.2} MiB, {} / {} |",
+                    mib(bytes),
+                    jobs["script_cache_hits"].as_u64().unwrap_or(0),
+                    jobs["script_cache_misses"].as_u64().unwrap_or(0),
+                );
+            }
         }
         if let Some(ms) = self.version_ms {
             let _ = writeln!(s, "| process start (`dasher --version`) | {ms:.1} ms |");

@@ -107,6 +107,14 @@
 //! down. [`Page::memory_usage`] shows how close a page is. A page's memory
 //! is all returned when it is dropped or navigates elsewhere.
 //!
+//! What outlives a page is the browser's [`ScriptCache`]: the compiled code
+//! of the scripts its pages ran, keyed by a hash of their text, which later
+//! pages read back instead of compiling the same text again. It holds up
+//! to [`DEFAULT_SCRIPT_CACHE_BYTES`] (32 MiB) by default and stays near
+//! that once pages have filled it, so a long-running process should count
+//! it. [`BrowserBuilder::script_cache`] bounds it differently, keeps it on
+//! disk as well, or turns it off.
+//!
 //! # Time
 //!
 //! Pages run on page time. By default it is [virtual](ClockMode::Virtual):

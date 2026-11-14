@@ -295,3 +295,55 @@ properties and text, stack positions and early errors against what the
 engine gives with every function compiled with its script. test262 (tc39
 `main` of 2026-11-13, 41,841 tests) fails the same tests either way.
 
+
+## `quickjs/quickjs.c`: compiled scripts for the embedder's cache
+
+dasher keeps compiled scripts across pages (`crates/js/src/script_cache.rs`):
+a script's text and its compiled code, written out by `JS_WriteObject`
+and read back into each later page's runtime. Four things make that work
+with the changes above.
+
+**The text is the embedder's.** `JSSourceText` points at its text
+(`text`) instead of always holding it. `JS_SetScriptSource` describes a
+script for the calls that follow: its text, which the caller keeps
+NUL-terminated, a `retain` and `release` pair, a tag and a file name.
+`JS_Eval` of exactly that text (`__JS_EvalInternal` compares the pointer)
+makes the script's `JSSourceText` point into it and retains it once,
+where it would otherwise copy it into the heap (`js_source_text_new`). The
+last function to go releases it. Every page using a cached script then
+shares one copy of its text, outside the pages' heaps.
+
+**Functions not compiled yet are written as they are.** With
+`JS_WRITE_OBJ_SCRIPT`, `JS_WriteFunctionTag` writes a lazy function as its
+stub, info and record tree (`JS_WriteLazyFunction`, a flag bit marks it)
+instead of compiling it first, which is still what happens without the
+flag (the glue). Every function's text is written as an offset and length
+into the script's text, which is not written, and the file name is left
+out. `JS_ReadObject` with `JS_READ_OBJ_SCRIPT` takes both from the
+`JSScriptSource` set: every function read shares one `JSSourceText` for
+the script, as freshly compiled ones do, and gets the caller's file name,
+so one entry serves the same text at any URL. A module's name is the
+caller's too. The reader checks that offsets fall inside the text and
+bounds counts by the bytes left.
+
+**The embedder learns which functions ran.** `JS_SetLazyCompileHook` is
+called from `js_lazy_compile` with the tag of the script's text and the
+function's `JSLazyRecord.start`, its offset.
+
+**And can ask for them compiled.** `JSScriptSource.hints` lists such
+offsets. `js_lazy_begin` compiles a function whose offset is listed with
+its script, like one in parentheses, and does so whatever state its
+parent is in. A parent that is still a candidate is kept anyway when it
+calls `eval`. If it is dropped instead, it collects the hinted function's
+names as it does a constructor's.
+
+One upstream bug is fixed on the way: a template object read back by
+`JS_ReadObject` was only made non-extensible, so its `length` stayed
+writable and `Object.isFrozen` gave `false`. It is now frozen as the
+parser leaves it (`seal_template_obj`).
+
+`crates/js/tests/script_cache.rs` checks that `lazy.js` (see above) gives
+the same answers compiled from its text, read back with its functions
+waiting for their first call, and read back with them compiled in, and
+that text, positions, file names, template objects and modules come out
+as from the text.

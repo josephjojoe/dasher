@@ -84,14 +84,17 @@ fn probe(js: &JsRuntime) -> String {
 fn functions_read_back_have_their_text_and_positions() {
     let source = probe_source();
     let plain = JsRuntime::new(RuntimeOptions::default()).unwrap();
-    plain.run_script(&source, "https://example.com/probe.js").unwrap();
+    plain
+        .run_script(&source, "https://example.com/probe.js")
+        .unwrap();
     let expected = probe(&plain);
     assert!(expected.contains("probe.js:7:"), "{expected}");
 
     let cache = cache();
     for round in 0..3 {
         let js = page(&cache);
-        js.run_script(&source, "https://example.com/probe.js").unwrap();
+        js.run_script(&source, "https://example.com/probe.js")
+            .unwrap();
         assert_eq!(probe(&js), expected, "round {round}");
     }
     assert_eq!(counts(cache.stats()), (1, 2, 2));
@@ -99,16 +102,20 @@ fn functions_read_back_have_their_text_and_positions() {
     // Another URL with the same text finds it too, and its functions say
     // they come from there.
     let js = page(&cache);
-    js.run_script(&source, "https://cdn.example.net/copy.js").unwrap();
+    js.run_script(&source, "https://cdn.example.net/copy.js")
+        .unwrap();
     let elsewhere = probe(&js);
-    assert_eq!(elsewhere, expected.replace("example.com/probe.js", "cdn.example.net/copy.js"));
+    assert_eq!(
+        elsewhere,
+        expected.replace("example.com/probe.js", "cdn.example.net/copy.js")
+    );
     assert_eq!(cache.stats().hits, 3);
 }
 
 #[test]
 fn pages_do_not_see_what_other_pages_did_to_a_cached_script() {
     let source = format!(
-        "{}\n{}",
+        "{}\n/*{}*/",
         r#"
 var tag = function (strings) { return strings; };
 var shared = (function () {
@@ -117,7 +124,7 @@ var shared = (function () {
   return { bump: bump, template: function () { return tag`a${1}b`; } };
 })();
 "#,
-        format!("/*{}*/", "y".repeat(2000))
+        "y".repeat(2000)
     );
     let cache = cache();
     for _ in 0..3 {
@@ -138,7 +145,12 @@ var shared = (function () {
             .unwrap()
             .unwrap();
         assert_eq!(seen, r#"[1,2,true,2,true,"a|b"]"#);
-        assert_eq!(js.eval_json("typeof Function.prototype.poisoned").unwrap().as_deref(), Some(r#""number""#));
+        assert_eq!(
+            js.eval_json("typeof Function.prototype.poisoned")
+                .unwrap()
+                .as_deref(),
+            Some(r#""number""#)
+        );
     }
     assert_eq!(counts(cache.stats()), (1, 2, 2));
 }
@@ -164,8 +176,14 @@ fn the_memory_bound_holds() {
     });
     for i in 0..10 {
         let js = page(&cache);
-        js.run_script(&format!("var v{i} = function () {{ return {i}; }};/*{}*/", "z".repeat(3000)), "s.js")
-            .unwrap();
+        js.run_script(
+            &format!(
+                "var v{i} = function () {{ return {i}; }};/*{}*/",
+                "z".repeat(3000)
+            ),
+            "s.js",
+        )
+        .unwrap();
     }
     let stats = cache.stats();
     assert!(stats.bytes <= 12 * 1024, "{stats:?}");
@@ -207,7 +225,12 @@ fn a_cache_directory_starts_a_new_process_warm() {
     assert_eq!((stats.hits, stats.disk_hits, stats.misses), (1, 1, 0));
 
     // A damaged file is ignored, and replaced.
-    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    let file = std::fs::read_dir(&dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
     let mut bytes = std::fs::read(&file).unwrap();
     let middle = bytes.len() / 2;
     bytes[middle] ^= 0x55;
@@ -277,14 +300,18 @@ mod modules {
         })
         .unwrap();
         js.run_script("globalThis.log = [];", "setup.js").unwrap();
-        let graph = js.fetch_module_graph(&server.url("/app/main.js"), ModuleCredentials::SameOrigin);
+        let graph =
+            js.fetch_module_graph(&server.url("/app/main.js"), ModuleCredentials::SameOrigin);
         assert_eq!(js.run(RunLimits::default()).await, RunOutcome::Idle);
         assert_eq!(js.module_graph_status(graph), ModuleGraphStatus::Ready);
         assert!(js.run_module_graph(graph));
-        js.run_script("later().then((v) => log.push(v));", "check.js").unwrap();
+        js.run_script("later().then((v) => log.push(v));", "check.js")
+            .unwrap();
         assert_eq!(js.run(RunLimits::default()).await, RunOutcome::Idle);
         assert_eq!(js.take_errors(), []);
-        js.eval_json("[log, meta.split('/').pop()]").unwrap().unwrap()
+        js.eval_json("[log, meta.split('/').pop()]")
+            .unwrap()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -292,7 +319,10 @@ mod modules {
         let server = server();
         let cache = super::cache();
         let first = load(&server, &cache).await;
-        assert_eq!(first, r#"[["hello world from greet.js",1,2,"late"],"main.js"]"#);
+        assert_eq!(
+            first,
+            r#"[["hello world from greet.js",1,2,"late"],"main.js"]"#
+        );
         assert_eq!(super::counts(cache.stats()), (3, 0, 3));
         for round in 0..2 {
             assert_eq!(load(&server, &cache).await, first, "round {round}");

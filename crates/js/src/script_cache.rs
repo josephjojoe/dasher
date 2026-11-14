@@ -415,7 +415,11 @@ type LazyCompileHook = unsafe extern "C" fn(*mut c_void, u64, u32);
 
 unsafe extern "C" {
     fn JS_SetScriptSource(rt: *mut qjs::JSRuntime, src: *const JSScriptSource);
-    fn JS_SetLazyCompileHook(rt: *mut qjs::JSRuntime, hook: Option<LazyCompileHook>, opaque: *mut c_void);
+    fn JS_SetLazyCompileHook(
+        rt: *mut qjs::JSRuntime,
+        hook: Option<LazyCompileHook>,
+        opaque: *mut c_void,
+    );
     fn JS_SetLazyFunctions(rt: *mut qjs::JSRuntime, enable: bool);
 }
 
@@ -473,7 +477,6 @@ pub(crate) struct PageScripts {
 struct Used {
     key: Key,
     kind: Kind,
-    text: Arc<Text>,
     how: How,
     /// Offsets of the functions compiled on their first call.
     ran: Vec<u32>,
@@ -485,8 +488,8 @@ enum How {
     Compiled,
     /// Compiled from its text, and an entry made from that.
     Created,
-    /// Read from an entry with these hints, wanted functions and rebuilds.
-    Read(Arc<[u32]>, Arc<[u32]>, u8),
+    /// Read from this entry.
+    Read(Entry),
 }
 
 /// What a script is compiled as.
@@ -533,7 +536,11 @@ impl PageScripts {
         // until it calls `detach`.
         unsafe {
             let rt = qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
-            JS_SetLazyCompileHook(rt, Some(on_lazy_compile), Rc::as_ptr(self).cast_mut().cast());
+            JS_SetLazyCompileHook(
+                rt,
+                Some(on_lazy_compile),
+                Rc::as_ptr(self).cast_mut().cast(),
+            );
         }
     }
 
@@ -613,8 +620,7 @@ impl PageScripts {
             let tag = self.note(Used {
                 key,
                 kind,
-                text: Arc::clone(&entry.text),
-                how: How::Read(Arc::clone(&entry.hints), Arc::clone(&entry.wanted), entry.rebuilds),
+                how: How::Read(entry.clone()),
                 ran: Vec::new(),
             });
             let src = JSScriptSource::new(&entry.text, filename.as_ptr(), tag, &[]);
@@ -639,12 +645,13 @@ impl PageScripts {
             self.used.borrow_mut()[slot(tag)].how = How::Compiled;
         }
 
-        let build = self.cache.note_miss(&key, source.len(), origin == Origin::Inline);
+        let build = self
+            .cache
+            .note_miss(&key, source.len(), origin == Origin::Inline);
         let text = Text::new(source.as_bytes());
         let tag = self.note(Used {
             key,
             kind,
-            text: Arc::clone(&text),
             how: How::Compiled,
             ran: Vec::new(),
         });
@@ -652,7 +659,13 @@ impl PageScripts {
         // SAFETY: `src` describes `text`, which outlives the call; the
         // input is exactly `src.buf`, as the engine checks.
         let value = with_source(rt, &src, || unsafe {
-            qjs::JS_Eval(raw, src.buf, src.len as _, filename.as_ptr(), kind.eval_flags())
+            qjs::JS_Eval(
+                raw,
+                src.buf,
+                src.len as _,
+                filename.as_ptr(),
+                kind.eval_flags(),
+            )
         });
         // SAFETY: inspects the tag of a value.
         if unsafe { qjs::JS_IsException(value) } {
@@ -662,7 +675,8 @@ impl PageScripts {
         // nothing of the page is in it; the functions it runs are noted
         // for the next time the entry is made (see `finish`).
         if build && let Some(code) = write(ctx, value) {
-            self.cache.insert(key, Entry::new(text, code, Vec::new(), 0));
+            self.cache
+                .insert(key, Entry::new(text, code, Vec::new(), 0));
             self.used.borrow_mut()[slot(tag)].how = How::Created;
         }
         Some(Ok(value))
@@ -695,15 +709,16 @@ impl PageScripts {
                         self.cache.want(&u.key, &u.ran);
                     }
                 }
-                How::Read(hints, wanted, rebuilds) => {
+                How::Read(entry) => {
                     self.cache.state().stats.compiled_late += u.ran.len() as u64;
-                    let pending = merge(&wanted, &u.ran);
+                    let pending = merge(&entry.wanted, &u.ran);
                     if pending.is_empty() {
                         continue;
                     }
-                    if rebuilds < MAX_REBUILDS && pending.len() >= (hints.len() / REBUILD_SHARE).max(1)
-                    {
-                        builds.push((u.key, u.kind, u.text, merge(&hints, &pending), rebuilds + 1));
+                    let enough = pending.len() >= (entry.hints.len() / REBUILD_SHARE).max(1);
+                    if entry.rebuilds < MAX_REBUILDS && enough {
+                        let hints = merge(&entry.hints, &pending);
+                        builds.push((u.key, u.kind, entry.text, hints, entry.rebuilds + 1));
                     } else if !u.ran.is_empty() {
                         self.cache.want(&u.key, &u.ran);
                     }
@@ -718,7 +733,8 @@ impl PageScripts {
         };
         for (key, kind, text, hints, rebuilds) in builds {
             if let Some(code) = compiler.compile(kind, &text, &hints) {
-                self.cache.insert(key, Entry::new(text, code, hints, rebuilds));
+                self.cache
+                    .insert(key, Entry::new(text, code, hints, rebuilds));
             }
         }
     }
@@ -921,7 +937,10 @@ impl Disk {
             let _ = fs::remove_file(&temp);
             return;
         }
-        let mut total = self.bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut total = self
+            .bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = match *total {
             Some(n) => n + bytes.len() as u64,
             None => dir_size(&self.dir),
@@ -959,7 +978,12 @@ impl Disk {
 
 fn dir_size(dir: &Path) -> u64 {
     fs::read_dir(dir)
-        .map(|d| d.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum())
+        .map(|d| {
+            d.flatten()
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
         .unwrap_or(0)
 }
 
@@ -996,7 +1020,10 @@ fn decode(key: &Key, bytes: &[u8]) -> Option<Entry> {
         Some(head)
     };
     let u64_at = |b: &[u8]| usize::try_from(u64::from_le_bytes(b.try_into().ok()?)).ok();
-    if take(8)? != FILE_MAGIC || take(ENGINE_ID.len())? != ENGINE_ID.as_bytes() || take(32)? != key.0 {
+    if take(8)? != FILE_MAGIC
+        || take(ENGINE_ID.len())? != ENGINE_ID.as_bytes()
+        || take(32)? != key.0
+    {
         return None;
     }
     let text_len = u64_at(take(8)?)?;

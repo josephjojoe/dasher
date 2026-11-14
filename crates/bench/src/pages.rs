@@ -8,11 +8,13 @@
 //!
 //! ```text
 //! <name> <round> <load cpu s> <drop cpu s> <peak RSS MiB> <hits> <misses> \
-//!   <hit KiB> <miss KiB> <builds> <cache MiB> <elements> <text hash>
+//!   <hit KiB> <miss KiB> <builds> <late> <cache MiB> <elements> <text hash>
 //! ```
 //!
 //! `load` is `goto` and reading the page out; `drop` is freeing the page,
-//! which is when it makes its cache entries. Peak RSS is the process's
+//! which is when it remakes the cache entries it found lacking (`builds`
+//! counts entries written, on a miss and then). `late` is how many
+//! functions of cached scripts it still compiled on their first call. Peak RSS is the process's
 //! high-water mark over the load and the drop, reset before each load
 //! (Linux only), so it includes what the cache holds. Element counts and
 //! a hash of the page's text (digits masked) tell whether a page came out
@@ -83,8 +85,15 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
-        let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value"));
-        let number = |s: String| s.parse::<usize>().map_err(|_| format!("{arg} needs a number"));
+        let mut value = || {
+            args.next()
+                .cloned()
+                .ok_or_else(|| format!("{arg} needs a value"))
+        };
+        let number = |s: String| {
+            s.parse::<usize>()
+                .map_err(|_| format!("{arg} needs a number"))
+        };
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--cache" => {
@@ -167,12 +176,13 @@ async fn run(options: &Options) {
         let after = cache.as_ref().map(ScriptCache::stats).unwrap_or_default();
         let d = |f: fn(&ScriptCacheStats) -> u64| f(&after) - f(&before);
         let mut hash = DefaultHasher::new();
-        text.replace(|c: char| c.is_ascii_digit(), "0").hash(&mut hash);
+        text.replace(|c: char| c.is_ascii_digit(), "0")
+            .hash(&mut hash);
         if let Err(e) = loaded {
             eprintln!("{name}: {e}");
         }
         println!(
-            "{name} {round} {:.3} {:.3} {:.1} {} {} {} {} {} {:.1} {elements} {:016x}",
+            "{name} {round} {:.3} {:.3} {:.1} {} {} {} {} {} {} {:.1} {elements} {:016x}",
             load.as_secs_f64(),
             dropped.as_secs_f64(),
             peak as f64 / (1024.0 * 1024.0),
@@ -181,6 +191,7 @@ async fn run(options: &Options) {
             d(|s| s.hit_bytes) / 1024,
             d(|s| s.miss_bytes) / 1024,
             d(|s| s.builds),
+            d(|s| s.compiled_late),
             after.bytes as f64 / (1024.0 * 1024.0),
             hash.finish(),
         );

@@ -388,9 +388,15 @@ mod tests {
         assert_eq!(options.auth_token.as_deref(), Some("other"));
         assert!(!options.allow_private_addresses);
         assert_eq!(options.script_cache.mib, 0);
-        assert_eq!(options.script_cache.dir.as_deref(), Some("/var/cache/dasher".as_ref()));
+        assert_eq!(
+            options.script_cache.dir.as_deref(),
+            Some("/var/cache/dasher".as_ref())
+        );
         // memory off, but still a directory
-        assert_eq!(options.script_cache.cache().unwrap().options().memory_bytes, 0);
+        assert_eq!(
+            options.script_cache.cache().unwrap().options().memory_bytes,
+            0
+        );
         assert!(ScriptCacheSettings { mib: 0, dir: None }.cache().is_none());
 
         let allowed = |args: &[&str], value: &str| {
@@ -417,7 +423,9 @@ mod tests {
         assert!(err(&["--max-concurrency", "0"], &[]).contains("positive"));
         assert!(err(&["--max-timeout", "0"], &[]).contains("seconds"));
         assert!(err(&[], &[("PORT", "http")]).contains("$PORT"));
-        assert!(err(&[], &[("DASHER_SCRIPT_CACHE_MB", "lots")]).contains("$DASHER_SCRIPT_CACHE_MB"));
+        assert!(
+            err(&[], &[("DASHER_SCRIPT_CACHE_MB", "lots")]).contains("$DASHER_SCRIPT_CACHE_MB")
+        );
         assert!(err(&["--script-cache", "-1"], &[]).contains("whole number"));
         assert!(
             err(&[], &[("DASHER_ALLOW_PRIVATE_ADDRESSES", "maybe")])

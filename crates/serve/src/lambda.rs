@@ -66,7 +66,9 @@ impl Default for LambdaConfig {
             blocked: RunOptions::default().blocked,
             block_private_addresses: true,
             log: true,
-            script_cache: Some(dasher::ScriptCache::new(dasher::ScriptCacheOptions::default())),
+            script_cache: Some(dasher::ScriptCache::new(
+                dasher::ScriptCacheOptions::default(),
+            )),
         }
     }
 }

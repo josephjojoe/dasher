@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dasher_js::{
-    ClockMode, RuntimeOptions, ScriptCache, ScriptCacheOptions, StorageStore, Viewport,
-    Visibility, WindowOptions,
+    ClockMode, RuntimeOptions, ScriptCache, ScriptCacheOptions, StorageStore, Viewport, Visibility,
+    WindowOptions,
 };
 use dasher_net::header::{HeaderName, HeaderValue};
 use dasher_net::{Client, Cookie, CookieJar, HeaderMap, Proxy, RequestPolicy, Url, header};

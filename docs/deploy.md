@@ -158,6 +158,13 @@ Notes:
   invocation with `Dasher.ResponseRejected`.
 - **Memory.** More memory also buys more CPU on Lambda, which shortens
   script-heavy pages; 1024 MB is a reasonable start.
+- **Script cache.** A warm instance keeps the scripts its jobs compiled
+  (see [Sizing and limits](#sizing-and-limits)) for the invocations that
+  follow. Set `DASHER_SCRIPT_CACHE_DIR` to keep them on disk as well: in
+  `/tmp`, they outlive a restart of the runtime process within the same
+  sandbox; in a directory baked into the container image (filled by
+  running the image's jobs once at build time), every cold start begins
+  with them. A directory it cannot write to is only read.
 
 ## Jobs
 
@@ -234,8 +241,18 @@ Failures have an `error` message and these statuses:
 ## Sizing and limits
 
 - Each job gets its own browser and page (its own JS heap, DOM, cookies
-  and storage), all freed when it answers. Nothing is shared between
-  jobs.
+  and storage), all freed when it answers. The only thing jobs share is
+  the script cache: a script's compiled code, keyed by a hash of its
+  text, so a later job that loads the same text (the same site again, or
+  a bundle another site uses too) reads it back instead of compiling it.
+  Nothing a page does to a script reaches the cache: entries are made
+  from the text alone, and each page reads its own copy of them.
+- The script cache holds up to 32 MiB by default, text included, and
+  stays full once jobs have filled it, so count it in an instance's
+  memory. `--script-cache <MiB>` (`DASHER_SCRIPT_CACHE_MB`) sizes it and
+  `0` turns it off; `--script-cache-dir <dir>` (`DASHER_SCRIPT_CACHE_DIR`)
+  keeps it on disk too, so a new process starts with it. A heavy site's
+  own scripts fill 10 to 30 MiB of it.
 - A page's JS heap is capped at 256 MiB and its DOM at 500,000 nodes. A
   page that goes over either is stopped and its memory freed, and the job
   fails with `422`, so one runaway page cannot take down the instance.

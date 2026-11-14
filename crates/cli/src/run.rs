@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use dasher::{
-    AutoScrollOptions, Browser, ClockMode, Error, GotoOptions, JsonValue, ScriptCache, ScriptCacheOptions, Navigation, NetworkIdle,
-    Page, SettleOptions,
+    AutoScrollOptions, Browser, ClockMode, Error, GotoOptions, JsonValue, Navigation, NetworkIdle,
+    Page, ScriptCache, ScriptCacheOptions, SettleOptions,
 };
 use dasher_serve::report::{
     console_json, error_json, error_message, level_name, scroll_json, settle_name,

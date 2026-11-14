@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use dasher::{
     AutoScrollOptions, Browser, ClockMode, ConsoleLevel, Error, GotoOptions, JsonValue, LoadError,
-    NetworkIdle, Page, SettleOptions, ScriptCache};
+    NetworkIdle, Page, ScriptCache, SettleOptions,
+};
 use serde_json::{Map, json};
 
 use crate::job::{ConsoleFilter, Extract, Get, Job, Scroll, Wait};
