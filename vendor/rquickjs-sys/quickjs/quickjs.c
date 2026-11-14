@@ -3217,6 +3217,30 @@ static JSAtom __JS_FindAtom(JSRuntime *rt, const char *str, size_t len,
     return JS_ATOM_NULL;
 }
 
+/* dasher: __JS_FindAtom() for a string whose hash is known */
+static JSAtom js_find_atom8(JSRuntime *rt, const char *str, size_t len,
+                            uint32_t h)
+{
+    uint32_t i;
+    JSAtomStruct *p;
+
+    i = rt->atom_hash[h & (rt->atom_hash_size - 1)];
+    while (i != 0) {
+        p = rt->atom_array[i];
+        if (p->hash == h &&
+            p->atom_type == JS_ATOM_TYPE_STRING &&
+            p->len == len &&
+            p->is_wide_char == 0 &&
+            memcmp(str8(p), str, len) == 0) {
+            if (!__JS_AtomIsConst(i))
+                p->header.ref_count++;
+            return i;
+        }
+        i = p->hash_next;
+    }
+    return JS_ATOM_NULL;
+}
+
 static void JS_FreeAtomStruct(JSRuntime *rt, JSAtomStruct *p)
 {
     uint32_t i = p->hash_next;  /* atom_index */
@@ -21719,14 +21743,27 @@ static __exception int next_token(JSParseState *s)
         s->mark = p;
         p++;
         ident_has_escape = false;
-        if (s->in_skip) {
-            /* dasher: the bracket lookahead needs to know only which
-               keyword, if any, a name is. A plain ASCII name gets no atom. */
+        {
+            /* dasher: a plain ASCII name, the common case, is looked up
+               where it is, hashed as it is read. The bracket lookahead
+               needs to know only which keyword, if any, it is. */
             const uint8_t *q = p;
+            uint32_t h = JS_ATOM_TYPE_STRING * 263 + c;
             while (*q < 0x80 && lre_js_is_ident_next(*q))
-                q++;
+                h = h * 263 + *q++;
             if (*q != '\\' && *q < 0x80) {
-                atom = js_keyword_atom(p - 1, q - (p - 1));
+                size_t len = q - (p - 1);
+                if (s->in_skip) {
+                    atom = js_keyword_atom(p - 1, len);
+                } else {
+                    atom = js_find_atom8(s->ctx->rt, (const char *)p - 1, len,
+                                         h & JS_ATOM_HASH_MASK);
+                    if (atom == JS_ATOM_NULL) {
+                        atom = JS_NewAtomLen(s->ctx, (const char *)p - 1, len);
+                        if (atom == JS_ATOM_NULL)
+                            goto fail;
+                    }
+                }
                 p = q;
                 goto got_ident;
             }
