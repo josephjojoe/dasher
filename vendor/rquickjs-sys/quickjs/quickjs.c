@@ -22845,12 +22845,30 @@ static int find_var(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
     int i;
 
     if (fd->vars_htab) {
-        i = find_var_htab(fd, name);
-        if (i == -1)
-            goto not_found;
-        vd = &fd->vars[i];
-        if (fd->vars[i].scope_level == 0)
-            return i;
+        /* dasher: upstream scanned every variable when the first one of
+           that name in the table was in a block. All of them are on the
+           probe sequence of the name: take the last at function level,
+           as the scan below does. */
+        uint32_t h, j, m, *p;
+        int best = -1;
+        h = hash_atom(name);
+        j = 1;
+        m = fd->var_count + fd->var_count/5;
+        m = UINT32_MAX >> clz32(m);
+        for (;;) {
+            p = &fd->vars_htab[h & m];
+            if (*p == UINT32_MAX)
+                break;
+            vd = &fd->vars[*p];
+            if (vd->var_name == name && vd->scope_level == 0 &&
+                (int)*p > best)
+                best = *p;
+            h += j;
+            j += 1;
+        }
+        if (best >= 0)
+            return best;
+        goto not_found;
     }
     for(i = fd->var_count; i-- > 0;) {
         vd = &fd->vars[i];
@@ -32901,7 +32919,38 @@ typedef struct CodeContext {
 #define M3(op1, op2, op3)       ((uint32_t)(op1) | ((uint32_t)(op2) << 8) | ((uint32_t)(op3) << 16))
 #define M4(op1, op2, op3, op4)  ((uint32_t)(op1) | ((uint32_t)(op2) << 8) | ((uint32_t)(op3) << 16) | ((uint32_t)(op4) << 24))
 
-static bool code_match(CodeContext *s, int pos, ...)
+static bool code_match(CodeContext *s, int pos, ...);
+
+/* dasher: whether the first opcode code_match() would test, at 'pos'
+   past any OP_source_loc, is 'op1' (or one of those it packs). Most tests
+   fail there; this spares them the variadic call. */
+static inline bool code_match_first(const CodeContext *s, int pos, int op1)
+{
+    const uint8_t *tab = s->bc_buf;
+    int op;
+
+    for (;;) {
+        if (pos >= s->bc_len)
+            return false;
+        op = tab[pos];
+        if (pos + opcode_info[op].size > s->bc_len)
+            return false;
+        if (op != OP_source_loc)
+            break;
+        pos += opcode_info[op].size;
+    }
+    if (op == op1)
+        return true;
+    if (op1 == (uint8_t)op1 || !op)
+        return false;
+    return op == (uint8_t)op1 || op == (uint8_t)(op1 >> 8) ||
+        op == (uint8_t)(op1 >> 16) || op == (uint8_t)(op1 >> 24);
+}
+
+#define code_match(s, pos, op1, ...) \
+    (code_match_first(s, pos, op1) && (code_match)(s, pos, op1, __VA_ARGS__))
+
+static bool (code_match)(CodeContext *s, int pos, ...)
 {
     const uint8_t *tab = s->bc_buf;
     int op, len, op1, line_num, col_num, pos_next;
