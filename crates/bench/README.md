@@ -384,7 +384,8 @@ the next without the cache.
   higher from the third, with a cache that holds every script of the
   site: 168 MiB of entries over the sixteen sites, 0.4 to 31 MiB each.
   wired.com's scripts fill the default 32 MiB, so some are evicted on
-  every visit.
+  every visit. zstd's compressor adds about 140 KiB to the binary (its
+  decompressor was already there, for `Content-Encoding`).
 
 **From disk.** `dasher --script-cache-dir <dir> <url>`, a new process each
 time, as on AWS Lambda or a CLI run from a script. Eight pages, each run

@@ -349,6 +349,7 @@ fn a_page_can_settle_with_the_cache_before_it_is_dropped() {
     let work = second.take_script_cache_work();
     assert!(!work.is_empty());
     // the process would leave the page to the OS here
+    #[allow(clippy::mem_forget)]
     std::mem::forget(second);
     work.run();
     assert_eq!(counts(cache.stats()), (1, 1, 2));
