@@ -710,3 +710,67 @@ table would not avoid. The conversions between UTF-8 and engine strings
 at the Rust boundary (`JS_NewStringLen`, `JS_ToCStringLen2` and rquickjs's
 `String::from_str`/`to_string`) came to under 0.5% of CPU on the heavy
 pages, so they were left alone here.
+
+## `quickjs/quickjs.c`, `quickjs.h`: `JS_SetMallocFunctions`
+
+A new call, `JS_SetMallocFunctions(rt, mf, opaque)`, replaces the
+allocator functions a runtime was created with. The new functions must
+manage the same blocks as the old ones, since blocks allocated before the
+call are freed, resized and measured through the new ones.
+
+rquickjs creates a runtime with its own C functions, which reach the
+allocator through a boxed `dyn Allocator`: three calls for each `malloc`
+and `free` before dasher's slab heap gets the request. dasher-js
+(`crates/js/src/heap.rs`) creates the runtime that way, then points
+QuickJS at its own `extern "C"` functions over the same heap, so each
+request is one call. Measured with the slab fast paths inlined into those
+functions (`crates/js/src/slab.rs`): 2.4% fewer cycles on 12 recorded
+heavy pages, and no change in memory.
+
+## `quickjs/quickjs.c`: reference counts are tested inline
+
+QuickJS-NG exports `JS_FreeValue`, `JS_FreeValueRT`, `JS_DupAtom`,
+`JS_DupAtomRT`, `JS_FreeAtom` and `JS_FreeAtomRT`, and quickjs.c calls
+them itself, about 2,000 times for values alone. The library is built
+with `-fPIC`, so the compiler may not inline an exported function into
+its callers, and every release of a value was a call, even of a number
+or `undefined`. On the heavy pages `JS_FreeValue` and `JS_FreeValueRT`
+were 4% of CPU time in their own code.
+
+Here quickjs.c defines function-like macros with those names that expand
+to inline versions (`js_free_value_inline`, `js_dup_atom_inline`,
+`js_free_atom_inline`). The reference count is tested and decremented at
+the caller, and only freeing a value is a call (`js_free_value_rt`, kept
+out of line). The exported functions are defined with their names in
+parentheses, so the macros do not touch them, and callers outside
+quickjs.c, rquickjs among them, call them as before. Code in quickjs.c
+that defines a function with one of these names has to do the same.
+
+Measured on 12 recorded heavy pages (Linux, musl, five runs): 4% fewer
+cycles and instructions, the same peak RSS. The cost is code size: 53 KB
+more text in quickjs.o for the values and 10 KB for the atoms, and the
+release binary is 70 KiB larger (5.69 to 5.76 MiB). Idle RSS rises by the
+same 68 KiB, the text the process touches. Inlining only the tag test,
+with the decrement out of line, saved 22 KB of the 53 but gave back
+three quarters of the gain (2.8% more cycles than full inlining), so it
+was left out.
+
+## `quickjs/quickjs.c`: the cycle collector marks children directly
+
+`mark_children` visits each child of an object through the
+`JS_MarkFunc` pointer that each collector pass passes in, and
+`JS_MarkValue` is exported, so each child was two calls. Arrays,
+`arguments` objects and functions were marked through the class table's
+function pointer as well.
+
+Here `mark_children` is `force_inline`: each pass (`gc_decref`,
+`gc_scan`) gets its own copy with its constant mark function, which the
+compiler then inlines. `JS_MarkValue` gets an inline version like
+`JS_FreeValue` above. Plain arrays, `arguments` objects and bytecode
+functions, the most common objects with a class mark function, are marked
+by inlined copies of `js_array_mark` and `js_bytecode_function_mark`
+instead of through the class table. Every other class still goes through
+the table.
+
+The collector does the same work in the same order. On 12 recorded heavy
+pages it is 1.2% fewer cycles over all, with no change in memory.
