@@ -1804,6 +1804,19 @@ static inline int js_resize_array(JSContext *ctx, void **parray, int elem_size,
         return 0;
 }
 
+/* dasher: js_resize_array() for the compiler's tables of a function,
+   which start with room for 8 entries instead of growing from 1. They
+   are freed, or copied to their exact size, when the function is
+   compiled. */
+static inline int js_resize_array_fd(JSContext *ctx, void **parray,
+                                     int elem_size, int *psize, int req_size)
+{
+    if (unlikely(req_size > *psize))
+        return js_realloc_array(ctx, parray, elem_size, psize,
+                                *psize ? req_size : max_int(req_size, 8));
+    return 0;
+}
+
 static void *js_dbuf_realloc(void *ctx, void *ptr, size_t size)
 {
     return js_realloc(ctx, ptr, size);
@@ -22635,7 +22648,7 @@ static int new_label_fd(JSFunctionDef *fd)
     int label;
     LabelSlot *ls;
 
-    if (js_resize_array(fd->ctx, (void *)&fd->label_slots,
+    if (js_resize_array_fd(fd->ctx, (void *)&fd->label_slots,
                             sizeof(fd->label_slots[0]),
                             &fd->label_size, fd->label_count + 1))
         return -1;
@@ -22702,7 +22715,7 @@ static int cpool_add(JSParseState *s, JSValue val)
 {
     JSFunctionDef *fd = s->cur_func;
 
-    if (js_resize_array(s->ctx, (void *)&fd->cpool, sizeof(fd->cpool[0]),
+    if (js_resize_array_fd(s->ctx, (void *)&fd->cpool, sizeof(fd->cpool[0]),
                         &fd->cpool_size, fd->cpool_count + 1))
         return -1;
     fd->cpool[fd->cpool_count++] = val;
@@ -23013,7 +23026,7 @@ static int add_var(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
                             JS_MAX_LOCAL_VARS - 1);
         return -1;
     }
-    if (js_resize_array(ctx, (void **)&fd->vars, sizeof(fd->vars[0]),
+    if (js_resize_array_fd(ctx, (void **)&fd->vars, sizeof(fd->vars[0]),
                         &fd->var_size, fd->var_count + 1))
         return -1;
     vd = &fd->vars[fd->var_count++];
@@ -23097,7 +23110,7 @@ static int add_arg(JSContext *ctx, JSFunctionDef *fd, JSAtom name)
                             JS_MAX_LOCAL_VARS - 1);
         return -1;
     }
-    if (js_resize_array(ctx, (void **)&fd->args, sizeof(fd->args[0]),
+    if (js_resize_array_fd(ctx, (void **)&fd->args, sizeof(fd->args[0]),
                         &fd->arg_size, fd->arg_count + 1))
         return -1;
     vd = &fd->args[fd->arg_count++];
@@ -31724,7 +31737,7 @@ static int add_closure_var(JSContext *ctx, JSFunctionDef *s,
         return -1;
     }
 
-    if (js_resize_array(ctx, (void **)&s->closure_var,
+    if (js_resize_array_fd(ctx, (void **)&s->closure_var,
                         sizeof(s->closure_var[0]),
                         &s->closure_var_size, s->closure_var_count + 1))
         return -1;
