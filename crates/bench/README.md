@@ -402,9 +402,9 @@ without, alternating (CPU seconds and peak RSS in MiB, median):
 | edition.cnn.com | 0.53 | 0.55 | 0.58 | 0.34 (−36%) | 60 | 58 |
 | **all eight** | **15.3** | **15.9** (+4%) | **16.8** (+10%) | **11.3** (−26%) | **639** | **654** (+2%) |
 
-A warm process reads every script from the directory (5 to 21 MB per
-site) and pays nothing for the cache's memory beyond those of its one
-page. The second run, the one that compiles the scripts again, also
+A warm process reads every script from the directory (5 to 21 MB of
+files per site); its cache holds only its one page's entries, whose text
+the page would have held anyway. The second run, the one that compiles the scripts again, also
 frees its page before exiting (the CLI otherwise leaves that to the OS,
 see `crates/cli/src/run.rs`). Lightpanda's code cache on disk gave 8% on
 a repeat visit.
