@@ -367,6 +367,7 @@ pub mod regexp;
 mod remote;
 mod run;
 mod runtime;
+mod script_cache;
 #[cfg(unix)]
 mod slab;
 mod storage;
@@ -388,6 +389,10 @@ pub use remote::{PendingOperation, SendTask, TaskSender};
 pub use run::{RunLimits, RunOutcome};
 pub use runtime::{
     DEFAULT_MAX_STACK_SIZE, DEFAULT_MEMORY_LIMIT, InterruptHandle, JsRuntime, RuntimeOptions,
+};
+pub use script_cache::{
+    DEFAULT_SCRIPT_CACHE_BYTES, DEFAULT_SCRIPT_CACHE_DISK_BYTES, ScriptCache, ScriptCacheOptions,
+    ScriptCacheStats,
 };
 pub use storage::{DEFAULT_STORAGE_QUOTA, QuotaExceeded, StorageStore};
 pub use window::{

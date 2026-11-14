@@ -318,6 +318,11 @@ struct JSRuntime {
     bool can_block; /* true if Atomics.wait can block */
     /* dasher: compile a function on its first call (JS_SetLazyFunctions) */
     bool lazy_functions;
+    /* dasher: the embedder's script cache (JS_SetScriptSource,
+       JS_SetLazyCompileHook) */
+    const JSScriptSource *script_source;
+    JSLazyCompileHook *lazy_compile_hook;
+    void *lazy_compile_opaque;
     uint32_t dump_flags : 24;
 
     /* Shape hash table */
@@ -755,7 +760,15 @@ typedef struct JSFunctionBytecode {
    nesting level. */
 typedef struct JSSourceText {
     int ref_count;
-    uint32_t len; /* bytes in buf, not counting the final '\0' */
+    uint32_t len; /* bytes in text, not counting the final '\0' */
+    /* buf, or the embedder's copy (JSScriptSource), which it is told to
+       release with the last reference */
+    const char *text;
+    void (*release)(void *opaque);
+    void *opaque;
+    /* the embedder's name for the script, for its lazy compile hook, or
+       0 (see JS_SetScriptSource) */
+    uint64_t tag;
     char buf[];
 } JSSourceText;
 
@@ -2095,6 +2108,19 @@ void JS_SetCanBlock(JSRuntime *rt, bool can_block)
 void JS_SetLazyFunctions(JSRuntime *rt, bool enable)
 {
     rt->lazy_functions = enable;
+}
+
+/* dasher: see quickjs.h */
+void JS_SetScriptSource(JSRuntime *rt, const JSScriptSource *src)
+{
+    rt->script_source = src;
+}
+
+void JS_SetLazyCompileHook(JSRuntime *rt, JSLazyCompileHook *hook,
+                           void *opaque)
+{
+    rt->lazy_compile_hook = hook;
+    rt->lazy_compile_opaque = opaque;
 }
 
 void JS_SetSharedArrayBufferFunctions(JSRuntime *rt,
@@ -20732,6 +20758,8 @@ typedef struct JSParseState {
     bool is_module; /* parsing a module */
     bool allow_html_comments;
     JSSourceText *source_text; /* dasher: copy of the input, made on demand */
+    /* dasher: the input is this script (JS_SetScriptSource), or NULL */
+    const JSScriptSource *script_source;
     /* dasher: what js_parse_skip_parens_token() found for brackets it has
        already scanned past (see js_skip_memo_find) */
     struct JSSkipMemo *skip_memo;
@@ -20748,8 +20776,44 @@ typedef struct JSParseState {
 
 static void js_source_text_release(JSRuntime *rt, JSSourceText *t)
 {
-    if (t && --t->ref_count == 0)
+    if (t && --t->ref_count == 0) {
+        if (t->release)
+            t->release(t->opaque);
         js_free_rt(rt, t);
+    }
+}
+
+/* dasher: a JSSourceText for the script 'src' describes: its own copy of
+   the text, or the embedder's, retained, when it gives retain and release
+   functions */
+static JSSourceText *js_source_text_new(JSContext *ctx,
+                                        const JSScriptSource *src)
+{
+    JSSourceText *t;
+    size_t n = src->len;
+
+    if (src->release) {
+        t = js_malloc(ctx, sizeof(*t));
+        if (!t)
+            return NULL;
+        t->text = src->buf;
+        t->release = src->release;
+        t->opaque = src->opaque;
+        src->retain(src->opaque);
+    } else {
+        t = js_malloc(ctx, sizeof(*t) + n + 1);
+        if (!t)
+            return NULL;
+        memcpy(t->buf, src->buf, n);
+        t->buf[n] = '\0';
+        t->text = t->buf;
+        t->release = NULL;
+        t->opaque = NULL;
+    }
+    t->ref_count = 1;
+    t->len = n;
+    t->tag = src->tag;
+    return t;
 }
 
 /* dasher: records [ptr, ptr + len) of the input as the source of 'fd' */
@@ -20758,20 +20822,22 @@ static int js_parse_set_source(JSParseState *s, JSFunctionDef *fd,
 {
     JSSourceText *t = s->source_text;
     if (!t) {
-        size_t n = s->buf_end - s->buf_start;
-        t = js_malloc(s->ctx, sizeof(*t) + n + 1);
+        JSScriptSource copy = { 0 };
+        const JSScriptSource *src = s->script_source;
+        if (!src) {
+            copy.buf = (const char *)s->buf_start;
+            copy.len = s->buf_end - s->buf_start;
+            src = &copy;
+        }
+        t = js_source_text_new(s->ctx, src);
         if (!t)
             return -1;
-        t->ref_count = 1;
-        t->len = n;
-        memcpy(t->buf, s->buf_start, n);
-        t->buf[n] = '\0';
         s->source_text = t;
     }
     t->ref_count++;
     js_source_text_release(s->ctx->rt, fd->source_text);
     fd->source_text = t;
-    fd->source = t->buf + (ptr - s->buf_start);
+    fd->source = (char *)t->text + (ptr - s->buf_start);
     fd->source_len = len;
     return 0;
 }
@@ -36039,7 +36105,7 @@ static int js_lazy_drop(JSParseState *s, JSFunctionDef *fd)
     r->got_lf = s->got_lf;
     r->last_line = s->last_line_num;
     r->last_col = s->last_col_num;
-    r->source_end = (fd->source - fd->source_text->buf) + fd->source_len;
+    r->source_end = (fd->source - fd->source_text->text) + fd->source_len;
     r->defined_arg_count = fd->defined_arg_count;
     r->is_strict_mode = fd->is_strict_mode;
     r->has_simple_parameter_list = fd->has_simple_parameter_list;
@@ -36075,6 +36141,26 @@ static JSLazyRecord *js_lazy_take(JSFunctionDef *parent, uint32_t off)
     return NULL;
 }
 
+/* dasher: whether the embedder asked for the function starting at 'off'
+   to be compiled with its script */
+static bool js_lazy_hinted(JSParseState *s, uint32_t off)
+{
+    const JSScriptSource *src = s->script_source;
+    size_t lo = 0, hi;
+
+    if (!src || !src->hint_count)
+        return false;
+    hi = src->hint_count;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (src->hints[mid] < off)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo < src->hint_count && src->hints[lo] == off;
+}
+
 /* called with the first token of the parameters of 'fd'. Returns 1 if the
    function has been skipped (the token is then the one after it), 0 to
    parse it, -1 on error. */
@@ -36096,8 +36182,10 @@ static int js_lazy_begin(JSParseState *s, JSFunctionDef *fd,
         return 0;
     off = s->token.ptr - s->buf_start;
     /* as V8 does, a function in parentheses or after '!' is taken to be
-       called at once, unless its parent is not compiled now either */
-    compile_now = ptr == s->iife_ptr && parent->lazy_state == JS_LAZY_NONE;
+       called at once, unless its parent is not compiled now either; so is
+       one the embedder names (JSScriptSource.hints) */
+    compile_now = (ptr == s->iife_ptr || js_lazy_hinted(s, off)) &&
+        parent->lazy_state == JS_LAZY_NONE;
     if (parent->lazy_record)
         r = js_lazy_take(parent, off);
     if (r) {
@@ -36171,12 +36259,16 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     const char *filename;
     JSValue ret;
     int i, err;
+    uint64_t tag;
+    uint32_t start;
 
     ctx = b->realm;
+    tag = t->tag;
+    start = r->start;
     /* only for error messages, which a parse that has succeeded once
        gives only when it runs out of memory or stack */
     filename = JS_AtomGetStr(ctx, filename_buf, sizeof(filename_buf), b->filename);
-    js_parse_init(ctx, s, t->buf, t->len, filename, r->start_line);
+    js_parse_init(ctx, s, t->text, t->len, filename, r->start_line);
     s->lazy = ctx->rt->lazy_functions;
     s->is_module = r->is_module;
     s->allow_html_comments = !s->is_module;
@@ -36229,6 +36321,8 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     if (JS_IsException(ret))
         goto fail;
     /* compiled: the record went with the parse */
+    if (tag && ctx->rt->lazy_compile_hook)
+        ctx->rt->lazy_compile_hook(ctx->rt->lazy_compile_opaque, tag, start);
     js_lazy_record_free(ctx->rt, r);
     js_free(ctx, li);
     return 0;
@@ -36646,6 +36740,10 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
 
     js_parse_init(ctx, s, input, input_len, filename, line);
     s->lazy = ctx->rt->lazy_functions; /* dasher */
+    /* dasher: a script for the embedder's cache shares its text */
+    if (ctx->rt->script_source && ctx->rt->script_source->buf == input &&
+        ctx->rt->script_source->len == input_len)
+        s->script_source = ctx->rt->script_source;
     skip_shebang(&s->buf_ptr, s->buf_end);
 
     eval_type = flags & JS_EVAL_TYPE_MASK;
@@ -36997,6 +37095,9 @@ typedef struct BCWriterState {
     bool allow_reference;
     bool allow_source;
     bool allow_debug;
+    /* dasher: JS_WRITE_OBJ_SCRIPT, and the text its functions point into */
+    bool script;
+    JSSourceText *script_text;
     uint32_t first_atom;
     uint32_t *atom_to_idx;
     int atom_to_idx_size;
@@ -37309,14 +37410,121 @@ static int JS_WriteBigInt(BCWriterState *s, JSValueConst obj)
 
 static int JS_WriteObjectRec(BCWriterState *s, JSValueConst obj);
 
+/* dasher: for JS_WRITE_OBJ_SCRIPT, a function's text as where it is in
+   the script's */
+static int bc_put_script_source(BCWriterState *s, JSFunctionBytecode *b)
+{
+    if (!b->source || !b->source_len) {
+        bc_put_leb128(s, 0);
+        return 0;
+    }
+    if (!s->script_text)
+        s->script_text = b->source_text;
+    if (!b->source_text || b->source_text != s->script_text) {
+        JS_ThrowInternalError(s->ctx, "functions from more than one text");
+        return -1;
+    }
+    bc_put_leb128(s, b->source_len);
+    bc_put_leb128(s, b->source - s->script_text->text);
+    return 0;
+}
+
+static void bc_put_closure_vars(BCWriterState *s, JSFunctionBytecode *b)
+{
+    uint32_t flags;
+    int idx, i;
+
+    for(i = 0; i < b->closure_var_count; i++) {
+        JSClosureVar *cv = &b->closure_var[i];
+        bc_put_atom(s, cv->var_name);
+        bc_put_leb128(s, cv->var_idx);
+        flags = idx = 0;
+        bc_set_flags(&flags, &idx, cv->is_local, 1);
+        bc_set_flags(&flags, &idx, cv->is_arg, 1);
+        bc_set_flags(&flags, &idx, cv->is_const, 1);
+        bc_set_flags(&flags, &idx, cv->is_lexical, 1);
+        bc_set_flags(&flags, &idx, cv->var_kind, 4);
+        assert(idx <= 8);
+        bc_put_u8(s, flags);
+    }
+}
+
+/* dasher: a JSLazyRecord and those inside it */
+static void bc_put_lazy_record(BCWriterState *s, const JSLazyRecord *r)
+{
+    uint32_t flags, i;
+    int idx;
+
+    bc_put_leb128(s, r->start);
+    bc_put_leb128(s, r->start_eol);
+    bc_put_leb128(s, r->start_mark);
+    bc_put_sleb128(s, r->start_line);
+    bc_put_leb128(s, r->end);
+    bc_put_leb128(s, r->end_eol);
+    bc_put_leb128(s, r->end_mark);
+    bc_put_sleb128(s, r->end_line);
+    bc_put_sleb128(s, r->last_line);
+    bc_put_sleb128(s, r->last_col);
+    bc_put_leb128(s, r->source_end);
+    bc_put_leb128(s, r->defined_arg_count);
+    flags = idx = 0;
+    bc_set_flags(&flags, &idx, r->got_lf, 1);
+    bc_set_flags(&flags, &idx, r->is_strict_mode, 1);
+    bc_set_flags(&flags, &idx, r->has_simple_parameter_list, 1);
+    bc_set_flags(&flags, &idx, r->is_module, 1);
+    bc_set_flags(&flags, &idx, r->parent_strict, 1);
+    bc_set_flags(&flags, &idx, r->has_assign, 1);
+    assert(idx <= 8);
+    bc_put_u8(s, flags);
+    bc_put_leb128(s, r->free_count);
+    bc_put_leb128(s, r->private_count);
+    for (i = 0; i < r->free_count + r->private_count; i++)
+        bc_put_atom(s, r->free[i]);
+    bc_put_leb128(s, r->child_count);
+    for (i = 0; i < r->child_count; i++) {
+        bc_put_u8(s, r->children[i] != NULL);
+        if (r->children[i])
+            bc_put_lazy_record(s, r->children[i]);
+    }
+}
+
+/* dasher: a function not compiled yet, for JS_WRITE_OBJ_SCRIPT: what
+   js_create_lazy_function() made, which compiles from the script's text */
+static int JS_WriteLazyFunction(BCWriterState *s, JSFunctionBytecode *b)
+{
+    JSLazyInfo *li = b->lazy;
+    uint32_t flags;
+    int idx;
+
+    bc_put_leb128(s, b->defined_arg_count);
+    bc_put_leb128(s, b->closure_var_count);
+    bc_put_closure_vars(s, b);
+    bc_put_leb128(s, b->line_num);
+    bc_put_leb128(s, b->col_num);
+    if (bc_put_script_source(s, b))
+        return -1;
+    bc_put_u8(s, li->func_type);
+    bc_put_u8(s, li->parent_func_kind);
+    flags = idx = 0;
+    bc_set_flags(&flags, &idx, li->is_func_expr, 1);
+    bc_set_flags(&flags, &idx, li->parent_strict, 1);
+    bc_set_flags(&flags, &idx, li->parent_static_init, 1);
+    bc_put_u8(s, flags);
+    bc_put_lazy_record(s, li->record);
+    return 0;
+}
+
 static int JS_WriteFunctionTag(BCWriterState *s, JSValueConst obj)
 {
     JSFunctionBytecode *b = JS_VALUE_GET_PTR(obj);
     uint32_t flags;
     int idx, i;
+    bool lazy;
 
-    /* dasher: bytecode is written out compiled */
-    if (b->is_lazy && js_lazy_compile(s->ctx, b))
+    /* dasher: bytecode is written out compiled, except for the script
+       cache, which keeps what is not compiled yet as it is */
+    lazy = b->is_lazy && s->script;
+    if (b->is_lazy && !lazy && js_lazy_compile(s->ctx, b))
         return -1;
 
     bc_put_u8(s, BC_TAG_FUNCTION_BYTECODE);
@@ -37332,10 +37540,13 @@ static int JS_WriteFunctionTag(BCWriterState *s, JSValueConst obj)
     bc_set_flags(&flags, &idx, b->arguments_allowed, 1);
     bc_set_flags(&flags, &idx, b->backtrace_barrier, 1);
     bc_set_flags(&flags, &idx, s->allow_debug, 1);
+    bc_set_flags(&flags, &idx, lazy, 1); /* dasher */
     assert(idx <= 16);
     bc_put_u16(s, flags);
     bc_put_u8(s, b->is_strict_mode);
     bc_put_atom(s, b->func_name);
+    if (lazy)
+        return JS_WriteLazyFunction(s, b);
 
     bc_put_leb128(s, b->arg_count);
     bc_put_leb128(s, b->var_count);
@@ -37364,19 +37575,7 @@ static int JS_WriteFunctionTag(BCWriterState *s, JSValueConst obj)
         bc_put_leb128(s, 0);
     }
 
-    for(i = 0; i < b->closure_var_count; i++) {
-        JSClosureVar *cv = &b->closure_var[i];
-        bc_put_atom(s, cv->var_name);
-        bc_put_leb128(s, cv->var_idx);
-        flags = idx = 0;
-        bc_set_flags(&flags, &idx, cv->is_local, 1);
-        bc_set_flags(&flags, &idx, cv->is_arg, 1);
-        bc_set_flags(&flags, &idx, cv->is_const, 1);
-        bc_set_flags(&flags, &idx, cv->is_lexical, 1);
-        bc_set_flags(&flags, &idx, cv->var_kind, 4);
-        assert(idx <= 8);
-        bc_put_u8(s, flags);
-    }
+    bc_put_closure_vars(s, b);
 
     // write constant pool before code so code can be disassembled
     // on the fly at read time
@@ -37389,12 +37588,17 @@ static int JS_WriteFunctionTag(BCWriterState *s, JSValueConst obj)
         goto fail;
 
     if (s->allow_debug) {
-        bc_put_atom(s, b->filename);
+        if (!s->script) /* dasher: the reader is told the file name */
+            bc_put_atom(s, b->filename);
         bc_put_leb128(s, b->line_num);
         bc_put_leb128(s, b->col_num);
         bc_put_leb128(s, b->pc2line_len);
         dbuf_put(&s->dbuf, b->pc2line_buf, b->pc2line_len);
-        if (s->allow_source && b->source) {
+        if (s->script) {
+            /* dasher: where it is in the script's text */
+            if (bc_put_script_source(s, b))
+                goto fail;
+        } else if (s->allow_source && b->source) {
             bc_put_leb128(s, b->source_len);
             dbuf_put(&s->dbuf, b->source, b->source_len);
         } else {
@@ -37412,7 +37616,8 @@ static int JS_WriteModule(BCWriterState *s, JSValueConst obj)
     int i;
 
     bc_put_u8(s, BC_TAG_MODULE);
-    bc_put_atom(s, m->module_name);
+    if (!s->script) /* dasher: the reader is told the name */
+        bc_put_atom(s, m->module_name);
 
     bc_put_leb128(s, m->req_module_entries_count);
     for(i = 0; i < m->req_module_entries_count; i++) {
@@ -37814,6 +38019,10 @@ uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
     s->allow_reference = ((flags & JS_WRITE_OBJ_REFERENCE) != 0);
     s->allow_source = ((flags & JS_WRITE_OBJ_STRIP_SOURCE) == 0);
     s->allow_debug = ((flags & JS_WRITE_OBJ_STRIP_DEBUG) == 0);
+    /* dasher: a script for the embedder's cache keeps all of it */
+    s->script = ((flags & JS_WRITE_OBJ_SCRIPT) != 0);
+    if (s->script)
+        s->allow_source = s->allow_debug = true;
     /* XXX: could use a different version when bytecode is included */
     if (s->allow_bytecode)
         s->first_atom = JS_ATOM_END;
@@ -37877,6 +38086,12 @@ typedef struct BCReaderState {
     /* used for JS_DUMP_READ_OBJECT */
     const uint8_t *ptr_last;
     int level;
+    /* dasher: JS_READ_OBJ_SCRIPT: the script, its text once a function
+       needs it, and its file name */
+    bool script;
+    const JSScriptSource *src;
+    JSSourceText *script_text;
+    JSAtom filename;
 } BCReaderState;
 
 #ifdef ENABLE_DUMPS // JS_DUMP_READ_OBJECT
@@ -38239,6 +38454,207 @@ static int BC_add_object_ref(BCReaderState *s, JSValue obj)
     return BC_add_object_ref1(s, JS_VALUE_GET_OBJ(obj));
 }
 
+/* dasher: JS_READ_OBJ_SCRIPT: a function's text, as bc_put_script_source()
+   wrote it */
+static int bc_get_script_source(BCReaderState *s, JSFunctionBytecode *b)
+{
+    uint32_t len, off;
+
+    if (bc_get_leb128(s, &len))
+        return -1;
+    if (!len)
+        return 0;
+    if (bc_get_leb128(s, &off))
+        return -1;
+    if (off > s->src->len || len > s->src->len - off) {
+        JS_ThrowSyntaxError(s->ctx, "function text out of the script");
+        return -1;
+    }
+    if (!s->script_text) {
+        s->script_text = js_source_text_new(s->ctx, s->src);
+        if (!s->script_text)
+            return -1;
+    }
+    s->script_text->ref_count++;
+    b->source_text = s->script_text;
+    b->source = (char *)s->script_text->text + off;
+    b->source_len = len;
+    return 0;
+}
+
+static int bc_get_closure_vars(BCReaderState *s, JSFunctionBytecode *b)
+{
+    int i;
+    uint8_t v8;
+
+    for(i = 0; i < b->closure_var_count; i++) {
+        JSClosureVar *cv = &b->closure_var[i];
+        int var_idx, idx;
+        if (bc_get_atom(s, &cv->var_name))
+            return -1;
+        if (bc_get_leb128_int(s, &var_idx))
+            return -1;
+        cv->var_idx = var_idx;
+        if (bc_get_u8(s, &v8))
+            return -1;
+        idx = 0;
+        cv->is_local = bc_get_flags(v8, &idx, 1);
+        cv->is_arg = bc_get_flags(v8, &idx, 1);
+        cv->is_const = bc_get_flags(v8, &idx, 1);
+        cv->is_lexical = bc_get_flags(v8, &idx, 1);
+        cv->var_kind = bc_get_flags(v8, &idx, 4);
+    }
+    return 0;
+}
+
+/* dasher: a JSLazyRecord, as bc_put_lazy_record() wrote it */
+static JSLazyRecord *bc_get_lazy_record(BCReaderState *s, int depth)
+{
+    JSLazyRecord rr, *r = NULL;
+    uint32_t free_count, private_count, child_count, i, v;
+    int idx;
+    uint8_t v8;
+
+    memset(&rr, 0, sizeof(rr));
+    if (depth > 1000) {
+        JS_ThrowSyntaxError(s->ctx, "lazy records nested too deep");
+        return NULL;
+    }
+    if (bc_get_leb128(s, &rr.start) ||
+        bc_get_leb128(s, &rr.start_eol) ||
+        bc_get_leb128(s, &rr.start_mark) ||
+        bc_get_sleb128(s, &rr.start_line) ||
+        bc_get_leb128(s, &rr.end) ||
+        bc_get_leb128(s, &rr.end_eol) ||
+        bc_get_leb128(s, &rr.end_mark) ||
+        bc_get_sleb128(s, &rr.end_line) ||
+        bc_get_sleb128(s, &rr.last_line) ||
+        bc_get_sleb128(s, &rr.last_col) ||
+        bc_get_leb128(s, &rr.source_end) ||
+        bc_get_leb128(s, &v) ||
+        bc_get_u8(s, &v8) ||
+        bc_get_leb128(s, &free_count) ||
+        bc_get_leb128(s, &private_count))
+        return NULL;
+    if (rr.start > s->src->len || rr.start_eol > s->src->len ||
+        rr.start_mark > s->src->len || rr.end > s->src->len ||
+        rr.end_eol > s->src->len || rr.end_mark > s->src->len ||
+        rr.source_end > s->src->len || v > UINT16_MAX ||
+        free_count > s->buf_end - s->ptr ||
+        private_count > s->buf_end - s->ptr - free_count) {
+        JS_ThrowSyntaxError(s->ctx, "invalid lazy record");
+        return NULL;
+    }
+    rr.defined_arg_count = v;
+    idx = 0;
+    rr.got_lf = bc_get_flags(v8, &idx, 1);
+    rr.is_strict_mode = bc_get_flags(v8, &idx, 1);
+    rr.has_simple_parameter_list = bc_get_flags(v8, &idx, 1);
+    rr.is_module = bc_get_flags(v8, &idx, 1);
+    rr.parent_strict = bc_get_flags(v8, &idx, 1);
+    rr.has_assign = bc_get_flags(v8, &idx, 1);
+    r = js_mallocz(s->ctx, sizeof(*r) + (free_count + private_count) * sizeof(JSAtom));
+    if (!r)
+        return NULL;
+    memcpy(r, &rr, sizeof(*r));
+    /* the atoms not read yet are JS_ATOM_NULL, which frees as nothing */
+    r->free_count = free_count;
+    r->private_count = private_count;
+    for (i = 0; i < free_count + private_count; i++) {
+        if (bc_get_atom(s, &r->free[i]))
+            goto fail;
+    }
+    if (bc_get_leb128(s, &child_count))
+        goto fail;
+    if (child_count > s->buf_end - s->ptr) {
+        JS_ThrowSyntaxError(s->ctx, "invalid lazy record");
+        goto fail;
+    }
+    if (child_count) {
+        r->children = js_mallocz(s->ctx, child_count * sizeof(r->children[0]));
+        if (!r->children)
+            goto fail;
+        r->child_count = child_count;
+        for (i = 0; i < child_count; i++) {
+            if (bc_get_u8(s, &v8))
+                goto fail;
+            if (v8) {
+                r->children[i] = bc_get_lazy_record(s, depth + 1);
+                if (!r->children[i])
+                    goto fail;
+            }
+        }
+    }
+    return r;
+ fail:
+    js_lazy_record_free(s->ctx->rt, r);
+    return NULL;
+}
+
+/* dasher: the rest of a function JS_WriteLazyFunction() wrote; 'bc' has
+   what came before */
+static JSValue JS_ReadLazyFunction(BCReaderState *s, JSFunctionBytecode *bc)
+{
+    JSContext *ctx = s->ctx;
+    JSFunctionBytecode *b;
+    JSLazyInfo *li;
+    JSValue obj;
+    int closure_var_count, idx;
+    uint16_t defined_arg_count;
+    uint8_t v8;
+
+    if (bc_get_leb128_u16(s, &defined_arg_count) ||
+        bc_get_leb128_int(s, &closure_var_count))
+        goto fail0;
+    if (closure_var_count < 0 || closure_var_count > s->buf_end - s->ptr) {
+        JS_ThrowSyntaxError(ctx, "invalid closure");
+        goto fail0;
+    }
+    li = js_mallocz(ctx, sizeof(*li));
+    b = js_mallocz(ctx, sizeof(*b) + closure_var_count * sizeof(*b->closure_var));
+    if (!li || !b) {
+        js_free(ctx, li);
+        js_free(ctx, b);
+        goto fail0;
+    }
+    memcpy(b, bc, sizeof(*b));
+    bc->func_name = JS_ATOM_NULL;
+    b->header.ref_count = 1;
+    b->defined_arg_count = defined_arg_count;
+    b->closure_var_count = closure_var_count;
+    if (closure_var_count)
+        b->closure_var = (void *)(b + 1);
+    b->is_lazy = 1;
+    b->lazy = li;
+    b->filename = JS_DupAtom(ctx, s->filename);
+    b->realm = JS_DupContext(ctx);
+    add_gc_object(ctx->rt, &b->header, JS_GC_OBJ_TYPE_FUNCTION_BYTECODE);
+    obj = JS_MKPTR(JS_TAG_FUNCTION_BYTECODE, b);
+
+    if (bc_get_closure_vars(s, b) ||
+        bc_get_leb128_int(s, &b->line_num) ||
+        bc_get_leb128_int(s, &b->col_num) ||
+        bc_get_script_source(s, b) ||
+        bc_get_u8(s, &li->func_type) ||
+        bc_get_u8(s, &li->parent_func_kind) ||
+        bc_get_u8(s, &v8))
+        goto fail;
+    idx = 0;
+    li->is_func_expr = bc_get_flags(v8, &idx, 1);
+    li->parent_strict = bc_get_flags(v8, &idx, 1);
+    li->parent_static_init = bc_get_flags(v8, &idx, 1);
+    li->record = bc_get_lazy_record(s, 0);
+    if (!li->record)
+        goto fail;
+    return obj;
+ fail:
+    JS_FreeValue(ctx, obj);
+    return JS_EXCEPTION;
+ fail0:
+    JS_FreeAtom(ctx, bc->func_name);
+    return JS_EXCEPTION;
+}
+
 static JSValue JS_ReadFunctionTag(BCReaderState *s)
 {
     JSContext *ctx = s->ctx;
@@ -38246,7 +38662,7 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
     JSValue obj = JS_UNDEFINED;
     uint16_t v16;
     uint8_t v8;
-    int idx, i, local_count, has_debug_info;
+    int idx, i, local_count, has_debug_info, is_lazy;
     int function_size, cpool_offset, byte_code_offset;
     int closure_var_offset, vardefs_offset;
 
@@ -38268,11 +38684,19 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
     bc.arguments_allowed = bc_get_flags(v16, &idx, 1);
     bc.backtrace_barrier = bc_get_flags(v16, &idx, 1);
     has_debug_info = bc_get_flags(v16, &idx, 1);
+    is_lazy = bc_get_flags(v16, &idx, 1); /* dasher */
     if (bc_get_u8(s, &v8))
         goto fail;
     bc.is_strict_mode = (v8 > 0);
     if (bc_get_atom(s, &bc.func_name))
         goto fail;
+    if (is_lazy) {
+        if (!s->script) {
+            JS_ThrowSyntaxError(ctx, "function not compiled");
+            goto fail;
+        }
+        return JS_ReadLazyFunction(s, &bc);
+    }
     if (bc_get_leb128_u16(s, &bc.arg_count))
         goto fail;
     if (bc_get_leb128_u16(s, &bc.var_count))
@@ -38372,37 +38796,8 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
     }
     if (b->closure_var_count != 0) {
         bc_read_trace(s, "closure vars {\n");
-        bc_read_trace(s, "off  flags idx  name\n");
-        for(i = 0; i < b->closure_var_count; i++) {
-            JSClosureVar *cv = &b->closure_var[i];
-            int var_idx;
-            if (bc_get_atom(s, &cv->var_name))
-                goto fail;
-            if (bc_get_leb128_int(s, &var_idx))
-                goto fail;
-            cv->var_idx = var_idx;
-            if (bc_get_u8(s, &v8))
-                goto fail;
-            idx = 0;
-            cv->is_local = bc_get_flags(v8, &idx, 1);
-            cv->is_arg = bc_get_flags(v8, &idx, 1);
-            cv->is_const = bc_get_flags(v8, &idx, 1);
-            cv->is_lexical = bc_get_flags(v8, &idx, 1);
-            cv->var_kind = bc_get_flags(v8, &idx, 4);
-#ifdef ENABLE_DUMPS // JS_DUMP_READ_OBJECT
-            if (check_dump_flag(s->ctx->rt, JS_DUMP_READ_OBJECT)) {
-                bc_read_trace(s, "%3d  %d%c%c%c%c %3d  ",
-                              i, cv->var_kind,
-                              cv->is_local ? 'L' : '.',
-                              cv->is_arg ? 'A' : '.',
-                              cv->is_const ? 'C' : '.',
-                              cv->is_lexical ? 'X' : '.',
-                              cv->var_idx);
-                print_atom(s->ctx, cv->var_name);
-                printf("\n");
-            }
-#endif
-        }
+        if (bc_get_closure_vars(s, b)) /* dasher: shared with lazy stubs */
+            goto fail;
         bc_read_trace(s, "}\n");
     }
     if (b->cpool_count != 0) {
@@ -38427,7 +38822,9 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
 
     /* read optional debug information */
     bc_read_trace(s, "debug {\n");
-    if (bc_get_atom(s, &b->filename))
+    if (s->script) /* dasher: the file name is the caller's */
+        b->filename = JS_DupAtom(ctx, s->filename);
+    else if (bc_get_atom(s, &b->filename))
         goto fail;
     if (bc_get_leb128_int(s, &b->line_num))
         goto fail;
@@ -38450,9 +38847,13 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
         if (bc_get_buf(s, b->pc2line_buf, b->pc2line_len))
             goto fail;
     }
-    if (bc_get_leb128_int(s, &b->source_len))
+    if (s->script) {
+        /* dasher: a part of the script's text */
+        if (bc_get_script_source(s, b))
+            goto fail;
+    } else if (bc_get_leb128_int(s, &b->source_len))
         goto fail;
-    if (b->source_len) {
+    if (!s->script && b->source_len) {
         bc_read_trace(s, "source: %d bytes\n", b->source_len);
         if (s->ptr_last)
             s->ptr_last += b->source_len;  // omit source code hex dump
@@ -38484,7 +38885,9 @@ static JSValue JS_ReadModule(BCReaderState *s)
     int i;
     uint8_t v8;
 
-    if (bc_get_atom(s, &module_name))
+    if (s->script) /* dasher: the name is the caller's */
+        module_name = JS_DupAtom(ctx, s->filename);
+    else if (bc_get_atom(s, &module_name))
         goto fail;
 #ifdef ENABLE_DUMPS // JS_DUMP_READ_OBJECT
     if (check_dump_flag(s->ctx->rt, JS_DUMP_READ_OBJECT)) {
@@ -38675,7 +39078,10 @@ static JSValue JS_ReadArray(BCReaderState *s, int tag)
             if (ret < 0)
                 goto fail;
         }
-        JS_PreventExtensions(ctx, obj);
+        /* dasher: frozen as the parser leaves it (upstream only prevented
+           extensions, which leaves 'length' writable) */
+        if (seal_template_obj(ctx, obj))
+            goto fail;
     }
     return obj;
  fail:
@@ -39121,11 +39527,23 @@ JSValue JS_ReadObject2(JSContext *ctx, const uint8_t *buf, size_t buf_len,
         s->first_atom = JS_ATOM_END;
     else
         s->first_atom = 1;
+    /* dasher: a script from the embedder's cache (JS_SetScriptSource) */
+    if (flags & JS_READ_OBJ_SCRIPT) {
+        s->src = ctx->rt->script_source;
+        if (!s->src)
+            return JS_ThrowInternalError(ctx, "no script source set");
+        s->script = true;
+        s->filename = JS_NewAtom(ctx, s->src->filename ? s->src->filename : "");
+        if (s->filename == JS_ATOM_NULL)
+            return JS_EXCEPTION;
+    }
     if (JS_ReadObjectAtoms(s)) {
         obj = JS_EXCEPTION;
     } else {
         obj = JS_ReadObjectRec(s);
     }
+    JS_FreeAtom(ctx, s->filename);
+    js_source_text_release(ctx->rt, s->script_text);
     if (psab_tab) {
         psab_tab->tab = s->sab_tab;
         psab_tab->len = s->sab_tab_len;
