@@ -395,6 +395,6 @@ apply and arguments 391 to 301, concat.apply 865 to 518, Map/Set 284 to
 Object.keys 1317 to 552, and native DOM getters such as `nodeType` 89 to
 73. On the thirteen heavy recorded pages, five runs of each build
 alternating: 6.7% less CPU time summed over the pages (38.70 to
-36.10 s), 4 to 13% less on all but three, and peak RSS within the
+36.10 s), 5 to 13% less on nine of them, and peak RSS within the
 run-to-run spread (1252 to 1254 MiB summed). The tables are in
 `crates/bench/README.md`, "Language fast paths".
