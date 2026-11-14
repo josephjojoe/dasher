@@ -168,10 +168,10 @@ fn reserve_span() {
             continue;
         }
         let base = (raw as usize + SLAB - 1) & !(SLAB - 1);
-        // The length is published last and read first (see `in_span`), so
-        // a thread that sees it also sees the base it goes with.
+        // Callers hold the `REGIONS` lock, which orders these stores before
+        // any thread's loads in `in_span` (see `settle_span`).
         SPAN_BASE.store(base, Ordering::Relaxed);
-        SPAN_LEN.store(size, Ordering::Release);
+        SPAN_LEN.store(size, Ordering::Relaxed);
         return;
     }
 }
@@ -180,6 +180,17 @@ fn reserve_span() {
 const NORESERVE: libc::c_int = libc::MAP_NORESERVE;
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 const NORESERVE: libc::c_int = 0;
+
+/// Reserves the span if that has not been tried yet. Taking the lock also
+/// orders the span's base and length before anything this thread does
+/// next, which [`in_span`] relies on.
+fn settle_span() {
+    let mut regions = REGIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if !regions.tried {
+        regions.tried = true;
+        reserve_span();
+    }
+}
 
 /// Takes a region and makes it readable and writable. Its memory reads as
 /// zero. `None` when the span is used up or was never reserved.
@@ -276,11 +287,16 @@ unsafe fn system_usable(block: *mut c_void, asked: usize) -> usize {
 }
 
 /// Whether `ptr` is a slab block, as opposed to a system block.
+///
+/// Called only on threads that have made a [`SlabHeap`], whose `new`
+/// settles the span under the `REGIONS` lock first. That lock orders the
+/// span's base and length before these loads, so they need no ordering of
+/// their own: this runs on every allocation, free and size query.
 #[inline]
 fn in_span(ptr: *const u8) -> bool {
-    // Zero until the span is reserved, which makes every block a system
-    // block, as it then is.
-    let len = SPAN_LEN.load(Ordering::Acquire);
+    // Zero if the span could not be reserved, which makes every block a
+    // system block, as it then is.
+    let len = SPAN_LEN.load(Ordering::Relaxed);
     (ptr as usize).wrapping_sub(SPAN_BASE.load(Ordering::Relaxed)) < len
 }
 
@@ -326,6 +342,7 @@ pub(crate) struct SlabHeap {
 
 impl SlabHeap {
     pub(crate) fn new() -> Self {
+        settle_span();
         Self {
             avail: [ptr::null_mut(); CLASSES],
             pool: ptr::null_mut(),
@@ -337,7 +354,7 @@ impl SlabHeap {
     }
 
     /// Allocates `size` bytes, aligned to 16. Null on failure.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn alloc(&mut self, size: usize) -> *mut u8 {
         if size > MAX_SMALL {
             return self.alloc_large(size);
@@ -455,7 +472,7 @@ impl SlabHeap {
     /// # Safety
     ///
     /// `ptr` must be a live block from this heap.
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn free(&mut self, ptr: *mut u8) {
         if !in_span(ptr) {
             // SAFETY: a block outside the span is one of this heap's
@@ -551,6 +568,7 @@ impl SlabHeap {
         }
     }
 
+    #[cold]
     fn alloc_large(&mut self, size: usize) -> *mut u8 {
         let Some(total) = size.checked_add(LARGE_HEADER) else {
             return ptr::null_mut();
@@ -580,6 +598,7 @@ impl SlabHeap {
     /// # Safety
     ///
     /// `ptr` must be a live system block from this heap.
+    #[cold]
     unsafe fn free_large(&mut self, ptr: *mut u8) {
         // SAFETY: the header is in front of the block and the list holds
         // live system blocks.

@@ -51,6 +51,27 @@ given to dasher look into shadow trees.
 [COMPATIBILITY.md](COMPATIBILITY.md) lists the web APIs pages may expect that
 dasher does not support yet.
 
+## Bounded page loads
+
+dasher waits for a page to go quiet (by default, the network idle for
+500 ms; `--wait settled` also waits for the DOM to stop changing) under a
+virtual clock that skips ahead to the page's next timer instead
+of sleeping. Some pages never go quiet: carousels and tickers change the
+DOM on a timer forever, and some feeds fetch more as soon as the last
+batch arrives. Three budgets bound every load, and when one runs out the
+page is returned as it stands, as a success that says which budget ended
+it (`budget_exhausted` in the JSON output and the service's response,
+`Navigation::budget_exhausted` in the Rust API):
+
+| Budget | Default | CLI | Job field |
+| --- | --- | --- | --- |
+| Page time spent waiting for quiet: skipped, or idle on timers | 5 s | `--page-time-budget` | `page_time_budget_ms` |
+| CPU time for loading, settling and scrolling | 10 s | `--cpu-budget` | `cpu_budget_ms` |
+| Requests the page makes | 1000 | `--request-budget` | `request_budget` |
+
+Time spent waiting for the network or running scripts does not count as
+page time. `requestIdleCallback` work never holds a page open.
+
 ## Design
 
 dasher's own code covers the DOM, the event loop, the JS bindings, the page
@@ -68,6 +89,12 @@ crates:
 - **HTTP:** [hyper](https://crates.io/crates/hyper) with
   [rustls](https://crates.io/crates/rustls) (no OpenSSL), on
   [tokio](https://crates.io/crates/tokio).
+
+Compiled scripts are kept across pages in a bounded cache, keyed by a
+hash of each script's text (32 MiB by default, optionally on disk too),
+so a site visited again skips most of its compiling: 20% less CPU on
+heavy pages from the third visit. See
+[crates/bench/README.md](crates/bench/README.md#the-script-cache).
 
 Data structures favour compactness: arena/index-based nodes, interned names,
 no per-node reference counting. Each `Page` owns its JS runtime and DOM, and

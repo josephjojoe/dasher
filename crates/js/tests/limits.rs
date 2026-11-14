@@ -172,3 +172,38 @@ fn every_document_of_the_page_gets_the_limit() {
     );
     assert!(js.eval_json("1").is_err());
 }
+
+#[test]
+fn a_catastrophic_regexp_is_stopped_by_the_deadline() {
+    // Each takes far longer than a second to fail; the matcher's own loops
+    // and dasher's (see vendor/rquickjs-sys/PATCHES.md) must still let the
+    // deadline through.
+    let patterns = [
+        // nested repeats, through the one-character loop and the back-off
+        "/(a+)+$/.test(s)",
+        "/(?:a|aa)+$/.test(s)",
+        "/^(\\w+\\s?)*$/.test(s + ' !')",
+        // a required character that is there, and runs of a leading repeat
+        "/[a-z]+@(?:a|aa)+$/.test('x@' + s)",
+        "(s + 'b!').replace(/(a*)*b$/g, '')",
+        "s.replace(/a/g, 'x').split(/(x+x+)+y/)",
+        // a two-character start, with the `i` flag
+        "/(?:aa|ab)(?:a|aa)+$/i.test(s)",
+    ];
+    for pattern in patterns {
+        let js = page(RuntimeOptions::default());
+        js.run_script("var s = 'a'.repeat(40) + '!';", "a.js")
+            .unwrap();
+        js.set_deadline(Some(
+            std::time::Instant::now() + std::time::Duration::from_millis(50),
+        ));
+        let started = std::time::Instant::now();
+        let error = js.run_script(pattern, "b.js").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Interrupted, "{pattern}: {error:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{pattern} ran {:?} past its deadline",
+            started.elapsed()
+        );
+    }
+}

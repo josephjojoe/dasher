@@ -237,6 +237,8 @@ async fn churn_while_loading_and_after_stays_within_the_limit() {
             selector: None,
             predicate: Some("n >= 20000".into()),
             timeout: Duration::from_secs(120),
+            // Let the clock skip through every tick.
+            page_time_budget: None,
         })
         .await
         .unwrap();

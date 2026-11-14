@@ -6,6 +6,7 @@
 //! Every change to the tree goes through the mutation functions here, which
 //! keep the wrapper groups in step (see the `dom` module docs).
 
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use dasher_dom::{AdjacentPosition, Document, DomError, Name, NodeId, NodeKind, QuirksMode};
@@ -13,9 +14,10 @@ use rquickjs::function::IntoJsFunc;
 use rquickjs::{Array, Class, Ctx, Function, IntoJs, Object, Result, Value, qjs};
 
 use super::DomState;
-use super::collection::{Collection, CollectionObject, Filter};
+use super::collection::Filter;
 use super::inner_text::inner_text;
 use super::layout;
+use super::lists;
 use super::mutation::deliver;
 use super::wrapper::{self, DomData, Move, Node, after_insert, after_remove, plan_insert, wrap};
 
@@ -92,7 +94,7 @@ fn wrap_all<'js>(ctx: &Ctx<'js>, dom: &Rc<DomState>, ids: &[NodeId]) -> Result<V
 
 /// Whether an element name is acceptable to `createElement`: the XML
 /// `Name` rules, loosely (non-ASCII characters are all allowed).
-fn valid_element_name(name: &str) -> bool {
+pub(super) fn valid_element_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -115,12 +117,12 @@ pub(super) fn valid_attribute_name(name: &str) -> bool {
 }
 
 /// Lower-cases `name` if `id` is an HTML element, as attribute and tag name
-/// lookups do in HTML documents.
-fn html_lower(doc: &Document, id: NodeId, name: &str) -> String {
-    if doc.namespace(id) == Some(Name::NS_HTML) {
-        name.to_ascii_lowercase()
+/// lookups do in HTML documents. Only copies a name that has upper case.
+pub(super) fn html_lower<'a>(doc: &Document, id: NodeId, name: &'a str) -> Cow<'a, str> {
+    if doc.namespace(id) == Some(Name::NS_HTML) && name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
     } else {
-        name.to_owned()
+        Cow::Borrowed(name)
     }
 }
 
@@ -187,13 +189,16 @@ fn is_loading_link(doc: &Document, node: NodeId) -> bool {
 
 /// The nodes `node` stands for when inserted: a fragment's children, or
 /// `node` itself.
-fn nodes_to_insert(doc: &Document, node: NodeId) -> Vec<NodeId> {
+fn nodes_to_insert(doc: &Document, node: NodeId) -> Moved {
     if doc.kind(node) == NodeKind::DocumentFragment {
         doc.children(node).collect()
     } else {
-        vec![node]
+        smallvec::smallvec![node]
     }
 }
+
+/// The nodes an insertion moves: one, unless a fragment's children.
+type Moved = smallvec::SmallVec<[NodeId; 1]>;
 
 /// Where a node is now: its parent and siblings, if it has a parent.
 type Place = (NodeId, Option<NodeId>, Option<NodeId>);
@@ -248,7 +253,7 @@ fn insert_into(
     node: NodeId,
     before: Option<NodeId>,
     record: bool,
-) -> std::result::Result<Vec<NodeId>, DomError> {
+) -> std::result::Result<Moved, DomError> {
     let plan = plan_insert(doc, parent, node);
     let moved = nodes_to_insert(doc, node);
     let old = place(doc, node);
@@ -270,7 +275,7 @@ fn insert_into(
 }
 
 /// `parent.insertBefore(node, before)`. Returns the scripts it connected.
-fn insert(
+pub(super) fn insert(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     parent: NodeId,
@@ -287,7 +292,7 @@ fn insert(
 }
 
 /// Detaches `node` from its parent, if it has one.
-fn detach(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId) -> Result<()> {
+pub(super) fn detach(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         let Some((parent, prev, next)) = place(&doc, node) else {
@@ -319,7 +324,7 @@ fn remove_children(
     old
 }
 
-fn replace_child(
+pub(super) fn replace_child(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     parent: NodeId,
@@ -375,7 +380,7 @@ fn replace_child(
 }
 
 /// `replaceChildren`: replaces all of `parent`'s children with `node`.
-fn replace_all(
+pub(super) fn replace_all(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     parent: NodeId,
@@ -392,10 +397,9 @@ fn replace_all(
         dom.bump();
         let added = match node {
             Some(node) => insert_into(ctx, dom, &mut doc, parent, node, None, false),
-            None => Ok(Vec::new()),
+            None => Ok(Moved::new()),
         };
-        let none = Vec::new();
-        let inserted = added.as_ref().unwrap_or(&none);
+        let inserted: &[NodeId] = added.as_deref().unwrap_or(&[]);
         dom.child_list(&doc, parent, inserted, &removed, None, None);
         added.map(|moved| connected_scripts(&doc, &moved))
     };
@@ -403,7 +407,12 @@ fn replace_all(
     result.map_err(|e| dom_error(ctx, e))
 }
 
-fn set_text_content(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, text: &str) -> Result<()> {
+pub(super) fn set_text_content(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    node: NodeId,
+    text: &str,
+) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         match doc.kind(node) {
@@ -438,7 +447,12 @@ fn set_data(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, data: &str) -> Resu
     deliver(ctx, dom)
 }
 
-fn set_inner_html(ctx: &Ctx<'_>, dom: &Rc<DomState>, node: NodeId, html: &str) -> Result<()> {
+pub(super) fn set_inner_html(
+    ctx: &Ctx<'_>,
+    dom: &Rc<DomState>,
+    node: NodeId,
+    html: &str,
+) -> Result<()> {
     {
         let mut doc = dom.doc_mut();
         let target = doc.template_contents(node).unwrap_or(node);
@@ -502,6 +516,19 @@ fn insert_adjacent_html(
     };
     deliver(ctx, dom)?;
     result.map_err(|e| dom_error(ctx, e))
+}
+
+/// A copy of `n` (with its descendants if `deep`), which belongs to `n`'s
+/// node document.
+pub(super) fn clone_into_owner(
+    dom: &DomState,
+    doc: &mut Document,
+    n: NodeId,
+    deep: bool,
+) -> NodeId {
+    let copy = doc.clone_node(n, deep);
+    dom.set_owner(doc, copy, dom.owner_document(doc, n));
+    copy
 }
 
 /// `Node.normalize()`: drops empty text nodes and merges runs of adjacent
@@ -582,14 +609,23 @@ pub(super) fn set_attr(
     {
         let mut doc = dom.doc_mut();
         let name = html_lower(&doc, n, name);
-        let (ns, local, old) = match attr_by_qualified_name(&doc, n, &name) {
-            Some((ns, local, old)) => (ns, local.to_owned(), Some(old.to_owned())),
-            None => (Name::EMPTY, name.clone(), None),
+        // What a custom element's `attributeChangedCallback` gets, copied
+        // only for custom elements; a mutation record copies what it needs.
+        let reaction = {
+            let found = attr_by_qualified_name(&doc, n, &name);
+            let (ns, local, old) = match found {
+                Some((ns, local, old)) => (ns, local, Some(old)),
+                None => (Name::EMPTY, &*name, None),
+            };
+            dom.attribute(&doc, n, ns, local, old);
+            dom.is_custom(n)
+                .then(|| (ns, local.to_owned(), old.map(str::to_owned)))
         };
-        dom.attribute(&doc, n, ns, &local, old.as_deref());
         doc.set_attribute(n, &name, value);
         dom.bump();
-        dom.ce_attribute(&doc, n, ns, &local, old.as_deref(), Some(value));
+        if let Some((ns, local, old)) = reaction {
+            dom.ce_attribute(&doc, n, ns, &local, old.as_deref(), Some(value));
+        }
     }
     deliver(ctx, dom)
 }
@@ -603,16 +639,19 @@ pub(super) fn remove_attr(
     let removed = {
         let mut doc = dom.doc_mut();
         let name = html_lower(&doc, n, name);
-        let found = attr_by_qualified_name(&doc, n, &name)
-            .map(|(ns, local, old)| (ns, local.to_owned(), old.to_owned()));
-        if let Some((ns, local, old)) = &found {
-            dom.attribute(&doc, n, *ns, local, Some(old));
-        }
+        let reaction = match attr_by_qualified_name(&doc, n, &name) {
+            None => return Ok(false),
+            Some((ns, local, old)) => {
+                dom.attribute(&doc, n, ns, local, Some(old));
+                dom.is_custom(n)
+                    .then(|| (ns, local.to_owned(), old.to_owned()))
+            }
+        };
         let removed = doc.remove_attribute(n, &name);
         if removed {
             dom.bump();
         }
-        if let Some((ns, local, old)) = &found {
+        if let Some((ns, local, old)) = &reaction {
             dom.ce_attribute(&doc, n, *ns, local, Some(old), None);
         }
         removed
@@ -621,7 +660,7 @@ pub(super) fn remove_attr(
     Ok(removed)
 }
 
-fn set_attr_ns(
+pub(super) fn set_attr_ns(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     n: NodeId,
@@ -643,7 +682,7 @@ fn set_attr_ns(
     deliver(ctx, dom)
 }
 
-fn remove_attr_ns(
+pub(super) fn remove_attr_ns(
     ctx: &Ctx<'_>,
     dom: &Rc<DomState>,
     n: NodeId,
@@ -763,10 +802,6 @@ fn unproxy<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Value<'js> {
             value
         }
     }
-}
-
-fn collection<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<CollectionObject<'js>> {
-    Class::from_value(&unproxy(ctx, value))
 }
 
 fn selector_error(ctx: &Ctx<'_>, selector: &str) -> rquickjs::Error {
@@ -1036,13 +1071,7 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         "clone",
         move |ctx: Ctx<'js>, n: Node<'js>, deep: bool| -> Result<Node<'js>> {
             let n = id(&ctx, &n)?;
-            let copy = {
-                let mut doc = d.doc_mut();
-                let copy = doc.clone_node(n, deep);
-                // A copy belongs to the original's document.
-                d.set_owner(&doc, copy, d.owner_document(&doc, n));
-                copy
-            };
+            let copy = clone_into_owner(&d, &mut d.doc_mut(), n, deep);
             wrap(&ctx, &d, copy)
         },
     )?;
@@ -1585,8 +1614,9 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
               kind: u32,
               a: Option<String>,
               b: Option<String>,
-              proto: Object<'js>|
-              -> Result<CollectionObject<'js>> {
+              proto: Object<'js>,
+              named: bool|
+              -> Result<Value<'js>> {
             let filter = match kind {
                 0 => Filter::ChildNodes,
                 1 => Filter::Children,
@@ -1602,7 +1632,7 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
                     Filter::Selector(list)
                 }
             };
-            Class::instance_proto(Collection::new(root, filter), proto)
+            lists::new_collection(&ctx, &root, filter, &proto, named)
         },
     )?;
     let d = Rc::clone(dom);
@@ -1610,10 +1640,8 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "collLength",
         move |ctx: Ctx<'js>, c: Value<'js>| -> Result<usize> {
-            let c = collection(&ctx, c)?;
-            let c = c.borrow();
-            let root = id(&ctx, &c.root)?;
-            Ok(c.ids(&d.doc(), root, d.version()).len())
+            let (list, root) = lists::list_value(&ctx, &c)?;
+            Ok(list.ids(&d, &d.doc(), root).len())
         },
     )?;
     let d = Rc::clone(dom);
@@ -1621,11 +1649,9 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "collItem",
         move |ctx: Ctx<'js>, c: Value<'js>, i: f64| -> Result<Value<'js>> {
-            let c = collection(&ctx, c)?;
             let item = {
-                let c = c.borrow();
-                let root = id(&ctx, &c.root)?;
-                let ids = c.ids(&d.doc(), root, d.version());
+                let (list, root) = lists::list_value(&ctx, &c)?;
+                let ids = list.ids(&d, &d.doc(), root);
                 (i >= 0.0 && i.fract() == 0.0)
                     .then(|| ids.get(i as usize).copied())
                     .flatten()
@@ -1638,46 +1664,32 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "collNamed",
         move |ctx: Ctx<'js>, c: Value<'js>, name: String| -> Result<Value<'js>> {
-            let c = collection(&ctx, c)?;
             let item = {
-                let c = c.borrow();
-                let root = id(&ctx, &c.root)?;
+                let (list, root) = lists::list_value(&ctx, &c)?;
                 let doc = d.doc();
-                let ids = c.ids(&doc, root, d.version());
-                ids.iter().copied().find(|&n| {
-                    !name.is_empty()
-                        && (doc.element_id(n) == Some(name.as_str())
-                            || (doc.namespace(n) == Some(Name::NS_HTML)
-                                && doc.attribute_named(n, Name::NAME) == Some(name.as_str())))
-                })
+                let ids = list.ids(&d, &doc, root);
+                lists::named_item(&doc, &ids, &name)
             };
             wrap_opt(&ctx, &d, item)
         },
     )?;
-    let d = Rc::clone(dom);
+    // The element whose attributes a `NamedNodeMap` is.
     def(
         obj,
-        "collNames",
-        move |ctx: Ctx<'js>, c: Value<'js>| -> Result<Vec<String>> {
-            let c = collection(&ctx, c)?;
-            let c = c.borrow();
-            let root = id(&ctx, &c.root)?;
-            let doc = d.doc();
-            let mut names: Vec<String> = Vec::new();
-            for &n in c.ids(&doc, root, d.version()).iter() {
-                let candidates = [
-                    doc.element_id(n),
-                    (doc.namespace(n) == Some(Name::NS_HTML))
-                        .then(|| doc.attribute_named(n, Name::NAME))
-                        .flatten(),
-                ];
-                for name in candidates.into_iter().flatten() {
-                    if !name.is_empty() && !names.iter().any(|x| x == name) {
-                        names.push(name.to_owned());
-                    }
-                }
+        "mapOwner",
+        |ctx: Ctx<'js>, map: Value<'js>| -> Result<Value<'js>> {
+            let (list, _) = lists::list_value(&ctx, &map)?;
+            if !list.is_attributes() {
+                return Err(rquickjs::Exception::throw_type(&ctx, "Illegal invocation"));
             }
-            Ok(names)
+            // SAFETY: `list` lives in `map`, which is alive; the `Value` takes a
+            // new reference to its owner.
+            Ok(unsafe {
+                Value::from_raw(
+                    ctx.clone(),
+                    qjs::JS_DupValue(ctx.as_raw().as_ptr(), list.owner()),
+                )
+            })
         },
     )?;
     Ok(())

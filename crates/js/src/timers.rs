@@ -1,7 +1,12 @@
-//! Bookkeeping for `setTimeout` / `setInterval`.
+//! Bookkeeping for `setTimeout` / `setInterval`, and for the timers behind
+//! `requestIdleCallback`.
 //!
 //! Only ids and due times live here; the callbacks stay on the JS side, keyed
 //! by the same ids.
+//!
+//! Idle timers run when they are due, like any other, but do not hold the
+//! page open: a page whose only timers are idle ones counts as having
+//! nothing left to do.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
@@ -22,6 +27,8 @@ struct Timer {
     interval: Option<Duration>,
     /// The nesting level of the task that runs this timer.
     nesting: u32,
+    /// An idle timer, kept in `Timers::idle_queue`.
+    idle: bool,
 }
 
 /// What a timer needs to run.
@@ -37,7 +44,11 @@ pub(crate) struct Timers {
     seq: u64,
     /// Scheduled timers ordered by due time, then by scheduling order.
     queue: BTreeSet<(Duration, u64, TimerId)>,
+    /// The same for idle timers.
+    idle_queue: BTreeSet<(Duration, u64, TimerId)>,
     timers: HashMap<TimerId, Timer>,
+    /// How many of `timers` are idle timers.
+    idle_count: usize,
 }
 
 impl Timers {
@@ -50,13 +61,37 @@ impl Timers {
         repeat: bool,
         nesting: u32,
     ) -> TimerId {
+        self.insert_timer(now, timeout, repeat, nesting, false)
+    }
+
+    /// Schedules an idle timer `timeout` after `now`: one that runs when
+    /// due but does not count as work left (see the module docs).
+    pub(crate) fn insert_idle(
+        &mut self,
+        now: Duration,
+        timeout: Duration,
+        nesting: u32,
+    ) -> TimerId {
+        self.insert_timer(now, timeout, false, nesting, true)
+    }
+
+    fn insert_timer(
+        &mut self,
+        now: Duration,
+        timeout: Duration,
+        repeat: bool,
+        nesting: u32,
+        idle: bool,
+    ) -> TimerId {
         let id = self.next_id();
         let timer = Timer {
             key: None,
             interval: repeat.then_some(timeout),
             nesting,
+            idle,
         };
         self.timers.insert(id, timer);
+        self.idle_count += usize::from(idle);
         self.schedule(id, now, timeout);
         id
     }
@@ -83,29 +118,60 @@ impl Timers {
         self.seq += 1;
         let key = (now + timeout, self.seq);
         timer.key = Some(key);
-        self.queue.insert((key.0, key.1, id));
+        let queue = if timer.idle {
+            &mut self.idle_queue
+        } else {
+            &mut self.queue
+        };
+        queue.insert((key.0, key.1, id));
     }
 
     /// Cancels a timer. Unknown ids are ignored.
     pub(crate) fn remove(&mut self, id: TimerId) {
-        if let Some(Timer { key: Some(key), .. }) = self.timers.remove(&id) {
-            self.queue.remove(&(key.0, key.1, id));
+        if let Some(timer) = self.timers.remove(&id) {
+            self.forget(&timer);
+            if let Some(key) = timer.key {
+                self.queue.remove(&(key.0, key.1, id));
+                self.idle_queue.remove(&(key.0, key.1, id));
+            }
         }
     }
 
-    /// When the earliest scheduled timer is due.
+    fn forget(&mut self, timer: &Timer) {
+        self.idle_count -= usize::from(timer.idle);
+    }
+
+    /// When the earliest scheduled timer is due, idle timers included.
     pub(crate) fn next_due(&self) -> Option<Duration> {
+        let due = |queue: &BTreeSet<(Duration, u64, TimerId)>| queue.first().map(|&(d, _, _)| d);
+        match (due(&self.queue), due(&self.idle_queue)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// When the earliest timer that holds the page open (not an idle
+    /// timer) is due.
+    pub(crate) fn next_holding_due(&self) -> Option<Duration> {
         self.queue.first().map(|&(due, _, _)| due)
     }
 
     /// Takes the earliest timer due at or before `now` off the schedule,
     /// leaving it to be queued as a task.
     pub(crate) fn pop_due(&mut self, now: Duration) -> Option<TimerId> {
-        let &(due, _, id) = self.queue.first()?;
+        let first = match (self.queue.first(), self.idle_queue.first()) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return None,
+        };
+        let entry @ (due, _, id) = *first;
         if due > now {
             return None;
         }
-        self.queue.pop_first();
+        if !self.queue.remove(&entry) {
+            self.idle_queue.remove(&entry);
+        }
         if let Some(timer) = self.timers.get_mut(&id) {
             timer.key = None;
         }
@@ -125,7 +191,9 @@ impl Timers {
             nesting: timer.nesting,
         };
         if !fire.repeat {
-            self.timers.remove(&id);
+            if let Some(timer) = self.timers.remove(&id) {
+                self.forget(&timer);
+            }
         }
         Some(fire)
     }
@@ -138,12 +206,15 @@ impl Timers {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.timers.is_empty()
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.timers.len()
+    /// The number of timers that hold the page open: every live timer but
+    /// the idle ones.
+    pub(crate) fn holding(&self) -> usize {
+        self.timers.len() - self.idle_count
     }
 }
 
@@ -239,6 +310,30 @@ mod tests {
         // Long timeouts are unaffected.
         t.insert(ms(0), ms(50), false, 9);
         assert_eq!(t.next_due(), Some(ms(50)));
+    }
+
+    #[test]
+    fn idle_timers_run_in_order_but_hold_nothing_open() {
+        let mut t = Timers::default();
+        let idle = t.insert_idle(ms(0), ms(10), 0);
+        assert_eq!(t.holding(), 0);
+        assert_eq!(t.next_due(), Some(ms(10)));
+        assert_eq!(t.next_holding_due(), None);
+        let a = t.insert(ms(0), ms(20), false, 0);
+        let b = t.insert(ms(0), ms(5), false, 0);
+        assert_eq!(t.holding(), 2);
+        assert_eq!(t.next_holding_due(), Some(ms(5)));
+        assert_eq!(drain(&mut t, ms(30)), [b, idle, a]);
+        for id in [a, b, idle] {
+            t.start(id);
+        }
+        assert!(t.is_empty());
+        assert_eq!(t.holding(), 0);
+
+        let idle = t.insert_idle(ms(0), ms(10), 0);
+        t.remove(idle);
+        assert!(t.is_empty());
+        assert_eq!((t.holding(), t.next_due()), (0, None));
     }
 
     #[test]

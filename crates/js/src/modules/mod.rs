@@ -625,11 +625,50 @@ fn finish_preload(ctx: &Ctx<'_>, id: u32, link: NodeId) -> rquickjs::Result<()> 
 // ---------------------------------------------------------------------------
 // QuickJS hooks.
 
-/// Compiles `source` as the module `name` and sets its `import.meta`.
-/// Returns null with an exception pending if it does not compile.
+/// Compiles `source` as the module `name` (or reads it from the script
+/// cache) and sets its `import.meta`. Returns null with an exception
+/// pending if it does not compile.
 fn compile(
     ctx: &Ctx<'_>,
     shared: &Rc<Shared>,
+    name: &str,
+    source: &mut String,
+) -> rquickjs::Result<NonNull<qjs::JSModuleDef>> {
+    let raw = ctx.as_raw().as_ptr();
+    let cached = shared
+        .scripts
+        .as_ref()
+        .and_then(|scripts| scripts.compile_module(ctx, source, name));
+    let module = match cached {
+        Some(module) => module?,
+        None => compile_text(ctx, name, source)?,
+    };
+    // SAFETY: `module` was just compiled in this context and is alive in
+    // its module list. `JS_GetImportMeta` returns an owned value (or an
+    // exception), which `Value::from_raw` takes over.
+    let meta = unsafe { Value::from_raw(ctx.clone(), qjs::JS_GetImportMeta(raw, module.as_ptr())) };
+    let meta = meta.into_object().ok_or(rquickjs::Error::Exception)?;
+    let base = base_url_of(shared, name);
+    meta.set("url", base.as_str())?;
+    let s = Rc::clone(shared);
+    meta.set(
+        "resolve",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>, specifier: Coerced<String>| -> rquickjs::Result<String> {
+                let map = s.modules.import_map.borrow();
+                map.resolve(&specifier, &base)
+                    .map(String::from)
+                    .map_err(|message| throw_type(&ctx, &message))
+            },
+        )?,
+    )?;
+    Ok(module)
+}
+
+/// Compiles `source` as the module `name`, from its text.
+fn compile_text(
+    ctx: &Ctx<'_>,
     name: &str,
     source: &mut String,
 ) -> rquickjs::Result<NonNull<qjs::JSModuleDef>> {
@@ -660,28 +699,7 @@ fn compile(
         }
     };
     source.pop();
-    let module = module.ok_or(rquickjs::Error::Exception)?;
-    // SAFETY: `module` was just compiled in this context and is alive in
-    // its module list. `JS_GetImportMeta` returns an owned value (or an
-    // exception), which `Value::from_raw` takes over.
-    let meta = unsafe { Value::from_raw(ctx.clone(), qjs::JS_GetImportMeta(raw, module.as_ptr())) };
-    let meta = meta.into_object().ok_or(rquickjs::Error::Exception)?;
-    let base = base_url_of(shared, name);
-    meta.set("url", base.as_str())?;
-    let s = Rc::clone(shared);
-    meta.set(
-        "resolve",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, specifier: Coerced<String>| -> rquickjs::Result<String> {
-                let map = s.modules.import_map.borrow();
-                map.resolve(&specifier, &base)
-                    .map(String::from)
-                    .map_err(|message| throw_type(&ctx, &message))
-            },
-        )?,
-    )?;
-    Ok(module)
+    module.ok_or(rquickjs::Error::Exception)
 }
 
 /// QuickJS's module loader: compiles the module `name` from the module

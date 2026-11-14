@@ -266,8 +266,10 @@ dependencies = [
  "memchr",
  "ring",
  "rquickjs",
+ "smallvec",
  "tokio",
  "url",
+ "zstd",
 ]
 
 [[package]]

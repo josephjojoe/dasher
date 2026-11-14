@@ -60,9 +60,29 @@ static ALLOCATOR: Counting = Counting;
 
 const JOBS: usize = 100;
 
+/// A bundle long enough for the script cache: many functions, of which the
+/// page calls some.
+fn bundle() -> String {
+    let mut js = String::from("var lib = (function () {\n  var api = {};\n");
+    for i in 0..300 {
+        js.push_str(&format!(
+            "  api.f{i} = function (x) {{ var s = 0; for (var k = 0; k < x; k++) s += k * {i}; return s + '{i}'; }};\n"
+        ));
+    }
+    js.push_str("  return api;\n})();\n");
+    js.push_str("document.getElementById('out').textContent = [lib.f1(3), lib.f50(2), lib.f299(1)].join();\n");
+    js
+}
+
 fn server() -> FixtureServer {
     FixtureServer::builder()
         .root(fixtures_dir!())
+        .route("/bundle.html", |_| {
+            FixtureResponse::html(r#"<p id="out"></p><script src="/bundle.js"></script>"#)
+        })
+        .route("/bundle.js", |_| {
+            FixtureResponse::ok("text/javascript", bundle())
+        })
         .route("/api/products", |_| {
             FixtureResponse::json(
                 r#"[{"id":1,"name":"Kettle","price":25},{"id":2,"name":"Toaster","price":40}]"#,
@@ -104,9 +124,10 @@ fn sequential_jobs_do_not_grow_the_heap() {
     runtime.block_on(async {
         for job in 0..JOBS {
             let mut page = browser.new_page();
-            // A client-rendered page, an infinite feed and a static one in
-            // turn, each read the ways a scraper would.
-            match job % 3 {
+            // A client-rendered page, an infinite feed, a static one and one
+            // with a bundle the script cache keeps, in turn, each read the
+            // ways a scraper would.
+            match job % 4 {
                 0 => {
                     page.goto(&server.url("/spa.html")).await.unwrap();
                     assert_eq!(page.count(".product").unwrap(), 2);
@@ -122,8 +143,12 @@ fn sequential_jobs_do_not_grow_the_heap() {
                         .unwrap();
                     assert!(page.count("article").unwrap() > 5);
                 }
-                _ => {
+                2 => {
                     page.goto(&server.url("/hop.html")).await.unwrap();
+                }
+                _ => {
+                    page.goto(&server.url("/bundle.html")).await.unwrap();
+                    assert_eq!(page.text("#out").unwrap().as_deref(), Some("31,5050,0299"));
                 }
             }
             assert!(!page.content().is_empty());
@@ -133,8 +158,19 @@ fn sequential_jobs_do_not_grow_the_heap() {
         }
     });
 
-    // Connection pools and caches fill up during the first jobs (here, by
-    // about the tenth); after that, each job must give back what it took.
+    // The bundle was compiled once, written to the script cache, and read
+    // back by every later job that loaded it.
+    let stats = browser.script_cache().unwrap().stats();
+    assert_eq!(
+        (stats.misses, stats.hits),
+        (1, JOBS as u64 / 4 - 1),
+        "{stats:?}"
+    );
+    assert!(stats.bytes > bundle().len(), "{stats:?}");
+
+    // Connection pools and caches (the script cache among them) fill up
+    // during the first jobs (here, by about the tenth); after that, each
+    // job must give back what it took.
     let warm = live[19];
     let last = live[JOBS - 1];
     eprintln!("live Rust heap after job 20: {warm} bytes, after job {JOBS}: {last} bytes");

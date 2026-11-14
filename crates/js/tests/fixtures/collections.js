@@ -17,5 +17,14 @@
   const w = new WeakMap(objs.map((o, i) => [o, i]));
   return [[...m.keys()].join(','), m.get(0), m.get(NaN), m.get('3'), m.get(3), m.get(2147483648),
     m.get(1.5), m.size, s.size, [...s].map((o) => o.i).join(','),
-    objs.every((o, i) => w.get(o) === i), s.has(objs[1]), s.has(objs[0]), s.has({})];
+    objs.every((o, i) => w.get(o) === i), s.has(objs[1]), s.has(objs[0]), s.has({}),
+    // Ints and the same numbers as doubles, and symbols (see the
+    // same-value-zero shortcut in map_find_record, PATCHES.md).
+    ...(() => {
+      const mixed = new Map([[2, 'int two'], [Math.sqrt(16) / 2 + 0.5 - 0.5, 'double two?'], [0.1 + 0.2, 'f']]);
+      const sym = Symbol('k'), sym2 = Symbol('k');
+      const ss = new Set([sym, 1, 1.0, 2 ** 53, -0, 0]);
+      return [mixed.size, mixed.get(2), mixed.get(4 / 2), mixed.get(0.3), mixed.get(0.1 + 0.2), ss.size, ss.has(sym), ss.has(sym2),
+        ss.has(0), ss.has(-0), ss.has(2 ** 53), ss.has(2 ** 53 + 1), new Map([[NaN, 1]]).has(0 / 0)];
+    })()];
 })()

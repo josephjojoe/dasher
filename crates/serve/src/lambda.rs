@@ -51,6 +51,11 @@ pub struct LambdaConfig {
     pub block_private_addresses: bool,
     /// Whether to log a line to stderr per job.
     pub log: bool,
+    /// Compiled scripts kept for later invocations of a warm instance (see
+    /// [`Config::script_cache`](crate::Config::script_cache)). Give it a
+    /// directory under `/tmp` to keep them across cold starts of an
+    /// instance's sandbox too.
+    pub script_cache: Option<dasher::ScriptCache>,
 }
 
 impl Default for LambdaConfig {
@@ -61,6 +66,9 @@ impl Default for LambdaConfig {
             blocked: RunOptions::default().blocked,
             block_private_addresses: true,
             log: true,
+            script_cache: Some(dasher::ScriptCache::new(
+                dasher::ScriptCacheOptions::default(),
+            )),
         }
     }
 }
@@ -78,6 +86,7 @@ pub async fn run_lambda(api: &str, config: LambdaConfig) -> io::Result<()> {
         deadline: None,
         blocked: config.blocked,
         block_private_addresses: config.block_private_addresses,
+        script_cache: config.script_cache,
     };
     // Pages must not reach the Runtime API and answer for us.
     options.blocked.push(format!("*://{api}/*"));

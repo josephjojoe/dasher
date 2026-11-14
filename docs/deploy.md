@@ -158,6 +158,13 @@ Notes:
   invocation with `Dasher.ResponseRejected`.
 - **Memory.** More memory also buys more CPU on Lambda, which shortens
   script-heavy pages; 1024 MB is a reasonable start.
+- **Script cache.** A warm instance keeps the scripts its jobs compiled
+  (see [Sizing and limits](#sizing-and-limits)) for the invocations that
+  follow. Set `DASHER_SCRIPT_CACHE_DIR` to keep them on disk as well: in
+  `/tmp`, they outlive a restart of the runtime process within the same
+  sandbox; in a directory baked into the container image (filled by
+  running the image's jobs once at build time), every cold start begins
+  with them. A directory it cannot write to is only read.
 
 ## Jobs
 
@@ -167,11 +174,14 @@ error, so typos don't go unnoticed.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `url` | (required) | The `http(s)` URL to load. |
-| `wait` | `"settled"` | When the page counts as loaded: `"load"`, `"network-idle"`, `"network-idle2"` (≤ 2 requests), `"dom-quiet"`, or `"settled"` (network idle and DOM quiet). |
+| `wait` | `"network-idle"` | When the page counts as loaded: `"load"`, `"network-idle"` (no requests for the quiet period), `"network-idle2"` (≤ 2 requests), `"dom-quiet"`, or `"settled"` (network idle and DOM quiet). |
 | `quiet_ms` | `500` | The quiet period for `wait`. |
 | `wait_for` | | Also wait until an element matches this CSS selector. |
 | `wait_until` | | Also wait until this JS expression is truthy. |
 | `timeout_ms` | `30000` | Time limit for the whole job. Running out is not an error: the page is used as far as it got, with `timed_out: true`. |
+| `page_time_budget_ms` | `5000` | The most page time to spend waiting for the page to go quiet: time the clock skips ahead, and time the page sits idle on its timers (not running scripts, nothing in flight). Pages that update on a timer forever never go quiet; once this is spent the quiet periods are given up. `0` for no limit. See [Budgets](#budgets). |
+| `cpu_budget_ms` | `10000` | The most CPU time loading, waiting and scrolling may use. `0` for no limit. |
+| `request_budget` | `1000` | The most requests the page may make: document, scripts, `fetch()` and XHR. `0` for no limit. |
 | `scroll` | `false` | `true` or `{"max_scrolls": n}`: scroll to load infinite feeds and lazy content. |
 | `html` | `true` unless `extract` is given | Return the page's HTML. |
 | `extract` | | Named values to pull out; see below. |
@@ -207,6 +217,8 @@ A successful job answers `200`:
   "timed_out": false,
   "settle": "settled",
   "scroll": null,
+  "budget_exhausted": null,
+  "requests": 42,
   "extracted": { "title": "Example Domain" },
   "console": [{ "level": "error", "text": "…" }],
   "errors": [{ "kind": "uncaught", "message": "…", "stack": "…" }],
@@ -215,6 +227,11 @@ A successful job answers `200`:
 ```
 
 `status` is the site's status: a 404 page loads like any other.
+`budget_exhausted` names the budget that ended the page early, if one
+did (`"page_time"`, `"cpu"` or `"requests"`); `settle` (or
+`scroll.stopped`) is then `"budget_exhausted"`. That is a success, not a
+timeout: the page is returned as it stood. `requests` counts the
+requests the page made.
 `html` is there when asked for. If an extraction throws, its value is
 `null` and `extract_errors` says why; the rest still come back. `errors`
 lists the page's uncaught exceptions and unhandled rejections.
@@ -234,8 +251,18 @@ Failures have an `error` message and these statuses:
 ## Sizing and limits
 
 - Each job gets its own browser and page (its own JS heap, DOM, cookies
-  and storage), all freed when it answers. Nothing is shared between
-  jobs.
+  and storage), all freed when it answers. The only thing jobs share is
+  the script cache: a script's compiled code, keyed by a hash of its
+  text, so a later job that loads the same text (the same site again, or
+  a bundle another site uses too) reads it back instead of compiling it.
+  Nothing a page does to a script reaches the cache: entries are made
+  from the text alone, and each page reads its own copy of them.
+- The script cache holds up to 32 MiB by default, text included, and
+  stays full once jobs have filled it, so count it in an instance's
+  memory. `--script-cache <MiB>` (`DASHER_SCRIPT_CACHE_MB`) sizes it and
+  `0` turns it off; `--script-cache-dir <dir>` (`DASHER_SCRIPT_CACHE_DIR`)
+  keeps it on disk too, so a new process starts with it. A heavy site's
+  own scripts fill 10 to 30 MiB of it.
 - A page's JS heap is capped at 256 MiB and its DOM at 500,000 nodes. A
   page that goes over either is stopped and its memory freed, and the job
   fails with `422`, so one runaway page cannot take down the instance.
@@ -244,8 +271,34 @@ Failures have an `error` message and these statuses:
   near 12 MiB; a 1.6 MB, 75,000-node page peaks near 17 MiB. Size memory
   for your concurrency times a typical page of your sites plus a few MB,
   with headroom for heavy pages, and measure.
-- A page that spins in JavaScript is stopped at its time limit and holds
-  up only its own job.
+- A page that spins in JavaScript is stopped by its CPU budget (10 s by
+  default) or its time limit, and holds up only its own job.
+
+### Budgets
+
+Every job is bounded by three budgets besides its time limit, so a page
+that would never finish costs a few CPU seconds rather than a core until
+`timeout_ms`:
+
+- **Page time** (`page_time_budget_ms`, 5 s). Under the default virtual
+  clock dasher skips ahead to a page's next timer instead of sleeping. A
+  carousel, ticker or countdown that changes the page on a timer forever
+  never lets it go quiet, and skipping from tick to tick would turn its
+  20 ms of work a second into a busy loop. Settling stops once it has
+  skipped (or sat idle for) this much page time. Waiting for the network
+  and running scripts do not count.
+- **CPU** (`cpu_budget_ms`, 10 s): the job thread's CPU time for loading,
+  settling and scrolling. It catches scripts that never yield.
+- **Requests** (`request_budget`, 1000): for pages that fetch "more
+  stories" as soon as the last batch arrives. The heaviest sites
+  measured make about 400.
+
+When one runs out, the job answers `200` with the page as it stood and
+`budget_exhausted` naming the budget. Extraction still runs: the budgets
+are lifted once loading is over. `requestIdleCallback` work never holds a
+page open. On 142 recorded real sites, the budgets and the network-idle
+default took the sample's CPU time from 844 s to 220–229 s, with no page
+running to the time limit; see `crates/bench/README.md`.
 
 ## Security
 

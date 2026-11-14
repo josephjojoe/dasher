@@ -1896,6 +1896,23 @@ static bool is_word_char(uint32_t c)
             (c == '_'));
 }
 
+/* dasher: lre_canonicalize() with its ASCII case inline: under the `i`
+   flag the matcher folds every character it compares */
+static inline uint32_t re_canonicalize(uint32_t c, bool is_unicode)
+{
+    if (c < 128) {
+        if (is_unicode) {
+            if (c - 'A' < 26)
+                c += 'a' - 'A';
+        } else {
+            if (c - 'a' < 26)
+                c -= 'a' - 'A';
+        }
+        return c;
+    }
+    return lre_canonicalize(c, is_unicode);
+}
+
 #define GET_CHAR(c, cptr, cbuf_end, cbuf_type)                          \
     do {                                                                \
         if (cbuf_type == 0) {                                           \
@@ -2014,6 +2031,7 @@ typedef struct {
     uint8_t *state_stack;
     size_t state_stack_size;
     size_t state_stack_len;
+    uint8_t *state_buf; /* dasher: where state_stack starts, see lre_exec() */
 } REExecContext;
 
 static int push_state(REExecContext *s,
@@ -2032,7 +2050,15 @@ static int push_state(REExecContext *s,
         new_size = s->state_stack_size * 3 / 2;
         if (new_size < 8)
             new_size = 8;
-        new_stack = lre_realloc(s->opaque, s->state_stack, new_size * s->state_size);
+        if (s->state_stack == s->state_buf) {
+            /* dasher: leave the buffer on the C stack for the heap */
+            new_stack = lre_realloc(s->opaque, NULL, new_size * s->state_size);
+            if (new_stack)
+                memcpy(new_stack, s->state_stack,
+                       s->state_stack_len * s->state_size);
+        } else {
+            new_stack = lre_realloc(s->opaque, s->state_stack, new_size * s->state_size);
+        }
         if (!new_stack)
             return -1;
         s->state_stack_size = new_size;
@@ -2062,6 +2088,152 @@ static int lre_poll_timeout(REExecContext *s)
             return LRE_RET_TIMEOUT;
     }
     return 0;
+}
+
+/* dasher: the size of the one-character test at `pc` (char8, char16,
+   char32, dot, any, range or range32), or 0 for any other opcode */
+static int re_char_op_size(const uint8_t *pc)
+{
+    switch(pc[0]) {
+    case REOP_char8:
+        return 2;
+    case REOP_char16:
+        return 3;
+    case REOP_char32:
+        return 5;
+    case REOP_dot:
+    case REOP_any:
+        return 1;
+    case REOP_range:
+        return 3 + 4 * get_u16(pc + 1);
+    case REOP_range32:
+        return 3 + 8 * get_u16(pc + 1);
+    default:
+        return 0;
+    }
+}
+
+/* dasher: whether character `c` passes the one-character test at `pc`,
+   decided as the cases of lre_exec_backtrack() decide it */
+static bool re_test_char(const REExecContext *s, const uint8_t *pc,
+                         uint32_t c)
+{
+    uint32_t low, high, idx_min, idx_max, idx;
+    int n;
+
+    switch(pc[0]) {
+    case REOP_char8:
+        if (s->ignore_case)
+            c = re_canonicalize(c, s->is_unicode);
+        return c == pc[1];
+    case REOP_char16:
+        if (s->ignore_case)
+            c = re_canonicalize(c, s->is_unicode);
+        return c == get_u16(pc + 1);
+    case REOP_char32:
+        if (s->ignore_case)
+            c = re_canonicalize(c, s->is_unicode);
+        return c == get_u32(pc + 1);
+    case REOP_dot:
+        return !is_line_terminator(c);
+    case REOP_any:
+        return true;
+    case REOP_range:
+        n = get_u16(pc + 1);
+        pc += 3;
+        if (s->ignore_case)
+            c = re_canonicalize(c, s->is_unicode);
+        if (c < get_u16(pc))
+            return false;
+        idx_min = 0;
+        idx_max = n - 1;
+        high = get_u16(pc + idx_max * 4 + 2);
+        if (unlikely(c >= 0xffff) && high == 0xffff)
+            return true;
+        if (c > high)
+            return false;
+        while (idx_min <= idx_max) {
+            idx = (idx_min + idx_max) / 2;
+            low = get_u16(pc + idx * 4);
+            high = get_u16(pc + idx * 4 + 2);
+            if (c < low)
+                idx_max = idx - 1;
+            else if (c > high)
+                idx_min = idx + 1;
+            else
+                return true;
+        }
+        return false;
+    case REOP_range32:
+        n = get_u16(pc + 1);
+        pc += 3;
+        if (s->ignore_case)
+            c = re_canonicalize(c, s->is_unicode);
+        if (c < get_u32(pc))
+            return false;
+        idx_min = 0;
+        idx_max = n - 1;
+        if (c > get_u32(pc + idx_max * 8 + 4))
+            return false;
+        while (idx_min <= idx_max) {
+            idx = (idx_min + idx_max) / 2;
+            low = get_u32(pc + idx * 8);
+            high = get_u32(pc + idx * 8 + 4);
+            if (c < low)
+                idx_max = idx - 1;
+            else if (c > high)
+                idx_min = idx + 1;
+            else
+                return true;
+        }
+        return false;
+    default:
+        abort();
+    }
+}
+
+/* dasher: false when the code at `pc` is sure to fail at `cptr` without
+   doing anything first: it tests for one character, or for the end of a
+   line, and that test fails. A greedy repeat that backs off asks this
+   before it hands each shorter length to the rest of the pattern, and an
+   alternation before it saves a state to come back to a branch. */
+static bool re_may_continue(const REExecContext *s, const uint8_t *pc,
+                            const uint8_t *cptr)
+{
+    uint32_t c;
+    int cbuf_type = s->cbuf_type;
+
+    /* noting where a group starts or ends has no effect once the code
+       after it fails: the matcher undoes it as it backs off */
+    for(;;) {
+        if (pc[0] == REOP_save_start || pc[0] == REOP_save_end)
+            pc += 2;
+        else if (pc[0] == REOP_save_reset)
+            pc += 3;
+        else
+            break;
+    }
+    switch(pc[0]) {
+    case REOP_char8:
+    case REOP_char16:
+    case REOP_char32:
+    case REOP_dot:
+    case REOP_range:
+    case REOP_range32:
+        if (cptr >= s->cbuf_end)
+            return false;
+        PEEK_CHAR(c, cptr, s->cbuf_end, cbuf_type);
+        return re_test_char(s, pc, c);
+    case REOP_line_end:
+        if (cptr == s->cbuf_end)
+            return true;
+        if (!s->multi_line)
+            return false;
+        PEEK_CHAR(c, cptr, s->cbuf_end, cbuf_type);
+        return is_line_terminator(c);
+    default:
+        return true;
+    }
 }
 
 /* return 1 if match, 0 if not match or < 0 if error. */
@@ -2131,6 +2303,19 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                                 PREV_CHAR(cptr, s->cbuf, cbuf_type);
                             }
                             pc = (pc + 16) + (int)get_u32(pc);
+                            /* dasher: step over the lengths that the
+                               rest of the pattern rejects at its first
+                               opcode, without starting it at each. The
+                               last length is left to the code below. */
+                            if (lre_dasher_fast) {
+                                while (rs->count > 1 &&
+                                       !re_may_continue(s, pc, cptr)) {
+                                    for(i = 0; i < char_count; i++) {
+                                        PREV_CHAR(cptr, s->cbuf, cbuf_type);
+                                    }
+                                    rs->count--;
+                                }
+                            }
                             rs->cptr = cptr;
                             rs->count--;
                             if (rs->count == 0) {
@@ -2169,7 +2354,7 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                 goto no_match;
             GET_CHAR(c, cptr, cbuf_end, cbuf_type);
             if (s->ignore_case) {
-                c = lre_canonicalize(c, s->is_unicode);
+                c = re_canonicalize(c, s->is_unicode);
             }
             if (val != c)
                 goto no_match;
@@ -2186,6 +2371,17 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                 } else {
                     pc1 = pc;
                     pc = pc + (int)val;
+                }
+                /* dasher: no state to come back to for a branch that
+                   fails at its first opcode, and none to leave if it is
+                   the branch tried now (see re_may_continue()) */
+                if (lre_dasher_fast) {
+                    if (!re_may_continue(s, pc1, cptr))
+                        break;
+                    if (!re_may_continue(s, pc, cptr)) {
+                        pc = pc1;
+                        break;
+                    }
                 }
                 ret = push_state(s, capture, stack, stack_len,
                                  pc1, cptr, RE_EXEC_STATE_SPLIT, 0);
@@ -2328,8 +2524,8 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                         GET_CHAR(c1, cptr1, cptr1_end, cbuf_type);
                         GET_CHAR(c2, cptr, cbuf_end, cbuf_type);
                         if (s->ignore_case) {
-                            c1 = lre_canonicalize(c1, s->is_unicode);
-                            c2 = lre_canonicalize(c2, s->is_unicode);
+                            c1 = re_canonicalize(c1, s->is_unicode);
+                            c2 = re_canonicalize(c2, s->is_unicode);
                         }
                         if (c1 != c2)
                             goto no_match;
@@ -2342,8 +2538,8 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                         GET_PREV_CHAR(c1, cptr1, cptr1_start, cbuf_type);
                         GET_PREV_CHAR(c2, cptr, s->cbuf, cbuf_type);
                         if (s->ignore_case) {
-                            c1 = lre_canonicalize(c1, s->is_unicode);
-                            c2 = lre_canonicalize(c2, s->is_unicode);
+                            c1 = re_canonicalize(c1, s->is_unicode);
+                            c2 = re_canonicalize(c2, s->is_unicode);
                         }
                         if (c1 != c2)
                             goto no_match;
@@ -2362,7 +2558,7 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                     goto no_match;
                 GET_CHAR(c, cptr, cbuf_end, cbuf_type);
                 if (s->ignore_case) {
-                    c = lre_canonicalize(c, s->is_unicode);
+                    c = re_canonicalize(c, s->is_unicode);
                 }
                 idx_min = 0;
                 low = get_u16(pc + 0 * 4);
@@ -2402,7 +2598,7 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                     goto no_match;
                 GET_CHAR(c, cptr, cbuf_end, cbuf_type);
                 if (s->ignore_case) {
-                    c = lre_canonicalize(c, s->is_unicode);
+                    c = re_canonicalize(c, s->is_unicode);
                 }
                 idx_min = 0;
                 low = get_u32(pc + 0 * 8);
@@ -2449,6 +2645,30 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                 pc += (int)next_pos;
 
                 q = 0;
+                /* dasher: a repeat of a one-character test (`\d+`, `\s*`,
+                   `[^"]*`, `.*`) runs as a loop here instead of a call of
+                   the interpreter for every character */
+                if (lre_dasher_fast) {
+                    int size = re_char_op_size(pc1);
+                    if (size > 0 && (int)next_pos == size + 1 &&
+                        pc1[size] == REOP_match) {
+                        if (lre_poll_timeout(s))
+                            return LRE_RET_TIMEOUT;
+                        while (q < quant_max || quant_max == INT32_MAX) {
+                            const uint8_t *cptr1 = cptr;
+                            if (cptr >= cbuf_end)
+                                break;
+                            GET_CHAR(c, cptr1, cbuf_end, cbuf_type);
+                            if (!re_test_char(s, pc1, c))
+                                break;
+                            cptr = cptr1;
+                            q++;
+                            if ((q & 4095) == 0 && lre_poll_timeout(s))
+                                return LRE_RET_TIMEOUT;
+                        }
+                        goto greedy_done;
+                    }
+                }
                 for(;;) {
                     if (lre_poll_timeout(s))
                         return LRE_RET_TIMEOUT;
@@ -2464,6 +2684,7 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                     if (q >= quant_max && quant_max != INT32_MAX)
                         break;
                 }
+            greedy_done:
                 if (q < quant_min)
                     goto no_match;
                 if (q > quant_min) {
@@ -2511,16 +2732,40 @@ _Static_assert(REOP_char8 == 1 && REOP_char16 == 2 && REOP_char32 == 3 &&
                REOP_simple_greedy_quant == 29 && REOP_COUNT == 30,
                "regexp opcodes changed: update crates/js/src/regexp.rs");
 
-typedef int lre_search_hook_t(void *search, const uint8_t *body,
-                              size_t body_len, const uint8_t *cbuf,
-                              int cbuf_type, int cindex, int clen,
-                              int re_flags);
+typedef int lre_search_hook_t(void *search, void **plan,
+                              const uint8_t *body, size_t body_len,
+                              const uint8_t *cbuf, int cbuf_type, int cindex,
+                              int clen, int re_flags);
+typedef void lre_free_plan_t(void *plan);
 
 static lre_search_hook_t *lre_search_hook;
+/* What frees a hook's plans. Set with the hook but never cleared, so that
+   plans made before a test removes the hook are still freed. */
+static lre_free_plan_t *lre_plan_free;
 
-void lre_set_search_hook(lre_search_hook_t *hook)
+/* dasher: the fast paths in this file and in quickjs.c's RegExp methods
+   check this, so a test can run the engine's own way beside them */
+bool lre_dasher_fast = true;
+
+void lre_set_fast_paths(bool on)
+{
+    lre_dasher_fast = on;
+}
+
+/* `plan` is where lre_exec_plan()'s caller keeps the hook's plan of the
+   pattern (NULL from lre_exec()): the hook may store one there and use it
+   on later searches with the same pattern, and `free_plan` frees it. */
+void lre_set_search_hook(lre_search_hook_t *hook, lre_free_plan_t *free_plan)
 {
     lre_search_hook = hook;
+    if (free_plan)
+        lre_plan_free = free_plan;
+}
+
+void lre_free_plan(void *plan)
+{
+    if (plan && lre_plan_free)
+        lre_plan_free(plan);
 }
 
 typedef struct {
@@ -2547,13 +2792,105 @@ int lre_search_try(void *search, int index)
                               false);
 }
 
+/* dasher: the most characters lre_exec_literal() takes a pattern of */
+#define LRE_LITERAL_MAX 32
+
+/* dasher: a pattern that is a string of characters and nothing else,
+   `/foo/`, `/\./g` or `/iphone/i`, is run here as a string search: try
+   each position as the search loop would and compare the characters as
+   the char opcodes do, but without starting the interpreter at every
+   position. In an 8-bit subject a position can only match where its first
+   character does, which memchr() finds. `pc` is the pattern's bytecode
+   after the search loop, if it has one. Returns what lre_exec() returns,
+   or -1 when the pattern is not such a string. */
+static int lre_exec_literal(uint8_t **capture, const uint8_t *pc,
+                            const uint8_t *pc_end, bool search,
+                            const uint8_t *cbuf, int cindex, int clen,
+                            int cbuf_type, bool ignore_case, bool is_unicode)
+{
+    uint32_t lit[LRE_LITERAL_MAX], c;
+    int n = 0, i, shift = cbuf_type != 0;
+    const uint8_t *cbuf_end = cbuf + ((size_t)clen << shift);
+    const uint8_t *start, *cptr;
+
+    if (pc + 2 > pc_end || pc[0] != REOP_save_start || pc[1] != 0)
+        return -1;
+    pc += 2;
+    while (pc < pc_end && pc[0] != REOP_save_end) {
+        if (n == LRE_LITERAL_MAX)
+            return -1;
+        switch(pc[0]) {
+        case REOP_char8:
+            lit[n++] = pc[1];
+            pc += 2;
+            break;
+        case REOP_char16:
+            lit[n++] = get_u16(pc + 1);
+            pc += 3;
+            break;
+        case REOP_char32:
+            lit[n++] = get_u32(pc + 1);
+            pc += 5;
+            break;
+        default:
+            return -1;
+        }
+    }
+    if (n == 0 || pc + 3 != pc_end || pc[1] != 0 || pc[2] != REOP_match)
+        return -1;
+
+    start = cbuf + ((size_t)cindex << shift);
+    for(;;) {
+        if (cbuf_type == 0 && !ignore_case) {
+            /* only where the first character is */
+            if (lit[0] > 0xff)
+                return 0;
+            start = search ? memchr(start, lit[0], cbuf_end - start) : start;
+            if (!start)
+                return 0;
+        }
+        cptr = start;
+        for(i = 0; i < n; i++) {
+            if (cptr >= cbuf_end)
+                return 0; /* nor at any later position */
+            GET_CHAR(c, cptr, cbuf_end, cbuf_type);
+            if (ignore_case)
+                c = re_canonicalize(c, is_unicode);
+            if (c != lit[i])
+                break;
+        }
+        if (i == n) {
+            capture[0] = (uint8_t *)start;
+            capture[1] = (uint8_t *)cptr;
+            return 1;
+        }
+        if (!search || start >= cbuf_end)
+            return 0;
+        /* the next position, as the search loop's `any` steps */
+        cptr = start;
+        GET_CHAR(c, cptr, cbuf_end, cbuf_type);
+        start = cptr;
+    }
+}
+
 int lre_exec(uint8_t **capture,
              const uint8_t *bc_buf, const uint8_t *cbuf, int cindex, int clen,
              int cbuf_type, void *opaque)
 {
+    return lre_exec_plan(capture, bc_buf, cbuf, cindex, clen, cbuf_type,
+                         opaque, NULL);
+}
+
+int lre_exec_plan(uint8_t **capture,
+                  const uint8_t *bc_buf, const uint8_t *cbuf, int cindex,
+                  int clen, int cbuf_type, void *opaque, void **plan)
+{
     REExecContext s_s, *s = &s_s;
     int re_flags, i, alloca_size, ret;
     StackInt *stack_buf;
+    /* dasher: the backtracking stack starts here, so that a match that
+       saves a few states does not allocate */
+    uintptr_t state_buf[256];
 
     re_flags = lre_get_flags(bc_buf);
     s->multi_line = (re_flags & LRE_FLAG_MULTILINE) != 0;
@@ -2575,9 +2912,38 @@ int lre_exec(uint8_t **capture,
     s->state_stack = NULL;
     s->state_stack_len = 0;
     s->state_stack_size = 0;
+    s->state_buf = (uint8_t *)state_buf;
+    if (sizeof(state_buf) / s->state_size >= 4) {
+        s->state_stack = s->state_buf;
+        s->state_stack_size = sizeof(state_buf) / s->state_size;
+    }
 
     for(i = 0; i < s->capture_count * 2; i++)
         capture[i] = NULL;
+    /* dasher: see lre_exec_literal() */
+    if (lre_dasher_fast && s->capture_count == 1) {
+        const uint8_t *pc = bc_buf + RE_HEADER_LEN;
+        uint32_t bc_len = get_u32(bc_buf + RE_HEADER_BYTECODE_LEN);
+        bool search = !(re_flags & LRE_FLAG_STICKY);
+        ret = -1;
+        if (search) {
+            /* the loop as lre_compile() writes it, as below */
+            if (bc_len > 11 && pc[0] == REOP_split_goto_first &&
+                get_u32(pc + 1) == 6 && pc[5] == REOP_any &&
+                pc[6] == REOP_goto && get_u32(pc + 7) == (uint32_t)-11) {
+                pc += 11;
+                bc_len -= 11;
+            } else {
+                bc_len = 0;
+            }
+        }
+        if (bc_len > 0)
+            ret = lre_exec_literal(capture, pc, pc + bc_len, search, cbuf,
+                                   cindex, clen, s->cbuf_type,
+                                   s->ignore_case, s->is_unicode);
+        if (ret >= 0)
+            return ret;
+    }
     alloca_size = s->stack_size_max * sizeof(stack_buf[0]);
     stack_buf = alloca(alloca_size);
     /* dasher: see lre_set_search_hook() */
@@ -2589,15 +2955,17 @@ int lre_exec(uint8_t **capture,
             get_u32(pc + 1) == 6 && pc[5] == REOP_any &&
             pc[6] == REOP_goto && get_u32(pc + 7) == (uint32_t)-11) {
             LRESearch t = { s, capture, stack_buf, pc + 11 };
-            ret = lre_search_hook(&t, pc + 11, bc_len - 11, cbuf,
+            ret = lre_search_hook(&t, plan, pc + 11, bc_len - 11, cbuf,
                                   s->cbuf_type, cindex, clen, re_flags);
-            lre_realloc(s->opaque, s->state_stack, 0);
+            if (s->state_stack != s->state_buf)
+                lre_realloc(s->opaque, s->state_stack, 0);
             return ret;
         }
     }
     ret = lre_exec_backtrack(s, capture, stack_buf, 0, bc_buf + RE_HEADER_LEN,
                              cbuf + (cindex << cbuf_type), false);
-    lre_realloc(s->opaque, s->state_stack, 0);
+    if (s->state_stack != s->state_buf)
+        lre_realloc(s->opaque, s->state_stack, 0);
     return ret;
 }
 

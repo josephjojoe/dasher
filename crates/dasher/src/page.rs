@@ -6,11 +6,14 @@ use std::time::{Duration, Instant};
 use dasher_css::SelectorList;
 use dasher_dom::{Document, NodeId, ShadowRoots};
 use dasher_js::{
-    ConsoleLevel, ConsoleMessage, Evaluation, RunLimits, RunOutcome, RuntimeOptions, ScriptError,
-    StorageStore, WindowOptions,
+    ConsoleLevel, ConsoleMessage, Evaluation, RunLimits, RunOutcome, RuntimeOptions,
+    ScriptCacheWork, ScriptError, StorageStore, WindowOptions,
 };
 use dasher_net::{Cookie, Session, Url};
-use dasher_page::{AutoScrollOptions, AutoScrollReport, PageOptions, SettleOptions, SettleOutcome};
+use dasher_page::{
+    AutoScrollOptions, AutoScrollReport, AutoScrollStop, Budget, PageOptions, SettleOptions,
+    SettleOutcome, WorkBudget,
+};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -28,8 +31,9 @@ const BLANK: &str = "<html><head></head><body></body></html>";
 /// How [`Page::goto_with`] loads a page and decides it is ready.
 ///
 /// The default waits for the `load` event, then settles with
-/// [`SettleOptions::default`] (network idle and no DOM changes for 500ms
-/// each), all within the page's [timeout](Page::set_timeout).
+/// [`SettleOptions::default`] (network idle for 500ms, within 5 seconds of
+/// page time), all within the page's
+/// [timeout](Page::set_timeout) and the default [`WorkBudget`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GotoOptions {
     /// What to wait for after the `load` event; `None` returns as soon as
@@ -43,6 +47,13 @@ pub struct GotoOptions {
     /// scrolling. `None` uses the page's [timeout](Page::timeout). When it
     /// runs out, the page is left as far as it got.
     pub timeout: Option<Duration>,
+    /// How much CPU time and how many requests the whole navigation may
+    /// use: loading, settling and scrolling. When either runs out the page
+    /// is left as it is and [`Navigation::budget_exhausted`] says which.
+    /// The budget is lifted when `goto` returns, so the page can still be
+    /// evaluated. Defaults to [`WorkBudget::default`]: 10 CPU seconds and
+    /// 1000 requests.
+    pub budget: WorkBudget,
 }
 
 impl Default for GotoOptions {
@@ -51,6 +62,7 @@ impl Default for GotoOptions {
             settle: Some(SettleOptions::default()),
             auto_scroll: None,
             timeout: None,
+            budget: WorkBudget::default(),
         }
     }
 }
@@ -83,6 +95,12 @@ impl GotoOptions {
         self.timeout = Some(timeout);
         self
     }
+
+    /// Bounds the work the whole navigation does by `budget`.
+    pub fn with_budget(mut self, budget: WorkBudget) -> Self {
+        self.budget = budget;
+        self
+    }
 }
 
 /// What [`Page::goto`] did.
@@ -102,6 +120,20 @@ pub struct Navigation {
     pub settle: Option<SettleOutcome>,
     /// What scrolling did, if the page was scrolled.
     pub scroll: Option<AutoScrollReport>,
+    /// The budget that ended the navigation early, if one did. The page is
+    /// as it stood then, and this is not a failure:
+    ///
+    /// - [`Budget::PageTime`]: settling skipped as much page time as
+    ///   [`SettleOptions::page_time_budget`] allows without the page going
+    ///   quiet (pages that update themselves on a timer forever).
+    /// - [`Budget::Cpu`] or [`Budget::Requests`]: the navigation used up
+    ///   [`GotoOptions::budget`], while loading, settling or scrolling.
+    ///
+    /// When more than one ran out, this is the last.
+    pub budget_exhausted: Option<Budget>,
+    /// How many requests the navigation made: the document, scripts,
+    /// `fetch()` and XHR.
+    pub requests: u64,
     /// How long the navigation took, in real time.
     pub elapsed: Duration,
 }
@@ -190,6 +222,7 @@ impl Page {
         let started = Instant::now();
         let timeout = options.timeout.unwrap_or(self.timeout);
         let deadline = started + timeout;
+        let requests_before = self.session.activity().requests_started();
         // Free the old document before building the new one.
         self.inner = None;
 
@@ -197,28 +230,51 @@ impl Page {
             runtime: self.runtime_options(),
             max_navigations: self.browser.max_navigations(),
             timeout: Some(timeout),
+            budget: options.budget,
             ..PageOptions::default()
         };
         let page = dasher_page::Page::load(&self.session, url, page_options).await?;
         let mut timed_out = page.timed_out();
+        let mut budget_exhausted = page.budget_exhausted();
         self.inner = Some(page);
 
-        let mut settle = None;
-        if let (Some(options), false) = (&options.settle, timed_out) {
-            let outcome = self.settle_by(options, deadline).await?;
-            timed_out = matches!(outcome, SettleOutcome::TimedOut);
-            settle = Some(outcome);
+        let result = async {
+            let mut settle = None;
+            if let (Some(options), false, None) = (&options.settle, timed_out, budget_exhausted) {
+                let outcome = self.settle_by(options, deadline).await?;
+                timed_out = matches!(outcome, SettleOutcome::TimedOut);
+                if let SettleOutcome::BudgetExhausted(budget) = outcome {
+                    budget_exhausted = Some(budget);
+                }
+                settle = Some(outcome);
+            }
+            // Out of page time to skip, the page may still have more to
+            // load on scrolling; out of CPU or requests, it may not.
+            let can_scroll = matches!(budget_exhausted, None | Some(Budget::PageTime));
+            let mut scroll = None;
+            if let (Some(options), false, true) = (&options.auto_scroll, timed_out, can_scroll) {
+                let report = self.scroll_by_deadline(options, deadline).await?;
+                if let AutoScrollStop::BudgetExhausted(budget) = report.stopped {
+                    budget_exhausted = Some(budget);
+                }
+                scroll = Some(report);
+            }
+            Ok::<_, Error>((settle, scroll))
         }
-        let mut scroll = None;
-        if let (Some(options), false) = (&options.auto_scroll, timed_out) {
-            scroll = Some(self.scroll_by_deadline(options, deadline).await?);
+        .await;
+        // Lift the budget, so the page can be evaluated and extracted from.
+        if let Some(page) = self.inner.as_mut() {
+            page.set_budget(WorkBudget::unlimited());
         }
+        let (settle, scroll) = result?;
         Ok(Navigation {
             url: self.url().unwrap_or_default(),
             status: self.status().unwrap_or_default(),
             timed_out,
             settle,
             scroll,
+            budget_exhausted,
+            requests: self.session.activity().requests_started() - requests_before,
             elapsed: started.elapsed(),
         })
     }
@@ -599,6 +655,22 @@ impl Page {
         })
     }
 
+    /// Settles the page's account with the browser's
+    /// [`ScriptCache`](crate::ScriptCache) now rather than when it is
+    /// dropped, and returns the cache entries left to make again.
+    ///
+    /// A page notes which functions of its cached scripts ran, and when it
+    /// is dropped, compiles again the scripts whose entries lacked them. A
+    /// process about to exit, which leaves the page for the OS to free
+    /// rather than freeing it, calls this first and runs what it returns:
+    /// usually nothing, once the cache has seen the page's scripts twice.
+    pub fn take_script_cache_work(&self) -> ScriptCacheWork {
+        self.inner
+            .as_ref()
+            .map(|p| p.js().take_script_cache_work())
+            .unwrap_or_default()
+    }
+
     // -----------------------------------------------------------------
     // Settings and lifetime.
 
@@ -688,7 +760,8 @@ async fn evaluate_on(
             RunOutcome::Idle
             | RunOutcome::DeadlineExceeded
             | RunOutcome::Interrupted
-            | RunOutcome::LimitExceeded(_) => {
+            | RunOutcome::LimitExceeded(_)
+            | RunOutcome::BudgetExhausted(_) => {
                 return pending.poll().map_or(Err(Error::Timeout), |o| Ok(o?));
             }
         }
