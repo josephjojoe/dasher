@@ -484,6 +484,7 @@ struct JSContext {
     JSRegExpSlot regexp_slots[JS_REGEXP_SLOT_COUNT];
     bool regexp_slots_ok;
     JSShape *regexp_result_shape;
+    JSShape *regexp_shape; /* dasher: a new RegExp; see js_regexp_constructor_internal() */
     /* dasher: recently compiled patterns; see js_compile_regexp() */
     JSRegExpCacheEntry regexp_cache[JS_REGEXP_CACHE_SIZE];
 
@@ -2636,6 +2637,8 @@ static void JS_MarkContext(JSRuntime *rt, JSContext *ctx,
     }
     if (ctx->regexp_result_shape)
         mark_func(rt, &ctx->regexp_result_shape->header);
+    if (ctx->regexp_shape)
+        mark_func(rt, &ctx->regexp_shape->header);
     for(i = 0; i < JS_REGEXP_SLOT_COUNT; i++)
         JS_MarkValue(rt, ctx->regexp_slots[i].func, mark_func);
 }
@@ -2714,6 +2717,7 @@ void JS_FreeContext(JSContext *ctx)
     for(i = 0; i < 2; i++)
         js_free_shape_null(ctx->rt, ctx->arguments_shape[i]);
     js_free_shape_null(ctx->rt, ctx->regexp_result_shape);
+    js_free_shape_null(ctx->rt, ctx->regexp_shape);
     for(i = 0; i < JS_REGEXP_SLOT_COUNT; i++) {
         JS_FreeAtom(ctx, ctx->regexp_slots[i].atom);
         JS_FreeValue(ctx, ctx->regexp_slots[i].func);
@@ -47309,6 +47313,25 @@ static JSValue js_regexp_constructor_internal(JSContext *ctx, JSValueConst ctor,
         return JS_EXCEPTION;
     }
 
+    /* dasher: a regexp literal, or `new RegExp()` itself rather than a
+       subclass, makes a RegExp with RegExp.prototype and lastIndex, so with
+       one shape. It is noted from the first one made and later ones are
+       made with it. (RegExp.prototype cannot be changed.) */
+    if (ctx->regexp_shape && lre_dasher_fast &&
+        (JS_IsUndefined(ctor) ||
+         (JS_VALUE_GET_TAG(ctor) == JS_TAG_OBJECT &&
+          JS_VALUE_GET_OBJ(ctor) == JS_VALUE_GET_OBJ(ctx->regexp_ctor)))) {
+        obj = JS_NewObjectFromShape(ctx, js_dup_shape(ctx->regexp_shape),
+                                    JS_CLASS_REGEXP);
+        if (JS_IsException(obj))
+            goto fail;
+        p = JS_VALUE_GET_OBJ(obj);
+        p->prop[0].u.value = js_int32(0);
+        p->u.regexp.pattern = JS_VALUE_GET_STRING(pattern);
+        p->u.regexp.bytecode = JS_VALUE_GET_STRING(bc);
+        return obj;
+    }
+
     obj = js_create_from_ctor(ctx, ctor, JS_CLASS_REGEXP);
     if (JS_IsException(obj))
         goto fail;
@@ -47318,6 +47341,16 @@ static JSValue js_regexp_constructor_internal(JSContext *ctx, JSValueConst ctor,
     re->bytecode = JS_VALUE_GET_STRING(bc);
     JS_DefinePropertyValue(ctx, obj, JS_ATOM_lastIndex, js_int32(0),
                            JS_PROP_WRITABLE);
+    if (!ctx->regexp_shape && JS_IsUndefined(ctor)) {
+        /* dasher: see above */
+        JSShape *sh = p->shape;
+        JSShapeProperty *prs = get_shape_prop(sh);
+        if (sh->is_hashed && sh->prop_count == 1 &&
+            prs[0].atom == JS_ATOM_lastIndex &&
+            prs[0].flags == JS_PROP_WRITABLE &&
+            sh->proto == JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_REGEXP]))
+            ctx->regexp_shape = js_dup_shape(sh);
+    }
     return obj;
 }
 
@@ -47786,7 +47819,8 @@ static void js_regexp_note_slots(JSContext *ctx)
     ctx->regexp_slots_ok = true;
 }
 
-static bool js_regexp_slots_unchanged(JSContext *ctx)
+/* The first `count` slots, in the order of js_regexp_slot_names */
+static bool js_regexp_slots_unchanged(JSContext *ctx, int count)
 {
     JSObject *objs[2];
     int i;
@@ -47795,7 +47829,7 @@ static bool js_regexp_slots_unchanged(JSContext *ctx)
         return false;
     objs[0] = JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_REGEXP]);
     objs[1] = JS_VALUE_GET_OBJ(ctx->regexp_ctor);
-    for(i = 0; i < JS_REGEXP_SLOT_COUNT; i++) {
+    for(i = 0; i < count; i++) {
         const JSRegExpSlot *slot = &ctx->regexp_slots[i];
         JSObject *p = objs[i == JS_REGEXP_SLOT_COUNT - 1];
         JSShape *sh = p->shape;
@@ -47836,8 +47870,17 @@ static bool js_regexp_plain_last_index(JSObject *p)
         JS_VALUE_GET_TAG(p->prop[0].u.value) == JS_TAG_INT;
 }
 
-/* The RegExp `rx` if it is pristine (see above), else NULL. */
-static JSRegExp *js_regexp_pristine(JSContext *ctx, JSValueConst rx)
+/* How many of the slots a method reads, from the start of
+   js_regexp_slot_names: test() and search() read exec, replace() and
+   match() exec and the flags, split() all of them. */
+#define JS_REGEXP_FOR_EXEC 1
+#define JS_REGEXP_FOR_FLAGS (JS_REGEXP_SLOT_COUNT - 1)
+#define JS_REGEXP_FOR_SPLIT JS_REGEXP_SLOT_COUNT
+
+/* The RegExp `rx` if it is pristine (see above) as far as the first
+   `slots` slots go, else NULL. */
+static JSRegExp *js_regexp_pristine(JSContext *ctx, JSValueConst rx,
+                                    int slots)
 {
     JSObject *p;
     JSShape *sh;
@@ -47848,7 +47891,7 @@ static JSRegExp *js_regexp_pristine(JSContext *ctx, JSValueConst rx)
     sh = p->shape;
     if (p->class_id != JS_CLASS_REGEXP || sh->prop_count != 1 ||
         sh->proto != JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_REGEXP]) ||
-        !js_regexp_plain_last_index(p) || !js_regexp_slots_unchanged(ctx))
+        !js_regexp_plain_last_index(p) || !js_regexp_slots_unchanged(ctx, slots))
         return NULL;
     return &p->u.regexp;
 }
@@ -48327,7 +48370,7 @@ static JSValue js_regexp_test(JSContext *ctx, JSValueConst this_val,
 
     /* dasher: see js_regexp_pristine(). exec() would build a result only
        for it to be dropped. */
-    re = js_regexp_pristine(ctx, this_val);
+    re = js_regexp_pristine(ctx, this_val, JS_REGEXP_FOR_EXEC);
     if (re) {
         JSRegExpMatch m;
         int rc;
@@ -48377,7 +48420,7 @@ static JSValue js_regexp_Symbol_match(JSContext *ctx, JSValueConst this_val,
 
     /* dasher: see js_regexp_pristine() */
     {
-        JSRegExp *re = js_regexp_pristine(ctx, rx);
+        JSRegExp *re = js_regexp_pristine(ctx, rx, JS_REGEXP_FOR_FLAGS);
         if (re) {
             if (lre_get_flags(str8(re->bytecode)) & LRE_FLAG_GLOBAL)
                 A = js_regexp_match_all_fast(ctx, rx, re, S);
@@ -49110,7 +49153,7 @@ static JSValue js_regexp_Symbol_replace(JSContext *ctx, JSValueConst this_val,
 
     /* dasher: see js_regexp_pristine() */
     {
-        JSRegExp *re = js_regexp_pristine(ctx, rx);
+        JSRegExp *re = js_regexp_pristine(ctx, rx, JS_REGEXP_FOR_FLAGS);
         if (re && !lre_get_groupnames(str8(re->bytecode))) {
             res = js_regexp_replace_fast(ctx, rx, re, str, rep, rp);
             goto done;
@@ -49287,7 +49330,7 @@ static JSValue js_regexp_Symbol_search(JSContext *ctx, JSValueConst this_val,
 
     /* dasher: see js_regexp_pristine() */
     {
-        JSRegExp *re = js_regexp_pristine(ctx, rx);
+        JSRegExp *re = js_regexp_pristine(ctx, rx, JS_REGEXP_FOR_EXEC);
         if (re) {
             index = js_regexp_search_fast(ctx, re, str);
             JS_FreeValue(ctx, str);
@@ -49363,7 +49406,7 @@ static JSValue js_regexp_Symbol_split(JSContext *ctx, JSValueConst this_val,
     /* dasher: see js_regexp_pristine(). A limit that is not a number could
        run a script, which the spec runs after making its splitter. */
     if (JS_IsUndefined(argv[1]) || JS_VALUE_GET_TAG(argv[1]) == JS_TAG_INT) {
-        JSRegExp *re = js_regexp_pristine(ctx, rx);
+        JSRegExp *re = js_regexp_pristine(ctx, rx, JS_REGEXP_FOR_SPLIT);
         if (re) {
             lim = JS_IsUndefined(argv[1]) ? 0xffffffff :
                 (uint32_t)JS_VALUE_GET_INT(argv[1]);
