@@ -7,7 +7,9 @@
 // pattern selection for en-US, en-CA, en-GB and de, and knows every IANA
 // time zone's rules from 1970 on. It also implements Number, BigInt and
 // Date toLocale*String and String localeCompare, so their locales and
-// options take effect.
+// options take effect. Intl.Locale takes tags apart and puts them back
+// together, and knows the likely script and region of about fifty
+// languages.
 //
 // This file is the JS surface: locales, reading and checking options,
 // resolvedOptions and the errors. Formatting runs in Rust (src/intl/),
@@ -64,7 +66,7 @@
   function canonicalLocales(locales) {
     if (locales === undefined) return [];
     const out = [];
-    for (let tag of typeof locales === 'string' ? [locales] : Array.from(Object(locales))) {
+    for (let tag of typeof locales === 'string' || locales instanceof Locale ? [locales] : Array.from(Object(locales))) {
       if (typeof tag !== 'string' && (typeof tag !== 'object' || tag === null)) {
         throw new TypeError('Language ID should be string or object.');
       }
@@ -558,6 +560,171 @@
       return { ...this.#r };
     }
   }
+
+  // Locale: a language tag taken apart, with the -u- keywords the options
+  // name. Tags are put in canonical case with their keywords in order,
+  // but aliases (iw for he, gregorian for gregory) stay as written.
+  // maximize and minimize know the likely script and region of the
+  // languages in LIKELY only, and leave other tags as they are.
+  // https://tc39.es/ecma402/#locale-objects
+
+  const KEYWORDS = [
+    ['calendar', 'ca'], ['collation', 'co'], ['hourCycle', 'hc'],
+    ['caseFirst', 'kf'], ['numeric', 'kn'], ['numberingSystem', 'nu'],
+  ];
+  const KEYWORD_TYPE = /^[a-z\d]{3,8}(-[a-z\d]{3,8})*$/i;
+  // language script region, the likeliest first for its language.
+  const LIKELY = 'en Latn US|de Latn DE|fr Latn FR|es Latn ES|it Latn IT|pt Latn BR|nl Latn NL|sv Latn SE|'
+    + 'da Latn DK|nb Latn NO|no Latn NO|fi Latn FI|pl Latn PL|cs Latn CZ|sk Latn SK|hu Latn HU|ro Latn RO|'
+    + 'tr Latn TR|id Latn ID|ms Latn MY|vi Latn VN|ca Latn ES|hr Latn HR|sl Latn SI|et Latn EE|lv Latn LV|'
+    + 'lt Latn LT|is Latn IS|ga Latn IE|fil Latn PH|sw Latn TZ|af Latn ZA|ru Cyrl RU|uk Cyrl UA|bg Cyrl BG|'
+    + 'sr Cyrl RS|el Grek GR|he Hebr IL|ar Arab EG|fa Arab IR|ur Arab PK|hi Deva IN|bn Beng BD|ta Taml IN|'
+    + 'te Telu IN|th Thai TH|ko Kore KR|ja Jpan JP|zh Hans CN';
+  let likely;
+
+  // The parts of a canonical tag: language, script, region, the variants,
+  // the -u- attributes and keywords, and the other extensions as written.
+  function parseTag(tag) {
+    const parts = tag.split('-');
+    const t = { language: parts[0], script: undefined, region: undefined, variants: [], attributes: [], keywords: new Map(), others: [] };
+    let i = 1;
+    if (i < parts.length && /^[a-z]{4}$/i.test(parts[i])) t.script = parts[i++];
+    if (i < parts.length && /^([a-z]{2}|\d{3})$/i.test(parts[i])) t.region = parts[i++];
+    while (i < parts.length && parts[i].length > 1) t.variants.push(parts[i++]);
+    t.variants.sort();
+    while (i < parts.length) {
+      const singleton = parts[i++];
+      const start = i;
+      while (i < parts.length && (singleton === 'x' || parts[i].length > 1)) i++;
+      const subtags = parts.slice(start, i);
+      if (singleton !== 'u' || t.keywords.size || t.attributes.length) {
+        t.others.push([singleton, ...subtags]);
+        continue;
+      }
+      let key;
+      for (const subtag of subtags) {
+        if (subtag.length === 2) {
+          key = subtag;
+          if (!t.keywords.has(key)) t.keywords.set(key, []);
+        } else if (key === undefined) {
+          t.attributes.push(subtag);
+        } else {
+          t.keywords.get(key).push(subtag);
+        }
+      }
+    }
+    return t;
+  }
+
+  const baseName = (t) => [t.language, t.script, t.region, ...t.variants].filter((s) => s !== undefined).join('-');
+
+  function tagOf(t) {
+    const extensions = t.others.filter((e) => e[0] !== 'x').map((e) => e.join('-'));
+    if (t.keywords.size || t.attributes.length) {
+      const u = ['u', ...t.attributes];
+      for (const key of [...t.keywords.keys()].sort()) {
+        const type = t.keywords.get(key).join('-');
+        u.push(key);
+        // A type of true is left out, as in kn for kn-true.
+        if (type !== '' && type !== 'true') u.push(type);
+      }
+      extensions.push(u.join('-'));
+    }
+    extensions.sort();
+    const priv = t.others.find((e) => e[0] === 'x');
+    return [baseName(t), ...extensions, ...(priv ? [priv.join('-')] : [])].join('-');
+  }
+
+  // The script and region a language most likely has, given what is known.
+  function likelySubtags(t) {
+    likely ??= new Map(LIKELY.split('|').map((row) => {
+      const [language, script, region] = row.split(' ');
+      return [language, [script, region]];
+    }));
+    const known = likely.get(t.language === 'und' ? 'en' : t.language);
+    if (known === undefined) return undefined;
+    let [script, region] = known;
+    if (t.language === 'zh') {
+      // Traditional where it is written, and there when that is all that is known.
+      if (t.script === undefined && ['TW', 'HK', 'MO'].includes(t.region)) script = 'Hant';
+      if (t.script === 'Hant') region = 'TW';
+    }
+    return { language: t.language === 'und' ? 'en' : t.language, script: t.script ?? script, region: t.region ?? region };
+  }
+
+  class Locale {
+    #t;
+    constructor(tag, o) {
+      if (typeof tag !== 'string' && (typeof tag !== 'object' || tag === null)) {
+        throw new TypeError('First argument to Intl.Locale constructor can\'t be empty or missing');
+      }
+      const t = parseTag(canonicalLocales(String(tag))[0]);
+      o = options(o);
+      const subtag = (key, pattern) => {
+        const v = o[key];
+        if (v === undefined) return undefined;
+        const s = String(v);
+        if (!pattern.test(s)) throw new RangeError('Incorrect locale information provided');
+        return s.toLowerCase();
+      };
+      const language = subtag('language', /^([a-z]{2,3}|[a-z]{5,8})$/i);
+      const script = subtag('script', /^[a-z]{4}$/i);
+      const region = subtag('region', /^([a-z]{2}|\d{3})$/i);
+      if (language !== undefined) t.language = language;
+      if (script !== undefined) t.script = script[0].toUpperCase() + script.slice(1);
+      if (region !== undefined) t.region = region.toUpperCase();
+      for (const [name, key] of KEYWORDS) {
+        let type;
+        if (name === 'hourCycle') {
+          type = str(o, name, ['h11', 'h12', 'h23', 'h24']);
+        } else if (name === 'caseFirst') {
+          type = str(o, name, ['upper', 'lower', 'false']);
+        } else if (name === 'numeric') {
+          type = o[name] === undefined ? undefined : String(Boolean(o[name]));
+        } else {
+          type = subtag(name, KEYWORD_TYPE);
+        }
+        if (type !== undefined) t.keywords.set(key, type.split('-'));
+      }
+      this.#t = t;
+    }
+    #keyword(key) {
+      const type = this.#t.keywords.get(key);
+      return type === undefined ? undefined : type.join('-');
+    }
+    get baseName() { return baseName(this.#t); }
+    get language() { return this.#t.language; }
+    get script() { return this.#t.script; }
+    get region() { return this.#t.region; }
+    get calendar() { return this.#keyword('ca'); }
+    get collation() { return this.#keyword('co'); }
+    get hourCycle() { return this.#keyword('hc'); }
+    get caseFirst() { return this.#keyword('kf'); }
+    get numeric() {
+      const type = this.#keyword('kn');
+      return type === '' || type === 'true';
+    }
+    get numberingSystem() { return this.#keyword('nu'); }
+    maximize() {
+      return new Locale(tagOf({ ...this.#t, ...likelySubtags(this.#t) }));
+    }
+    minimize() {
+      const t = this.#t;
+      const full = likelySubtags(t);
+      if (full === undefined) return new Locale(tagOf(t));
+      // The least that still maximizes to the same: the language alone,
+      // with its region, or with its script.
+      const same = (trial) => {
+        const again = likelySubtags(trial);
+        return again.script === full.script && again.region === full.region;
+      };
+      const { language } = full;
+      const least = [{ language }, { language, region: full.region }, { language, script: full.script }].find(same) ?? full;
+      return new Locale(tagOf({ ...t, script: undefined, region: undefined, ...least }));
+    }
+    toString() { return tagOf(this.#t); }
+  }
+
   // The Intl namespace.
 
   function install(C, name, callable) {
@@ -586,6 +753,8 @@
   install(PluralRules, 'PluralRules');
   install(RelativeTimeFormat, 'RelativeTimeFormat');
   install(ListFormat, 'ListFormat');
+  defineProperty(Locale.prototype, Symbol.toStringTag, { value: 'Intl.Locale', configurable: true });
+  hidden(Intl, { Locale });
 
   const SUPPORTED = {
     calendar: () => ['gregory'],

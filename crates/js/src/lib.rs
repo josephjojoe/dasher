@@ -106,11 +106,11 @@
 //!   supported. `response.body` and `blob.stream()` are readable streams.
 //!   Like `Intl`, streams are evaluated on first use.
 //! - `Intl` (`NumberFormat`, `DateTimeFormat`, `PluralRules`, `Collator`,
-//!   `RelativeTimeFormat`, `ListFormat`), which QuickJS lacks, and the
-//!   `toLocaleString`/`localeCompare` methods built on it. Every locale
-//!   formats as en-US, and time zones other than UTC and fixed offsets
-//!   use the host's zone. It is evaluated on first use, so pages that
-//!   never format anything don't carry it in their heap.
+//!   `RelativeTimeFormat`, `ListFormat`, `Locale`), which QuickJS lacks,
+//!   and the `toLocaleString`/`localeCompare` methods built on it. Every
+//!   locale formats as en-US, and time zones other than UTC and fixed
+//!   offsets use the host's zone. It is evaluated on first use, so pages
+//!   that never format anything don't carry it in their heap.
 //!
 //! Everything that is only a stand-in (dialogs, `ResizeObserver`,
 //! `WebSocket`, the rest of `crypto.subtle`, navigator extras and so on) is

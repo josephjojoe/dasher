@@ -36,7 +36,7 @@ view, where `querySelector` and `innerHTML` stop at shadow roots.
 | Streaming fetch | Request bodies cannot be streams; response bodies arrive whole, then stream as one chunk |
 | BYOB stream readers | `getReader({ mode: 'byob' })` throws; byte streams act as default streams |
 | `crypto.subtle` beyond `digest()` | Every other method rejects with `NotSupportedError` |
-| `Intl.Segmenter`; locales other than en-US | `Intl.Segmenter` is undefined; every locale formats as en-US |
+| `Intl.Segmenter`, `Intl.DisplayNames`; locales other than en-US | Both are undefined; every locale formats as en-US. `Intl.Locale` has no `getWeekInfo()`, `getTextInfo()` or the other `get…()` methods, and `maximize()` and `minimize()` leave all but about fifty languages as they are |
 | Performance timeline (`performance.timing`, entries from `mark`/`measure`) | `performance.timing` is undefined; `mark` and `measure` record nothing; `performance.now()` works |
 | Inline event handler attributes (`onclick="..."`, `<body onload>`) | Not run from markup |
 | `<meta http-equiv="refresh">` | Not followed |

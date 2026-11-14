@@ -47,7 +47,7 @@ fn namespace_shape() {
     );
     assert_eq!(
         out,
-        r#"{"tag":"[object Intl]","enumerable":false,"members":["Collator","DateTimeFormat","ListFormat","NumberFormat","PluralRules","RelativeTimeFormat","getCanonicalLocales","supportedValuesOf"],"callable":[true,true,true],"name":"NumberFormat","ctor":true,"protoTag":"[object Intl.PluralRules]","needsNew":true}"#
+        r#"{"tag":"[object Intl]","enumerable":false,"members":["Collator","DateTimeFormat","ListFormat","Locale","NumberFormat","PluralRules","RelativeTimeFormat","getCanonicalLocales","supportedValuesOf"],"callable":[true,true,true],"name":"NumberFormat","ctor":true,"protoTag":"[object Intl.PluralRules]","needsNew":true}"#
     );
 }
 
@@ -1455,6 +1455,185 @@ fn list_format() {
 
 /// Intl is evaluated on first use. Until then the global is an accessor;
 /// a page that replaces it, or a built-in method, keeps its replacement.
+// Expected values are Node 22's (ICU), for tags within what LIKELY knows.
+#[test]
+fn locale() {
+    check(&[
+        ("new Intl.Locale('en-US').language", "en"),
+        ("new Intl.Locale('en-US').region", "US"),
+        ("new Intl.Locale('en-US').script", "undefined"),
+        ("new Intl.Locale('EN-latn-us').toString()", "en-Latn-US"),
+        ("new Intl.Locale('en-Latn-US').baseName", "en-Latn-US"),
+        ("new Intl.Locale('zh-hant-tw').script", "Hant"),
+        ("new Intl.Locale('es-419').region", "419"),
+        ("new Intl.Locale('de').region", "undefined"),
+        (
+            "new Intl.Locale('sl-rozaj-biske').baseName",
+            "sl-biske-rozaj",
+        ),
+        (
+            "new Intl.Locale('en-US-u-ca-buddhist-nu-thai-hc-h23').calendar",
+            "buddhist",
+        ),
+        (
+            "new Intl.Locale('en-US-u-ca-buddhist-nu-thai-hc-h23').numberingSystem",
+            "thai",
+        ),
+        (
+            "new Intl.Locale('en-US-u-ca-buddhist-nu-thai-hc-h23').hourCycle",
+            "h23",
+        ),
+        (
+            "new Intl.Locale('en-US-u-ca-buddhist-nu-thai-hc-h23').baseName",
+            "en-US",
+        ),
+        (
+            "new Intl.Locale('en-US-u-nu-thai-ca-buddhist').toString()",
+            "en-US-u-ca-buddhist-nu-thai",
+        ),
+        ("new Intl.Locale('en-u-kn').numeric", "true"),
+        ("new Intl.Locale('en-u-kn-true').toString()", "en-u-kn"),
+        ("new Intl.Locale('en-u-kn-false').numeric", "false"),
+        ("new Intl.Locale('en').numeric", "false"),
+        ("new Intl.Locale('en').calendar", "undefined"),
+        ("new Intl.Locale('de-u-co-phonebk').collation", "phonebk"),
+        ("new Intl.Locale('en-u-kf-upper').caseFirst", "upper"),
+        (
+            "new Intl.Locale('en', { region: 'gb' }).toString()",
+            "en-GB",
+        ),
+        (
+            "new Intl.Locale('en-US', { language: 'fr', script: 'latn' }).toString()",
+            "fr-Latn-US",
+        ),
+        (
+            "new Intl.Locale('en-US', { calendar: 'gregory', hourCycle: 'h12', numeric: true, caseFirst: 'lower', collation: 'emoji', numberingSystem: 'latn' }).toString()",
+            "en-US-u-ca-gregory-co-emoji-hc-h12-kf-lower-kn-nu-latn",
+        ),
+        (
+            "new Intl.Locale('en-u-ca-buddhist', { calendar: 'gregory' }).toString()",
+            "en-u-ca-gregory",
+        ),
+        (
+            "new Intl.Locale('en', { numeric: false }).toString()",
+            "en-u-kn-false",
+        ),
+        ("new Intl.Locale('en-x-private').toString()", "en-x-private"),
+        (
+            "new Intl.Locale('en-t-ja-u-ca-gregory').toString()",
+            "en-t-ja-u-ca-gregory",
+        ),
+        (
+            "new Intl.Locale(new Intl.Locale('fr-CA')).toString()",
+            "fr-CA",
+        ),
+        ("String(new Intl.Locale('pt-br'))", "pt-BR"),
+        (
+            "Object.prototype.toString.call(new Intl.Locale('en'))",
+            "[object Intl.Locale]",
+        ),
+        ("new Intl.Locale('en').maximize().toString()", "en-Latn-US"),
+        (
+            "new Intl.Locale('en-GB').maximize().toString()",
+            "en-Latn-GB",
+        ),
+        ("new Intl.Locale('de').maximize().toString()", "de-Latn-DE"),
+        ("new Intl.Locale('zh').maximize().toString()", "zh-Hans-CN"),
+        (
+            "new Intl.Locale('zh-TW').maximize().toString()",
+            "zh-Hant-TW",
+        ),
+        (
+            "new Intl.Locale('zh-Hant').maximize().toString()",
+            "zh-Hant-TW",
+        ),
+        (
+            "new Intl.Locale('zh-HK').maximize().toString()",
+            "zh-Hant-HK",
+        ),
+        ("new Intl.Locale('ja').maximize().region", "JP"),
+        ("new Intl.Locale('pt').maximize().toString()", "pt-Latn-BR"),
+        (
+            "new Intl.Locale('pt-PT').maximize().toString()",
+            "pt-Latn-PT",
+        ),
+        ("new Intl.Locale('und').maximize().toString()", "en-Latn-US"),
+        (
+            "new Intl.Locale('en-u-ca-gregory').maximize().toString()",
+            "en-Latn-US-u-ca-gregory",
+        ),
+        ("new Intl.Locale('en-Latn-US').minimize().toString()", "en"),
+        (
+            "new Intl.Locale('en-Latn-GB').minimize().toString()",
+            "en-GB",
+        ),
+        (
+            "new Intl.Locale('zh-Hant-TW').minimize().toString()",
+            "zh-TW",
+        ),
+        ("new Intl.Locale('zh-Hans-CN').minimize().toString()", "zh"),
+        (
+            "new Intl.Locale('zh-Hant-HK').minimize().toString()",
+            "zh-HK",
+        ),
+        (
+            "new Intl.Locale('sr-Latn-RS').minimize().toString()",
+            "sr-Latn",
+        ),
+        (
+            "new Intl.Locale('de-DE-u-co-phonebk').minimize().toString()",
+            "de-u-co-phonebk",
+        ),
+        ("new Intl.Locale('fr-CA').minimize().toString()", "fr-CA"),
+        (
+            "new Intl.NumberFormat(new Intl.Locale('en-US')).format(1234.5)",
+            "1,234.5",
+        ),
+        (
+            "Intl.getCanonicalLocales(new Intl.Locale('EN-gb'))",
+            "en-GB",
+        ),
+        (
+            "(() => { try { new Intl.Locale(); } catch (e) { return e.name; } })()",
+            "TypeError",
+        ),
+        (
+            "(() => { try { new Intl.Locale(5); } catch (e) { return e.name; } })()",
+            "TypeError",
+        ),
+        (
+            "(() => { try { new Intl.Locale('en_US'); } catch (e) { return e.name; } })()",
+            "RangeError",
+        ),
+        (
+            "(() => { try { new Intl.Locale(''); } catch (e) { return e.name; } })()",
+            "RangeError",
+        ),
+        (
+            "(() => { try { new Intl.Locale('en', { region: 'USA' }); } catch (e) { return e.name; } })()",
+            "RangeError",
+        ),
+        (
+            "(() => { try { new Intl.Locale('en', { hourCycle: 'h25' }); } catch (e) { return e.name; } })()",
+            "RangeError",
+        ),
+        (
+            "(() => { try { new Intl.Locale('en', { calendar: 'x' }); } catch (e) { return e.name; } })()",
+            "RangeError",
+        ),
+        (
+            "(() => { try { Intl.Locale('en'); } catch (e) { return e.name; } })()",
+            "TypeError",
+        ),
+        (
+            "typeof Object.getOwnPropertyDescriptor(Intl.Locale.prototype, 'language').get",
+            "function",
+        ),
+        ("Object.keys(new Intl.Locale('en-US')).length", "0"),
+        ("Intl.Locale.name", "Locale"),
+    ]);
+}
+
 #[test]
 fn loads_lazily() {
     let js = page();
