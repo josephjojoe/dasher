@@ -469,11 +469,13 @@ Measured: 10 million `o[k]` reads with keys from `Object.keys`, 75 to
 
 On 14 heavy recorded pages (Linux, aarch64 profiling build; main at
 `045dfd2` with and without these changes, seven runs per page alternating
-the builds, medians): 2.9% less CPU time summed over the pages (35.4 to
-34.4 s), less on every page (0.9% on github.com to 4.4% on
-theverge.com), and 1.3% less peak RSS (1135 to 1120 MiB), with no page
-higher beyond its run-to-run noise. yahoo.com is left out: on this main it
-runs into a limit after 10 s in both builds. In profiles of ten of these
+the builds, medians; the comparison was run twice): 2.9 and 3.0% less CPU
+time summed over the pages (35.4 to 34.4 s, and 35.1 to 34.1), less on
+every page in both runs but one where they tied (0.9 to 5.8%), and 1.3 and
+1.1% less peak RSS (1135 to 1120 MiB, and 1132 to 1119), with no page
+higher in both runs (nytimes.com was 1.9% lower in one and 1.5% higher in
+the other). yahoo.com is left out: on this main it runs into a limit after
+10 s in both builds. In profiles of ten of these
 pages, the functions these changes replace or skip (`js_get_atom_index`,
 `JS_ToQuotedString`, `JS_ToStringInternal`, `string_getc`,
 `json_next_token`) went from 1.8% of the samples to 0.3%, `js_json_quote`

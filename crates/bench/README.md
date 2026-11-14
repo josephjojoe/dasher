@@ -702,6 +702,29 @@ python3 -I crates/bench/micro/lightpanda.py path/to/lightpanda \
 Its tagName figure (72 ns here, 60 in the audit) puts this machine about
 1.2 times slower than the audit's for Lightpanda.
 
+### Strings, atoms and JSON
+
+In-place `+=`, a JSON scanner and writer of the engine's own, `memchr`
+string search and no dump code in QuickJS (DAS-37, see
+[`vendor/rquickjs-sys/PATCHES.md`](../../vendor/rquickjs-sys/PATCHES.md)).
+Same machine, main at `045dfd2` with and without the changes, median of 5
+runs, against Node 22 `--jitless --single-threaded`:
+
+| benchmark | before ns/op | after ns/op | Node `--jitless` ns/op | after ÷ Node |
+| --- | ---: | ---: | ---: | ---: |
+| string concat | 160 | 77.3 | 44.3 | 1.7× |
+| string methods | 1,632 | 928 | 561 | 1.7× |
+| JSON | 4,538 | 1,487 | 1,174 | 1.3× |
+
+The other language rows moved by 0 to 7%, most of them down, which is the
+smaller heap and code layout rather than anything they call. What is left
+of the first two is mostly the interpreter around the calls and
+allocation; with DAS-36 and DAS-46 merged in as they stood, the three rows
+came to 55.2, 730 and 1,248 ns. Parsing a 2.1 MB JSON array of 20,000
+records takes 10 ms instead of 38 (Node `--jitless`: 62), and writing it
+12 ms instead of 53 (16). On 14 heavy recorded pages: 3% less CPU time
+and 1.1 to 1.3% less peak RSS; the per-change figures are in `PATCHES.md`.
+
 ## Per-page limits
 
 Each page has two hard limits. Going over either one stops the page and
