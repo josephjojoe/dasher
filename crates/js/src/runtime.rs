@@ -15,6 +15,7 @@ use rquickjs::{
 };
 use url::Url;
 
+use crate::budget::{Budget, BudgetState, WorkLimits};
 use crate::clock::ClockMode;
 use crate::console::{self, ConsoleMessage};
 use crate::dom::{self, DomState};
@@ -23,6 +24,7 @@ use crate::error::{ErrorKind, ScriptError};
 use crate::event_loop::{self, DEFAULT_FRAME_INTERVAL, LoopHooks, LoopState, Stopped};
 use crate::glue;
 use crate::heap::{self, HeapState};
+use crate::intl;
 use crate::limits::{DEFAULT_MAX_DOM_NODES, ResourceLimit};
 use crate::loader::{self, LoaderHooks, LoaderState};
 use crate::log::BoundedLog;
@@ -127,6 +129,7 @@ impl InterruptHandle {
 /// exposes to JS. It holds no JS values, so it may outlive the context.
 pub(crate) struct Shared {
     deadline: Cell<Option<Instant>>,
+    budget: BudgetState,
     pub(crate) remote: Arc<Remote>,
     /// Set when the interrupt handler stopped JS since the last `begin`.
     interrupted: Cell<bool>,
@@ -148,9 +151,15 @@ impl Shared {
             Document::parse(""),
             options.max_dom_nodes,
             Rc::clone(&event_loop.clock),
+            dom::Geometry {
+                width: i32::try_from(options.window.viewport.width).unwrap_or(i32::MAX),
+                height: i32::try_from(options.window.viewport.height).unwrap_or(i32::MAX),
+                visibility: options.window.visibility,
+            },
         );
         Self {
             deadline: Cell::new(None),
+            budget: BudgetState::default(),
             remote: Arc::default(),
             interrupted: Cell::new(false),
             heap,
@@ -187,8 +196,17 @@ impl Shared {
         } else if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
             Some(Stopped::DeadlineExceeded)
         } else {
-            None
+            self.budget_exhausted().map(Stopped::BudgetExhausted)
         }
+    }
+
+    /// The work budget that ran out, if one has.
+    pub(crate) fn budget_exhausted(&self) -> Option<Budget> {
+        self.budget.check(|| {
+            self.net
+                .session()
+                .map_or(0, |s| s.activity().requests_started())
+        })
     }
 
     fn should_interrupt(&self) -> bool {
@@ -289,7 +307,19 @@ impl Shared {
                     (error, None)
                 } else {
                     let error = error_from_value(ctx, value.clone(), ErrorKind::Uncaught);
-                    (error, Some(value))
+                    // Or it allocates the InternalError but not its "out of
+                    // memory" message: where the heap fills up decides which.
+                    if error.kind == ErrorKind::Uncaught
+                        && error.message == "InternalError"
+                        && self.heap.take_refused()
+                    {
+                        (
+                            ScriptError::new(ErrorKind::OutOfMemory, "out of memory"),
+                            None,
+                        )
+                    } else {
+                        (error, Some(value))
+                    }
                 }
             }
             rquickjs::Error::Allocation => (
@@ -542,6 +572,10 @@ impl JsRuntime {
             runtime,
             shared,
         };
+        #[cfg(feature = "replay")]
+        if std::env::var_os("DASHER_EAGER_JS").is_some() {
+            js.with(|ctx| eager_functions(&ctx));
+        }
         js.with(|ctx| install(&ctx, &js.shared, &options).map_err(|e| js.shared.capture(&ctx, e)))?;
         Ok(js)
     }
@@ -741,6 +775,52 @@ impl JsRuntime {
         self.shared.deadline.get()
     }
 
+    /// Sets how much work the page may do before it is stopped, as a
+    /// deadline does: once the thread's CPU time or the session's request
+    /// count passes its limit, running JS is interrupted and no more JS is
+    /// started, and [`run`](Self::run) returns
+    /// [`RunOutcome::BudgetExhausted`](crate::RunOutcome::BudgetExhausted).
+    /// Setting the limits again (to [`WorkLimits::default`] for none)
+    /// lets the page run again.
+    pub fn set_work_limits(&self, limits: WorkLimits) {
+        self.shared.budget.set(limits);
+    }
+
+    /// The current work limits.
+    pub fn work_limits(&self) -> WorkLimits {
+        self.shared.budget.limits()
+    }
+
+    /// The work budget that has run out, if one has: [`Budget::Cpu`] or
+    /// [`Budget::Requests`]. The page runs no JS until the limits are set
+    /// again.
+    pub fn budget_exhausted(&self) -> Option<Budget> {
+        self.shared.budget_exhausted()
+    }
+
+    /// How much page time the event loop has skipped in all, jumping
+    /// ahead to timers in [`ClockMode::Virtual`] or through
+    /// [`advance`](Self::advance): how far page time is ahead of the wall
+    /// clock.
+    pub fn skipped(&self) -> Duration {
+        self.event_loop().clock.skipped()
+    }
+
+    /// Caps [`skipped`](Self::skipped) at `limit`. Once page time has
+    /// skipped that much, the event loop stops jumping ahead and waits for
+    /// timers in real time, as in [`ClockMode::Realtime`], so that a page
+    /// running a timer forever cannot keep the CPU busy; `advance` moves
+    /// page time no further. `None` lifts the cap.
+    pub fn set_skip_limit(&self, limit: Option<Duration>) {
+        self.event_loop().clock.set_skip_limit(limit);
+    }
+
+    /// How much more page time may be skipped, if a
+    /// [skip limit](Self::set_skip_limit) is set.
+    pub fn skip_left(&self) -> Option<Duration> {
+        self.event_loop().clock.skip_left()
+    }
+
     /// A handle that interrupts this runtime from any thread.
     pub fn interrupt_handle(&self) -> InterruptHandle {
         InterruptHandle {
@@ -798,6 +878,8 @@ impl Drop for JsRuntime {
         self.shared.event_loop.clear();
         self.shared.net.abort_all();
         self.shared.modules.abort_all();
+        // The DOM may outlive the engine (in a `HeldNode`).
+        self.shared.dom.set_runtime(std::ptr::null_mut());
     }
 }
 
@@ -807,7 +889,9 @@ fn install<'js>(
     shared: &Rc<Shared>,
     options: &RuntimeOptions,
 ) -> rquickjs::Result<()> {
+    crate::native_data::NativeData::install(ctx)?;
     let native = Object::new(ctx.clone())?;
+    crate::events::install(ctx, &native, shared)?;
 
     let s = Rc::clone(shared);
     native.set(
@@ -829,6 +913,7 @@ fn install<'js>(
     net::install(ctx, &native, shared)?;
     encoding::install(ctx, &native)?;
     urls::install(ctx, &native)?;
+    intl::install(ctx, &native)?;
     random::install(ctx, &native)?;
     window::install(ctx, &native, shared, &options.window)?;
     dom::install(ctx, &native, shared)?;
@@ -856,4 +941,18 @@ fn install<'js>(
         return Err(rquickjs::Error::Unknown);
     }
     Ok(())
+}
+
+/// For benchmarks (`DASHER_EAGER_JS`, with the `replay` feature): compile
+/// every function with its script, as the engine did before it learned to
+/// leave functions to their first call (see
+/// `vendor/rquickjs-sys/PATCHES.md`), so that one build can be measured
+/// both ways.
+#[cfg(feature = "replay")]
+fn eager_functions(ctx: &Ctx<'_>) {
+    unsafe extern "C" {
+        fn JS_SetLazyFunctions(rt: *mut qjs::JSRuntime, enable: bool);
+    }
+    // SAFETY: `ctx` is live and its runtime locked; the call sets a flag.
+    unsafe { JS_SetLazyFunctions(qjs::JS_GetRuntime(ctx.as_raw().as_ptr()), false) };
 }

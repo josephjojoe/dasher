@@ -723,7 +723,6 @@ fn take_log(js: &JsRuntime) -> Vec<String> {
 fn parser_changes_are_recorded() {
     let js = page("");
     js.set_document(Document::new());
-    js.hold_detached_nodes(true);
     let mut parser = js.with_document_mut(|doc| DocumentParser::new(doc, ParseOptions::default()));
     let step = |parser: &mut DocumentParser, chunk: &str| {
         parser.push(chunk);

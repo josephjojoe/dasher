@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use dasher_js::{
     ClockMode, JsRuntime, NavigationKind, NavigationRequest, RunOutcome, RuntimeOptions, Viewport,
-    WindowOptions,
+    Visibility, WindowOptions,
 };
 
 fn page(url: &str) -> JsRuntime {
@@ -378,7 +378,17 @@ fn screen_and_viewport() {
 
 #[test]
 fn scrolling_moves_and_fires_scroll_once_per_task() {
-    let js = page("https://example.com/");
+    // Under `All` the window scrolls without limit.
+    let js = JsRuntime::new(RuntimeOptions {
+        clock: ClockMode::Manual,
+        window: WindowOptions {
+            url: "https://example.com/".into(),
+            visibility: Visibility::All,
+            ..WindowOptions::default()
+        },
+        ..RuntimeOptions::default()
+    })
+    .unwrap();
     run(
         &js,
         r#"

@@ -3,9 +3,11 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+use std::time::Duration;
+
 use dasher::{
-    AutoScrollOptions, Browser, ClockMode, Error, GotoOptions, JsonValue, Navigation, NetworkIdle,
-    Page, SettleOptions,
+    AutoScrollOptions, Browser, ClockMode, DEFAULT_PAGE_TIME_BUDGET, Error, GotoOptions, JsonValue,
+    Navigation, NetworkIdle, Page, SettleOptions, WorkBudget,
 };
 use dasher_serve::report::{
     console_json, error_json, error_message, level_name, scroll_json, settle_name,
@@ -57,6 +59,9 @@ async fn run(options: &Options) -> ExitCode {
     if options.verbose {
         report_diagnostics(&page);
     }
+    if let (true, Some(budget)) = (options.verbose, navigation.budget_exhausted) {
+        eprintln!("dasher: {budget}; output is the page as it stood");
+    }
     if navigation.timed_out {
         eprintln!(
             "dasher: timed out after {:.1}s; output is the page as far as it got",
@@ -103,6 +108,9 @@ fn browser(options: &Options) -> dasher::Result<Browser> {
     if options.realtime {
         builder = builder.clock(ClockMode::Realtime);
     }
+    if let Some(visibility) = options.visibility {
+        builder = builder.visibility(visibility);
+    }
     if let Some(mib) = options.memory_limit {
         builder = builder.memory_limit((mib > 0).then(|| mib.saturating_mul(1024 * 1024)));
     }
@@ -134,24 +142,48 @@ fn goto_options(options: &Options) -> GotoOptions {
         predicate: options.wait_until.clone(),
         // The overall timeout bounds settling.
         timeout: options.timeout,
+        page_time_budget: nonzero(options.page_time_budget, DEFAULT_PAGE_TIME_BUDGET),
     };
     let waits = settle.network_idle.is_some()
         || settle.dom_quiet.is_some()
         || settle.selector.is_some()
         || settle.predicate.is_some();
+    let defaults = WorkBudget::default();
+    let budget = WorkBudget {
+        cpu: match options.cpu_budget {
+            None => defaults.cpu,
+            Some(cpu) => (!cpu.is_zero()).then_some(cpu),
+        },
+        requests: match options.request_budget {
+            None => defaults.requests,
+            Some(n) => (n > 0).then_some(n),
+        },
+    };
     let mut goto = GotoOptions {
         settle: waits.then_some(settle),
         auto_scroll: None,
         timeout: Some(options.timeout),
+        budget,
     };
     if options.scroll {
         let mut scroll = AutoScrollOptions::default();
         if let Some(max) = options.max_scrolls {
             scroll.max_scrolls = max;
         }
+        if options.page_time_budget.is_some() {
+            scroll.settle.page_time_budget = goto.settle.as_ref().and_then(|s| s.page_time_budget);
+        }
         goto = goto.with_auto_scroll(scroll);
     }
     goto
+}
+
+/// `value`, with zero for none and nothing given for `default`.
+fn nonzero(value: Option<Duration>, default: Duration) -> Option<Duration> {
+    match value {
+        None => Some(default),
+        Some(d) => (!d.is_zero()).then_some(d),
+    }
 }
 
 /// The page-level facts the JSON output starts from.
@@ -163,6 +195,8 @@ fn summary(page: &Page, navigation: &Navigation) -> JsonValue {
         "timed_out": navigation.timed_out,
         "settle": navigation.settle.map(settle_name),
         "scroll": navigation.scroll.as_ref().map(scroll_json),
+        "budget_exhausted": navigation.budget_exhausted.map(|b| b.name()),
+        "requests": navigation.requests,
         "elapsed_ms": u64::try_from(navigation.elapsed.as_millis()).unwrap_or(u64::MAX),
         "console": page.console().iter().map(console_json).collect::<Vec<_>>(),
         "errors": page.errors().iter().map(error_json).collect::<Vec<_>>(),

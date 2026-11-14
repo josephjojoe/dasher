@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use dasher::Visibility;
+
 use crate::service::{self, ServeOptions};
 
 pub const USAGE: &str = "\
@@ -14,7 +16,7 @@ settles, and prints the resulting HTML. See `dasher serve --help` for
 the service modes.
 
 Waiting:
-      --wait <strategy>     when the page counts as ready [default: settled]
+      --wait <strategy>     when the page counts as ready [default: network-idle]
                               load           the load event has fired
                               network-idle   no requests for the quiet period
                               network-idle2  at most 2 requests for it
@@ -27,6 +29,16 @@ Waiting:
       --scroll              then scroll to load infinite feeds and lazy content
       --max-scrolls <n>     most scrolls with --scroll [default: 20]
 
+Budgets (when one runs out, the page is output as it stands; 0 for none):
+      --page-time-budget <secs>
+                            most page time to skip ahead or sit idle while
+                            waiting for the page to go quiet [default: 5].
+                            Pages that update on a timer forever never do;
+                            past this the quiet periods are given up
+      --cpu-budget <secs>   most CPU time for loading, waiting and
+                            scrolling [default: 10]
+      --request-budget <n>  most requests the page may make [default: 1000]
+
 Browser:
   -A, --user-agent <ua>     User-Agent header and navigator.userAgent
       --viewport <WxH>      window size in CSS pixels [default: 1920x1080]
@@ -38,6 +50,16 @@ Browser:
                             wildcard: '*://*.doubleclick.net/*' (repeatable)
       --realtime            run timers in real time instead of skipping
                             ahead when the page is only waiting on them
+      --visibility <policy> what counts as in view, which decides how much
+                            lazy content loads [default: loaded]
+                              loaded    the page as it stood at load is in
+                                        view; what it adds later is below
+                                        the fold until --scroll reveals it
+                              all       everything, always: the most lazy
+                                        content, but a page that keeps
+                                        loading more can run to the timeout
+                              viewport  only what is scrolled to: the
+                                        least work and the least content
       --memory-limit <MiB>  cap the page's JS heap; 0 for no cap [default: 256]
       --max-dom-nodes <n>   cap the nodes in the page's DOM; 0 for no cap
                             [default: 500000]. A page over either limit is
@@ -89,6 +111,12 @@ pub struct Options {
     pub timeout: Duration,
     pub scroll: bool,
     pub max_scrolls: Option<usize>,
+    /// `Some(ZERO)` lifts the budget, `None` keeps the default.
+    pub page_time_budget: Option<Duration>,
+    /// `Some(ZERO)` lifts the budget, `None` keeps the default.
+    pub cpu_budget: Option<Duration>,
+    /// `Some(0)` lifts the budget, `None` keeps the default.
+    pub request_budget: Option<u64>,
     pub user_agent: Option<String>,
     pub viewport: Option<(u32, u32)>,
     pub headers: Vec<(String, String)>,
@@ -96,6 +124,7 @@ pub struct Options {
     pub proxy: Option<String>,
     pub block: Vec<String>,
     pub realtime: bool,
+    pub visibility: Option<Visibility>,
     /// In MiB; `Some(0)` lifts the limit, `None` keeps the default.
     pub memory_limit: Option<usize>,
     /// `Some(0)` lifts the limit, `None` keeps the default.
@@ -109,13 +138,16 @@ impl Options {
     fn new(url: String) -> Self {
         Self {
             url,
-            wait: Wait::Settled,
+            wait: Wait::NetworkIdle,
             quiet: Duration::from_millis(500),
             wait_for: None,
             wait_until: None,
             timeout: Duration::from_secs(30),
             scroll: false,
             max_scrolls: None,
+            page_time_budget: None,
+            cpu_budget: None,
+            request_budget: None,
             user_agent: None,
             viewport: None,
             headers: Vec::new(),
@@ -123,6 +155,7 @@ impl Options {
             proxy: None,
             block: Vec::new(),
             realtime: false,
+            visibility: None,
             memory_limit: None,
             max_dom_nodes: None,
             eval: None,
@@ -196,6 +229,13 @@ pub fn parse(
                 options.max_scrolls = Some(number(&name, &value("a count")?)?);
                 options.scroll = true;
             }
+            "--page-time-budget" => {
+                options.page_time_budget = Some(budget_seconds(&name, &value("seconds")?)?);
+            }
+            "--cpu-budget" => options.cpu_budget = Some(budget_seconds(&name, &value("seconds")?)?),
+            "--request-budget" => {
+                options.request_budget = Some(number(&name, &value("a count")?)?);
+            }
             "-A" | "--user-agent" => options.user_agent = Some(value("a user agent")?),
             "--viewport" => options.viewport = Some(viewport(&value("WIDTHxHEIGHT")?)?),
             "-H" | "--header" => options.headers.push(header(&value("a header")?)?),
@@ -203,6 +243,7 @@ pub fn parse(
             "--proxy" => options.proxy = Some(value("a proxy URL")?),
             "--block" => options.block.push(value("a URL pattern")?),
             "--realtime" => options.realtime = true,
+            "--visibility" => options.visibility = Some(parse_visibility(&value("a policy")?)?),
             "--memory-limit" => options.memory_limit = Some(number(&name, &value("MiB")?)?),
             "--max-dom-nodes" => options.max_dom_nodes = Some(number(&name, &value("a count")?)?),
             "-e" | "--eval" => options.eval = Some(value("an expression")?),
@@ -230,6 +271,12 @@ fn parse_wait(s: &str) -> Result<Wait, String> {
     })
 }
 
+fn parse_visibility(s: &str) -> Result<Visibility, String> {
+    Visibility::from_name(s).ok_or_else(|| {
+        format!("unknown --visibility policy {s:?}: expected loaded, all or viewport")
+    })
+}
+
 fn number<T: std::str::FromStr>(name: &str, s: &str) -> Result<T, String> {
     s.trim()
         .parse()
@@ -242,6 +289,15 @@ fn seconds(name: &str, s: &str) -> Result<Duration, String> {
         .ok()
         .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
         .filter(|d| !d.is_zero())
+        .ok_or_else(|| format!("{name} expects a number of seconds, not {s:?}"))
+}
+
+/// A budget in seconds: 0 or more.
+fn budget_seconds(name: &str, s: &str) -> Result<Duration, String> {
+    s.trim()
+        .parse::<f64>()
+        .ok()
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
         .ok_or_else(|| format!("{name} expects a number of seconds, not {s:?}"))
 }
 
@@ -304,6 +360,11 @@ mod tests {
             "1.5",
             "--max-scrolls",
             "7",
+            "--page-time-budget=2.5",
+            "--cpu-budget",
+            "0",
+            "--request-budget",
+            "300",
             "-A",
             "bot/1",
             "--viewport",
@@ -320,6 +381,8 @@ mod tests {
             "--block",
             "*track*",
             "--realtime",
+            "--visibility",
+            "viewport",
             "--memory-limit",
             "64",
             "--max-dom-nodes=0",
@@ -339,6 +402,9 @@ mod tests {
         assert_eq!(options.timeout, Duration::from_millis(1500));
         assert!(options.scroll);
         assert_eq!(options.max_scrolls, Some(7));
+        assert_eq!(options.page_time_budget, Some(Duration::from_millis(2500)));
+        assert_eq!(options.cpu_budget, Some(Duration::ZERO));
+        assert_eq!(options.request_budget, Some(300));
         assert_eq!(options.user_agent.as_deref(), Some("bot/1"));
         assert_eq!(options.viewport, Some((390, 844)));
         assert_eq!(
@@ -352,6 +418,7 @@ mod tests {
         assert_eq!(options.proxy.as_deref(), Some("http://proxy:3128"));
         assert_eq!(options.block, ["*ads*", "*track*"]);
         assert!(options.realtime && options.json && options.verbose);
+        assert_eq!(options.visibility, Some(Visibility::Viewport));
         assert_eq!(options.memory_limit, Some(64));
         assert_eq!(options.max_dom_nodes, Some(0));
         assert_eq!(options.eval.as_deref(), Some("document.title"));
@@ -377,6 +444,7 @@ mod tests {
         let err = |args: &[&str]| run(args).unwrap_err();
         assert_eq!(err(&[]), "no URL given");
         assert_eq!(err(&["a", "b"]), "only one URL may be given");
+        assert!(err(&["--visibility", "some", "x"]).contains("expected loaded, all or viewport"));
         assert_eq!(err(&["--bogus", "u"]), "unknown option --bogus");
         assert_eq!(err(&["u", "--eval"]), "--eval needs an expression");
         assert_eq!(err(&["u", "--json=yes"]), "--json takes no value");
@@ -384,6 +452,8 @@ mod tests {
         assert!(err(&["u", "--timeout", "0"]).contains("seconds"));
         assert!(err(&["u", "--timeout", "-1"]).contains("seconds"));
         assert!(err(&["u", "--quiet", "1.5"]).contains("whole number"));
+        assert!(err(&["u", "--cpu-budget", "-1"]).contains("seconds"));
+        assert!(err(&["u", "--request-budget", "lots"]).contains("whole number"));
         assert!(err(&["u", "--viewport", "100"]).contains("WIDTHxHEIGHT"));
         assert!(err(&["u", "--viewport", "0x10"]).contains("WIDTHxHEIGHT"));
         assert!(err(&["u", "-H", "no colon"]).contains("Name: value"));

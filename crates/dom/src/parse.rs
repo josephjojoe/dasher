@@ -330,7 +330,7 @@ pub(crate) struct Sink<'a> {
     pub(crate) doc: RefCell<DocSlot<'a>>,
     /// The document node html5ever builds under: the real one for document
     /// parsing, a scratch one for fragments.
-    document: NodeId,
+    pub(crate) document: NodeId,
     fragment: bool,
     /// html5ever's atom for each local name seen, indexed by [`Name`] id, so
     /// `elem_name` does not have to re-create atoms from strings.
@@ -440,7 +440,12 @@ impl<'a> Sink<'a> {
     fn shrink_grown_text(&self) {
         let mut doc = self.doc.borrow_mut();
         for id in self.grown_text.take() {
-            // In an incremental parse, script may have changed the node since.
+            // In an incremental parse, script may have changed the node
+            // since, or removed it and let it be released (its slot may even
+            // hold another node now, which shrinking does no harm to).
+            if doc.is_released(id) {
+                continue;
+            }
             if let Some(s) = doc.text_mut(id) {
                 s.shrink_to_fit();
             }

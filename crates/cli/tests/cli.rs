@@ -179,12 +179,29 @@ fn scroll_loads_more_of_a_feed() {
     let count = "document.querySelectorAll('article').length";
     assert_eq!(stdout(&dasher(&[&url, "-e", count])), "1\n");
     assert_eq!(stdout(&dasher(&[&url, "--scroll", "-e", count])), "7\n");
+    // One round steps a viewport down and then nudges at the bottom: two
+    // scroll events, and this feed loads a page on each.
     assert_eq!(
         stdout(&dasher(&[&url, "--max-scrolls", "1", "-e", count])),
+        "5\n"
+    );
+    // Under `all` the one-post document is a single viewport tall, so
+    // there is only the nudge.
+    assert_eq!(
+        stdout(&dasher(&[
+            &url,
+            "--visibility",
+            "all",
+            "--max-scrolls",
+            "1",
+            "-e",
+            count
+        ])),
         "3\n"
     );
+    // Its three pages come in over two rounds.
     let out = json(&dasher(&[&url, "--scroll", "--json", "-e", "1"]));
-    assert_eq!(out["scroll"]["productive_scrolls"], 3);
+    assert_eq!(out["scroll"]["productive_scrolls"], 2);
     assert_eq!(out["scroll"]["stopped"], "no_new_content");
 }
 
@@ -299,4 +316,43 @@ fn help_and_version() {
     assert!(help.starts_with("usage: dasher [options] <url>"));
     let version = stdout(&dasher(&["--version"]));
     assert_eq!(version, format!("dasher {}\n", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn budgets_end_pages_that_never_finish_and_say_so() {
+    let server = server();
+    let out = json(&dasher(&[&server.url("/ticker.html"), "--json"]));
+    assert_eq!(out["settle"], "settled");
+    let out = json(&dasher(&[
+        &server.url("/ticker.html"),
+        "--json",
+        "--wait",
+        "settled",
+    ]));
+    assert_eq!(out["timed_out"], false);
+    assert_eq!(out["settle"], "budget_exhausted");
+    assert_eq!(out["budget_exhausted"], "page_time");
+    assert!(out["html"].as_str().unwrap().contains("Headline"));
+
+    let out = json(&dasher(&[
+        &server.url("/more.html"),
+        "--json",
+        "--request-budget",
+        "20",
+    ]));
+    assert_eq!(out["budget_exhausted"], "requests");
+    assert!(out["requests"].as_u64().unwrap() <= 22, "{out}");
+
+    // With the budgets off, the page runs until the timeout.
+    let out = json(&dasher(&[
+        &server.url("/ticker.html"),
+        "--json",
+        "--wait=settled",
+        "--page-time-budget",
+        "0",
+        "-t",
+        "0.5",
+    ]));
+    assert_eq!(out["timed_out"], true);
+    assert_eq!(out["budget_exhausted"], Value::Null);
 }

@@ -25,7 +25,18 @@
 //! or driven with [`run`](JsRuntime::run) under Tokio, which waits for
 //! timers and for work posted from other threads through a [`TaskSender`].
 //! [`ClockMode::Virtual`] lets the loop skip idle gaps so long timers do not
-//! hold up a page that is settling.
+//! hold up a page that is settling. [`JsRuntime::set_skip_limit`] caps how
+//! far it may skip, so a timer that fires forever cannot become a busy
+//! loop; past the cap the loop waits for timers in real time.
+//! `requestIdleCallback` callbacks run as they come due, but do not keep
+//! the loop going: with nothing else left, [`run`](JsRuntime::run) is
+//! idle.
+//!
+//! [`JsRuntime::set_work_limits`] bounds the work a page does, by the CPU
+//! time of its thread ([`thread_cpu_time`]) and the requests its session
+//! has started. Once over either, the page stops as it does at a deadline,
+//! and [`JsRuntime::budget_exhausted`] says which [`Budget`] ran out,
+//! until the limits are set again.
 //!
 //! Page scripts get `setTimeout`, `setInterval`, `clearTimeout`,
 //! `clearInterval`, `queueMicrotask`, `requestAnimationFrame`,
@@ -33,14 +44,17 @@
 //! whose output is captured (see [`JsRuntime::take_console`]). `Date` reads
 //! the same page clock as `performance.now()`.
 //!
-//! DOM events are implemented in JS glue evaluated after the prelude:
-//! `EventTarget`, `Event`, `CustomEvent`, `ErrorEvent`,
-//! `PromiseRejectionEvent`, `DOMException`, `AbortController` and
-//! `AbortSignal`. Each glue file (listed in order in
-//! `src/glue.rs`) receives the host functions and a shared `internals`
-//! object for the glue that follows it. `internals` provides trusted event
-//! dispatch, `on*` attributes, abort hooks, task queueing, URL parsing,
-//! structured cloning and the document URL.
+//! DOM events are native: `EventTarget` and `Event` are QuickJS C
+//! constructors whose instances keep their state in Rust, listeners are
+//! stored in Rust per target, and dispatch (event path, shadow DOM
+//! retargeting, phases, `on*` handlers) runs in Rust (see `src/events/`).
+//! The JS glue evaluated after the prelude builds `CustomEvent`,
+//! `ErrorEvent`, `PromiseRejectionEvent`, `DOMException`,
+//! `AbortController` and `AbortSignal` on them. Each glue file (listed in
+//! order in `src/glue.rs`) receives the host functions and a shared
+//! `internals` object for the glue that follows it. `internals` provides
+//! trusted event dispatch, `on*` attributes, abort hooks, task queueing,
+//! URL parsing, structured cloning and the document URL.
 //!
 //! ```
 //! use std::time::Duration;
@@ -183,14 +197,17 @@
 //! page's node limit.
 //!
 //! Geometry is synthetic, chosen so content gated on visibility or
-//! scrolling still loads; [`WindowOptions::layout`] picks how (see
-//! [`LayoutMode`]). By default every rendered element is a visible,
-//! non-zero box at the top of the viewport, the document is as tall as its
-//! content and scrolls without limit, and `IntersectionObserver` reports
-//! every observed element as intersecting. [`LayoutMode::Scrolled`] stacks
-//! the elements in document order instead, so they intersect only once
-//! scrolled into view. `ResizeObserver` reports each element's synthetic
-//! size once.
+//! scrolling still loads; [`WindowOptions::visibility`] picks how (see
+//! [`Visibility`]). By default ([`Visibility::Loaded`]) every rendered
+//! element present when the page loaded is a visible, non-zero box at the
+//! top of the viewport, the document is as tall as its content and scrolls
+//! without limit, and `IntersectionObserver` reports those elements as
+//! intersecting; what is inserted after load is stacked below the fold
+//! until the host calls [`JsRuntime::reveal`]. [`Visibility::All`] keeps
+//! every element in view whenever it was inserted, and
+//! [`Visibility::Viewport`] stacks the elements in document order, so they
+//! intersect only once scrolled into view. `ResizeObserver` reports each
+//! element's synthetic size once.
 //!
 //! `MutationObserver` sees every change scripts make to the tree, with the
 //! standard's records (`childList`, `attributes` and `characterData`, with
@@ -263,8 +280,10 @@
 //!   parser-executed script runs, and ignore it from async scripts;
 //! - [`set_document_info`](JsRuntime::set_document_info) for
 //!   `document.characterSet`, `contentType` and `referrer`;
-//! - [`hold_detached_nodes`](JsRuntime::hold_detached_nodes), which keeps
-//!   node ids the parser still uses valid while scripts change the tree;
+//! - [`hold_node`](JsRuntime::hold_node), which keeps a node id the host
+//!   keeps across script runs (a script element waiting to run) valid while
+//!   scripts change the tree. [`with_parser`](JsRuntime::with_parser) holds
+//!   the nodes the parser still uses the same way, by itself;
 //! - the module graph functions (see [ES modules](#es-modules)),
 //!   [`register_import_map`](JsRuntime::register_import_map) and
 //!   [`link_inserted`](JsRuntime::link_inserted) for parser-inserted
@@ -334,6 +353,7 @@
 //! # }
 //! ```
 
+mod budget;
 mod clock;
 mod console;
 mod data_url;
@@ -342,13 +362,16 @@ mod encoding;
 mod error;
 mod evaluate;
 mod event_loop;
+mod events;
 mod glue;
 mod heap;
+mod intl;
 mod limits;
 mod loader;
 mod log;
 mod media;
 mod modules;
+mod native_data;
 mod net;
 mod random;
 #[doc(hidden)]
@@ -363,9 +386,10 @@ mod timers;
 mod urls;
 mod window;
 
+pub use budget::{Budget, WorkLimits, thread_cpu_time};
 pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
-pub use dom::DomActivity;
+pub use dom::{DomActivity, HeldNode};
 pub use error::{ErrorKind, ScriptError};
 pub use evaluate::{Evaluation, PendingEvaluation};
 pub use event_loop::{DEFAULT_FRAME_INTERVAL, LoopHandle, Stopped, Task};
@@ -380,7 +404,7 @@ pub use runtime::{
 };
 pub use storage::{DEFAULT_STORAGE_QUOTA, QuotaExceeded, StorageStore};
 pub use window::{
-    DEFAULT_USER_AGENT, LayoutMode, NavigationKind, NavigationRequest, Viewport, WindowOptions,
+    DEFAULT_USER_AGENT, NavigationKind, NavigationRequest, Viewport, Visibility, WindowOptions,
 };
 
 /// The rquickjs version dasher is built against, for host bindings.

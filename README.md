@@ -38,8 +38,10 @@ stylesheets, fonts and media are never downloaded.
 Where pages expect layout (`getBoundingClientRect`, `offsetHeight`, scroll
 position, `IntersectionObserver`, `getComputedStyle`), dasher returns plausible
 synthetic values. They are chosen so that content gated behind visibility or
-scrolling still loads: by default everything counts as visible and in the
-viewport, and the document is treated as tall enough to scroll.
+scrolling still loads: by default the page as it stood at the load event
+counts as visible and in the viewport, so its lazy parts load once, and what
+the page appends after that waits below the fold until dasher is asked to
+scroll. See [Visibility](#visibility).
 
 Content that web components render into shadow roots is part of the result:
 the HTML carries each shadow tree as declarative shadow DOM
@@ -48,6 +50,27 @@ given to dasher look into shadow trees.
 
 [COMPATIBILITY.md](COMPATIBILITY.md) lists the web APIs pages may expect that
 dasher does not support yet.
+
+## Bounded page loads
+
+dasher waits for a page to go quiet (by default, the network idle for
+500 ms; `--wait settled` also waits for the DOM to stop changing) under a
+virtual clock that skips ahead to the page's next timer instead
+of sleeping. Some pages never go quiet: carousels and tickers change the
+DOM on a timer forever, and some feeds fetch more as soon as the last
+batch arrives. Three budgets bound every load, and when one runs out the
+page is returned as it stands, as a success that says which budget ended
+it (`budget_exhausted` in the JSON output and the service's response,
+`Navigation::budget_exhausted` in the Rust API):
+
+| Budget | Default | CLI | Job field |
+| --- | --- | --- | --- |
+| Page time spent waiting for quiet: skipped, or idle on timers | 5 s | `--page-time-budget` | `page_time_budget_ms` |
+| CPU time for loading, settling and scrolling | 10 s | `--cpu-budget` | `cpu_budget_ms` |
+| Requests the page makes | 1000 | `--request-budget` | `request_budget` |
+
+Time spent waiting for the network or running scripts does not count as
+page time. `requestIdleCallback` work never holds a page open.
 
 ## Design
 
@@ -71,6 +94,31 @@ Data structures favour compactness: arena/index-based nodes, interned names,
 no per-node reference counting. Each `Page` owns its JS runtime and DOM, and
 dropping the page frees all of it. The target artifact is a single static
 binary (musl) in a distroless or scratch-sized container.
+
+## Visibility
+
+What counts as in view decides how much lazily loaded content a page
+fetches, and so what a run costs. It is a named policy, set per run:
+`--visibility` in the CLI, `"visibility"` in a service job, and
+`BrowserBuilder::visibility(Visibility::…)` in the Rust API.
+
+| policy | what is in view | what it costs |
+| --- | --- | --- |
+| `loaded` (default) | The page as it stood at the load event. What it appends later is below the fold, pushing what follows it down, until `--scroll` reveals it. | Lazy sections, images and components present at load arrive. A loader can add about two viewports of content before the next scroll, so a feed loads one batch, and a page that checks for more after every batch (as engadget.com does) stops. |
+| `all` | Everything, always. | The most content, but a page that checks for more after every batch keeps loading until the timeout: engadget.com made 4,800 to 8,000 requests and spent 38 to 60 CPU seconds, against under 2 s with the other policies. |
+| `viewport` | Only what is scrolled to, in a 1920×1080 window. | The least work. Content below the fold arrives only with `--scroll`. |
+
+`--scroll` is the way to ask for more of an infinite feed under any
+policy: each round reveals what came in and scrolls down again, up to
+`--max-scrolls` rounds.
+
+On sixteen recorded real pages (see
+[crates/bench/README.md](crates/bench/README.md#visibility)), `loaded` kept
+the same text as `all` on fifteen and cost 36 CPU seconds in all, against 77
+for `all` and 34 for `viewport`. `viewport` kept the same text as well,
+except on engadget.com (1,615 words, against 4,128 under `loaded`). The
+difference is all on pages with self-triggering loaders: elsewhere the three
+policies cost the same.
 
 ## Workspace layout
 

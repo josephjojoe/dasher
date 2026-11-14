@@ -187,6 +187,11 @@ async fn run_page(
         "scroll".into(),
         navigation.scroll.as_ref().map(report::scroll_json).into(),
     );
+    body.insert(
+        "budget_exhausted".into(),
+        navigation.budget_exhausted.map(|b| b.name()).into(),
+    );
+    body.insert("requests".into(), navigation.requests.into());
     if job.wants_html() {
         body.insert("html".into(), page.content().into());
     }
@@ -244,6 +249,7 @@ fn browser(job: &Job, options: &RunOptions) -> dasher::Result<Browser> {
     if job.realtime {
         builder = builder.clock(ClockMode::Realtime);
     }
+    builder = builder.visibility(job.visibility.into());
     builder.build()
 }
 
@@ -268,6 +274,7 @@ fn goto_options(job: &Job, timeout: Duration) -> GotoOptions {
         selector: job.wait_for.clone(),
         predicate: job.wait_until.clone(),
         timeout,
+        page_time_budget: job.page_time_budget(),
     };
     let waits = settle.network_idle.is_some()
         || settle.dom_quiet.is_some()
@@ -277,11 +284,15 @@ fn goto_options(job: &Job, timeout: Duration) -> GotoOptions {
         settle: waits.then_some(settle),
         auto_scroll: None,
         timeout: Some(timeout),
+        budget: job.work_budget(),
     };
     if let Scroll::On { max_scrolls } = job.scroll {
         let mut scroll = AutoScrollOptions::default();
         if let Some(max) = max_scrolls {
             scroll.max_scrolls = max;
+        }
+        if job.page_time_budget_ms.is_some() {
+            scroll.settle.page_time_budget = job.page_time_budget();
         }
         goto = goto.with_auto_scroll(scroll);
     }

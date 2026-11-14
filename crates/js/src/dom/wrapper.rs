@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::rc::Rc;
 
 use dasher_dom::{Document, Name, NodeId, NodeKind};
@@ -10,7 +11,12 @@ use rquickjs::class::{JsClass, Readable, Trace, Tracer};
 use rquickjs::function::Constructor;
 use rquickjs::{Class, Ctx, Function, JsLifetime, Object, Result, Value, qjs};
 
+use super::attrs;
+use super::hooks::Hooks;
+use super::host::Hosts;
+use super::members::{self, Members};
 use super::{DomState, any_in_tree_except, group_root, owner};
+use crate::events::Listeners;
 
 /// A node wrapper object.
 pub(crate) type Node<'js> = Class<'js, NodeWrapper<'js>>;
@@ -26,12 +32,64 @@ pub(crate) struct NodeWrapper<'js> {
     /// freed by reference counting alone.
     next: RefCell<Option<Node<'js>>>,
     prev: RefCell<Option<Node<'js>>>,
+    /// The objects the element hands out and must keep returning
+    /// (`el.style`, `el.classList`...), made on first use. Traced, so they
+    /// live as long as the wrapper, and they hold the wrapper in turn.
+    extras: RefCell<Option<Box<[Option<Value<'js>>; Extra::COUNT]>>>,
+    /// The node's event listeners (see the `events` module). The wrapper
+    /// reports them to the GC, so they live as long as its group.
+    listeners: Listeners<'js>,
 }
 
-impl NodeWrapper<'_> {
+impl<'js> NodeWrapper<'js> {
+    pub(crate) fn listeners(&self) -> &Listeners<'js> {
+        &self.listeners
+    }
+}
+
+/// The slots of [`NodeWrapper`]'s extras.
+#[derive(Clone, Copy)]
+pub(crate) enum Extra {
+    Style,
+    ComputedStyle,
+    ClassList,
+    Dataset,
+    ChildNodes,
+    Children,
+    Attributes,
+}
+
+impl Extra {
+    const COUNT: usize = 7;
+}
+
+impl<'js> NodeWrapper<'js> {
     /// The node, or `None` if it belonged to a replaced document.
     pub(crate) fn id(&self) -> Option<NodeId> {
         (!self.stale.get()).then_some(self.id)
+    }
+
+    /// The DOM state the node belongs to.
+    pub(crate) fn dom(&self) -> &Rc<DomState> {
+        &self.dom
+    }
+
+    /// The object in `slot`, borrowed: it stays valid while the wrapper
+    /// does not change the slot.
+    pub(crate) fn extra(&self, slot: Extra) -> Option<qjs::JSValue> {
+        let extras = self.extras.borrow();
+        extras.as_ref()?[slot as usize].as_ref().map(Value::as_raw)
+    }
+
+    /// Puts `value` in `slot`, which must be empty. Allocates nothing that
+    /// the GC could run during (beyond the first slot's box), so the
+    /// tracer never finds the cell borrowed in one phase of a collection
+    /// but not in another.
+    pub(crate) fn set_extra(&self, slot: Extra, value: Value<'js>) {
+        let mut extras = self.extras.borrow_mut();
+        let slots = extras.get_or_insert_with(Box::default);
+        debug_assert!(slots[slot as usize].is_none());
+        slots[slot as usize] = Some(value);
     }
 }
 
@@ -42,7 +100,7 @@ impl Drop for NodeWrapper<'_> {
         }
         // Runs in the GC finalizer, which never runs while these cells are
         // borrowed: they are only borrowed briefly, without running JS.
-        self.dom.wrappers.borrow_mut().remove(&self.id);
+        self.dom.wrappers.remove(self.id);
         self.dom.set_observed(self.id, false);
         self.dom.set_custom(self.id, false);
         self.dom.add_candidate(self.id);
@@ -59,6 +117,12 @@ impl<'js> Trace<'js> for NodeWrapper<'js> {
         if let Ok(prev) = self.prev.try_borrow() {
             prev.trace(tracer);
         }
+        if let Ok(extras) = self.extras.try_borrow() {
+            for v in extras.iter().flat_map(|slots| slots.iter().flatten()) {
+                v.trace(tracer);
+            }
+        }
+        self.listeners.trace(tracer);
     }
 }
 
@@ -96,6 +160,11 @@ pub(crate) struct DomData<'js> {
     pub(crate) ce_held: RefCell<Vec<Node<'js>>>,
     /// Told when the document changed (see the `layout` module).
     pub(crate) layout_hook: RefCell<Option<Function<'js>>>,
+    /// What the native members need (see the `members` module).
+    pub(crate) members: Box<Members>,
+    /// The prototypes of the host objects (see the `host` module), which
+    /// `members` points at.
+    _host_protos: Vec<Object<'js>>,
     element: Object<'js>,
     html_element: Object<'js>,
     html_unknown: Object<'js>,
@@ -120,7 +189,8 @@ fn tag_table<'js>(table: Object<'js>) -> Result<HashMap<String, Object<'js>>> {
     table.props::<String, Object<'js>>().collect()
 }
 
-/// Stores the prototypes from `protos` and creates the document wrapper.
+/// Stores the prototypes from `protos`, creates the document wrapper and
+/// installs the native members on the prototypes in `protos.interfaces`.
 pub(crate) fn init<'js>(
     ctx: &Ctx<'js>,
     dom: &Rc<DomState>,
@@ -128,8 +198,16 @@ pub(crate) fn init<'js>(
     exception: Function<'js>,
 ) -> Result<()> {
     let document = create(dom, dom.doc().root(), protos.get("Document")?)?;
+    let interfaces: Object<'js> = protos.get("interfaces")?;
+    let fallbacks = members::install(ctx, &interfaces)?;
+    let hooks = Hooks::new(ctx, fallbacks, &protos.get("hooks")?, &interfaces)?;
+    let (hosts, host_protos) = Hosts::register(ctx, &interfaces)?;
+    let members = Members::attach(ctx, &document, hosts, hooks);
+    attrs::install_reflected(ctx, &members, protos.get("reflected")?)?;
     let data = DomData {
         exception,
+        members,
+        _host_protos: host_protos,
         document,
         mutation_hook: RefCell::new(None),
         ce_hook: RefCell::new(None),
@@ -199,27 +277,98 @@ fn create<'js>(dom: &Rc<DomState>, id: NodeId, proto: Object<'js>) -> Result<Nod
         stale: Cell::new(false),
         next: RefCell::new(None),
         prev: RefCell::new(None),
+        extras: RefCell::new(None),
+        listeners: Listeners::default(),
     };
     let node = Class::instance_proto(wrapper, proto)?;
-    dom.wrappers.borrow_mut().insert(id, node.as_raw());
+    dom.wrappers.insert(id, node.as_raw());
     Ok(node)
 }
 
+/// The cache from node to live wrapper: the wrapper's object pointer in a
+/// slot indexed by the node's arena index, null where there is none.
+///
+/// Weak: a slot is cleared by its wrapper's finalizer, so it never keeps
+/// the wrapper alive. The slots are only borrowed briefly, never across
+/// anything that can run JS or the GC (finalizers write to them).
+#[derive(Default)]
+pub(crate) struct Wrappers {
+    slots: RefCell<Vec<*mut c_void>>,
+}
+
+impl Wrappers {
+    /// The wrapper object of `id`, borrowed from the cache: it stays valid
+    /// only until JS or the GC next runs.
+    #[inline]
+    pub(crate) fn get(&self, id: NodeId) -> Option<qjs::JSValue> {
+        let ptr = *self.slots.borrow().get(index(id))?;
+        (!ptr.is_null()).then(|| qjs::JS_MKPTR(qjs::JS_TAG_OBJECT, ptr))
+    }
+
+    pub(crate) fn contains(&self, id: NodeId) -> bool {
+        self.get(id).is_some()
+    }
+
+    fn insert(&self, id: NodeId, wrapper: qjs::JSValue) {
+        let mut slots = self.slots.borrow_mut();
+        let i = index(id);
+        if slots.len() <= i {
+            slots.resize(i + 1, std::ptr::null_mut());
+        }
+        // SAFETY: `wrapper` is an object value, so it holds a pointer.
+        slots[i] = unsafe { qjs::JS_VALUE_GET_PTR(wrapper) };
+    }
+
+    fn remove(&self, id: NodeId) {
+        if let Some(slot) = self.slots.borrow_mut().get_mut(index(id)) {
+            *slot = std::ptr::null_mut();
+        }
+    }
+
+    /// The nodes that have a live wrapper, in arena order.
+    pub(crate) fn ids(&self) -> Vec<NodeId> {
+        let slots = self.slots.borrow();
+        let wrapped = slots.iter().enumerate().filter(|(_, p)| !p.is_null());
+        wrapped.map(|(i, _)| node_at(i)).collect()
+    }
+
+    /// Empties every slot but `keep`'s.
+    fn clear_except(&self, keep: NodeId) {
+        let mut slots = self.slots.borrow_mut();
+        for (i, slot) in slots.iter_mut().enumerate() {
+            if i != index(keep) {
+                *slot = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+fn index(id: NodeId) -> usize {
+    id.to_raw() as usize - 1
+}
+
+fn node_at(index: usize) -> NodeId {
+    let raw = u32::try_from(index + 1).expect("arena indexes fit in u32");
+    NodeId::from_raw(raw).expect("index + 1 is non-zero")
+}
+
 impl DomState {
+    /// The live wrapper object of `id`, if there is one, borrowed from the
+    /// cache: it stays valid only until JS or the GC next runs.
+    #[inline]
+    pub(crate) fn wrapper_raw(&self, id: NodeId) -> Option<qjs::JSValue> {
+        self.wrappers.get(id)
+    }
+
     /// The live wrapper of `id`, if there is one.
     pub(crate) fn cached<'js>(&self, ctx: &Ctx<'js>, id: NodeId) -> Option<Node<'js>> {
-        let raw = self.wrappers.borrow().get(&id).copied()?;
+        let raw = self.wrappers.get(id)?;
         Some(from_raw(ctx, raw))
     }
 
     /// The wrappers of `ids` that are alive.
     pub(crate) fn cached_all<'js>(&self, ctx: &Ctx<'js>, ids: &[NodeId]) -> Vec<Node<'js>> {
-        let raws: Vec<qjs::JSValue> = {
-            let wrappers = self.wrappers.borrow();
-            ids.iter()
-                .filter_map(|id| wrappers.get(id).copied())
-                .collect()
-        };
+        let raws: Vec<qjs::JSValue> = ids.iter().filter_map(|&id| self.wrappers.get(id)).collect();
         raws.into_iter().map(|raw| from_raw(ctx, raw)).collect()
     }
 }
@@ -232,7 +381,10 @@ fn from_raw<'js>(ctx: &Ctx<'js>, raw: qjs::JSValue) -> Node<'js> {
     // us a reference of our own, which `Value` then owns.
     let value =
         unsafe { Value::from_raw(ctx.clone(), qjs::JS_DupValue(ctx.as_raw().as_ptr(), raw)) };
-    Class::from_value(&value).expect("the wrapper cache only holds node wrappers")
+    // SAFETY: the cache only holds node wrappers, and `Class` is a
+    // transparent wrapper of `Object`, itself one of `Value`: this is what
+    // `Class::from_value` returns once it has checked the class.
+    unsafe { std::mem::transmute::<Value<'js>, Node<'js>>(value) }
 }
 
 /// The wrapper of `id`, creating it if needed.
@@ -262,13 +414,13 @@ fn find_anchor<'js>(
     skip: &[NodeId],
 ) -> Option<Node<'js>> {
     let raw = {
-        let wrappers = dom.wrappers.borrow();
+        let wrappers = &dom.wrappers;
         // Usually an ancestor is wrapped: the document always is.
         let mut found = None;
         let mut n = id;
         while let Some(up) = doc.parent(n).or_else(|| owner(doc, n)) {
-            if let Some(raw) = wrappers.get(&up) {
-                found = Some(*raw);
+            if let Some(raw) = wrappers.get(up) {
+                found = Some(raw);
                 break;
             }
             n = up;
@@ -277,7 +429,7 @@ fn find_anchor<'js>(
             // `id` itself is not wrapped yet, or is the parent of an
             // insertion and was checked by the caller.
             any_in_tree_except(doc, n, skip, |m| {
-                found = wrappers.get(&m).copied();
+                found = wrappers.get(m);
                 found.is_some()
             });
         }
@@ -289,6 +441,17 @@ fn find_anchor<'js>(
 // -------------------------------------------------------------------------
 // Rings.
 
+// The links are `Option<Node>`s, `None` in both directions for a wrapper
+// alone. Every clone or drop of a `Node` is two reference counts (the
+// object's and the context's), so the operations below move links where
+// they can rather than copy them. Old links are dropped once the cells
+// are let go, since dropping the last reference to a wrapper runs its
+// finalizer.
+
+// Borrowing a wrapper's cell costs a few calls into QuickJS, so each
+// operation borrows each wrapper once.
+
+#[cfg(test)]
 fn next<'js>(node: &Node<'js>) -> Node<'js> {
     node.borrow()
         .next
@@ -297,6 +460,7 @@ fn next<'js>(node: &Node<'js>) -> Node<'js> {
         .unwrap_or_else(|| node.clone())
 }
 
+#[cfg(test)]
 fn prev<'js>(node: &Node<'js>) -> Node<'js> {
     node.borrow()
         .prev
@@ -305,59 +469,56 @@ fn prev<'js>(node: &Node<'js>) -> Node<'js> {
         .unwrap_or_else(|| node.clone())
 }
 
-fn set_links<'js>(node: &Node<'js>, next: Option<Node<'js>>, prev: Option<Node<'js>>) {
-    // Swap the new links in, then drop the old ones with no cell borrowed:
-    // dropping the last reference to a wrapper runs its finalizer.
-    let wrapper = node.borrow();
-    let old_next = wrapper.next.replace(next);
-    let old_prev = wrapper.prev.replace(prev);
-    drop(wrapper);
-    drop((old_next, old_prev));
-}
-
-fn set_next<'js>(node: &Node<'js>, next: Node<'js>) {
-    let wrapper = node.borrow();
-    let old = wrapper.next.replace(Some(next));
-    drop(wrapper);
-    drop(old);
-}
-
-fn set_prev<'js>(node: &Node<'js>, prev: Node<'js>) {
-    let wrapper = node.borrow();
-    let old = wrapper.prev.replace(Some(prev));
-    drop(wrapper);
-    drop(old);
-}
-
-fn is_alone(node: &Node<'_>) -> bool {
-    node.borrow().next.borrow().is_none()
-}
-
 /// Takes `node` out of its ring.
 pub(crate) fn unlink(node: &Node<'_>) {
-    if is_alone(node) {
+    let w = node.borrow();
+    let (p, n) = (w.prev.take(), w.next.take());
+    drop(w);
+    let (Some(p), Some(n)) = (p, n) else {
+        return;
+    };
+    if p == n {
+        // A ring of two: the other one is left alone. Its links are both
+        // `node`.
+        let pw = p.borrow();
+        let old = (pw.next.take(), pw.prev.take());
+        drop(pw);
+        drop((p, n, old));
         return;
     }
-    let p = prev(node);
-    let n = next(node);
-    if p == n {
-        // A ring of two: the other one is left alone.
-        set_links(&p, None, None);
-    } else {
-        set_next(&p, n.clone());
-        set_prev(&n, p);
-    }
-    set_links(node, None, None);
+    // `p.next` and `n.prev` were `node`.
+    let old_prev = n.borrow().prev.replace(Some(p.clone()));
+    let old_next = p.borrow().next.replace(Some(n));
+    drop((p, old_prev, old_next));
 }
 
 /// Merges the rings of `a` and `b`, which must be different rings.
 pub(crate) fn splice<'js>(a: &Node<'js>, b: &Node<'js>) {
-    let an = next(a);
-    let bn = next(b);
-    set_next(a, bn.clone());
-    set_prev(&bn, a.clone());
-    set_next(b, an.clone());
-    set_prev(&an, b.clone());
+    let (aw, bw) = (a.borrow(), b.borrow());
+    // The ring a -> an ... and the ring b -> bn ... become
+    // a -> bn ... b -> an ..., where a lone wrapper is its own next.
+    let (an, bn) = (aw.next.take(), bw.next.take());
+    let alone = an.is_none() || bn.is_none();
+    let an = an.unwrap_or_else(|| a.clone());
+    let bn = bn.unwrap_or_else(|| b.clone());
+    let old = {
+        let (anw, bnw) = (an.borrow(), bn.borrow());
+        if alone {
+            (
+                bnw.prev.replace(Some(a.clone())),
+                anw.prev.replace(Some(b.clone())),
+            )
+        } else {
+            // `bn.prev` is `b` and `an.prev` is `a`: swap them.
+            let bp = bnw.prev.take();
+            let ap = anw.prev.replace(bp);
+            (bnw.prev.replace(ap), None)
+        }
+    };
+    aw.next.replace(Some(bn));
+    bw.next.replace(Some(an));
+    drop((aw, bw));
+    drop(old);
 }
 
 // -------------------------------------------------------------------------
@@ -369,21 +530,29 @@ fn wrapped_under<'js>(
     dom: &DomState,
     doc: &Document,
     roots: &[NodeId],
-) -> Vec<Node<'js>> {
-    let mut ids = Vec::new();
-    {
-        let wrappers = dom.wrappers.borrow();
-        for &root in roots {
-            any_in_tree_except(doc, root, &[], |n| {
-                if wrappers.contains_key(&n) {
-                    ids.push(n);
-                }
-                false
-            });
+) -> Wrapped<'js> {
+    if let [root] = *roots {
+        let leaf = doc.first_child(root).is_none()
+            && doc.template_contents(root).is_none()
+            && doc.shadow_root(root).is_none();
+        if leaf {
+            return dom.cached(ctx, root).into_iter().collect();
         }
     }
-    dom.cached_all(ctx, &ids)
+    let mut ids = Vec::new();
+    for &root in roots {
+        any_in_tree_except(doc, root, &[], |n| {
+            if dom.wrappers.contains(n) {
+                ids.push(n);
+            }
+            false
+        });
+    }
+    dom.cached_all(ctx, &ids).into()
 }
+
+/// The wrappers `wrapped_under` finds: often none or one.
+type Wrapped<'js> = smallvec::SmallVec<[Node<'js>; 1]>;
 
 /// How a pending insertion moves wrappers between trees.
 pub(crate) enum Move {
@@ -393,8 +562,9 @@ pub(crate) enum Move {
     WholeTree,
     /// A fragment that is the root of its own tree moves its children.
     Fragment,
-    /// Anything else: find the wrappers under the moved nodes.
-    Walk,
+    /// Anything else: find the wrappers under the moved nodes. The node
+    /// leaves the rest of its tree, rooted at `from`, behind.
+    Walk { from: NodeId },
 }
 
 /// Works out, before `node` is inserted under `parent`, how the insertion
@@ -404,7 +574,7 @@ pub(crate) fn plan_insert(doc: &Document, parent: NodeId, node: NodeId) -> Move 
     if old == group_root(doc, parent) {
         Move::SameTree
     } else if old != node {
-        Move::Walk
+        Move::Walk { from: old }
     } else if doc.kind(node) == NodeKind::DocumentFragment {
         Move::Fragment
     } else {
@@ -426,8 +596,15 @@ pub(crate) fn after_insert<'js>(
     dom.inserted(doc, node);
     let whole = match plan {
         Move::SameTree => return,
-        Move::WholeTree | Move::Fragment => dom.cached(ctx, node),
-        Move::Walk => None,
+        Move::WholeTree => dom.cached(ctx, node),
+        Move::Fragment => {
+            dom.left_behind(doc, node);
+            dom.cached(ctx, node)
+        }
+        Move::Walk { from } => {
+            dom.left_behind(doc, from);
+            None
+        }
     };
     let anchor_at = |dom: &DomState| {
         dom.cached(ctx, parent)
@@ -460,7 +637,8 @@ pub(crate) fn after_insert<'js>(
 }
 
 /// Regroups wrappers after the subtree at `root` was detached from `from`.
-/// If nothing in it has a wrapper, it is queued to be freed.
+/// If nothing in it has a wrapper, it is queued to be freed; so is the
+/// tree it left, if that is detached too.
 pub(crate) fn after_remove(
     ctx: &Ctx<'_>,
     dom: &DomState,
@@ -469,6 +647,7 @@ pub(crate) fn after_remove(
     from: NodeId,
 ) {
     dom.removed_from(doc, root, from);
+    dom.left_behind(doc, from);
     let wrappers = wrapped_under(ctx, dom, doc, &[root]);
     let Some((first, rest)) = wrappers.split_first() else {
         dom.add_candidate(root);
@@ -484,7 +663,7 @@ pub(crate) fn after_remove(
 
 /// Rebuilds every ring from scratch, after the host changed the tree.
 pub(crate) fn regroup_all(ctx: &Ctx<'_>, dom: &DomState) {
-    let ids: Vec<NodeId> = dom.wrappers.borrow().keys().copied().collect();
+    let ids = dom.wrappers.ids();
     let nodes = dom.cached_all(ctx, &ids);
     for n in &nodes {
         unlink(n);
@@ -507,12 +686,9 @@ pub(crate) fn regroup_all(ctx: &Ctx<'_>, dom: &DomState) {
 /// replaced.
 pub(crate) fn detach_all(ctx: &Ctx<'_>, dom: &DomState) {
     let root = dom.doc().root();
-    let ids: Vec<NodeId> = dom.wrappers.borrow().keys().copied().collect();
+    let ids = dom.wrappers.ids();
     let nodes = dom.cached_all(ctx, &ids);
-    {
-        let mut wrappers = dom.wrappers.borrow_mut();
-        wrappers.retain(|&id, _| id == root);
-    }
+    dom.wrappers.clear_except(root);
     for n in &nodes {
         if n.borrow().id != root {
             n.borrow().stale.set(true);
@@ -528,7 +704,7 @@ pub(crate) fn detach_all(ctx: &Ctx<'_>, dom: &DomState) {
 /// the node documents of detached trees.
 #[cfg(test)]
 pub(crate) fn check_groups(ctx: &Ctx<'_>, dom: &DomState) -> std::result::Result<(), String> {
-    let ids: Vec<NodeId> = dom.wrappers.borrow().keys().copied().collect();
+    let ids = dom.wrappers.ids();
     let doc = dom.doc();
     let mut by_root: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for &id in &ids {

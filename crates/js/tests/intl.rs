@@ -1481,3 +1481,117 @@ fn loads_lazily() {
     );
     assert_eq!(out, r#"[true,"mine 1,234",true,"","toLocaleString"]"#);
 }
+
+/// Formatters are resolved once per set of options and kept: formatters
+/// with the same options, made apart or per call, and the cached states of
+/// toLocale*String format the same, and caches keep locales and options
+/// apart.
+#[test]
+fn formatters_are_reused_without_mixing_options() {
+    check(&[
+        (
+            "[0, 1, 2].map((i) => new Intl.DateTimeFormat('en-GB', { month: 'long', timeZone: 'UTC' }).format(864e5 * 40 * i)).join()",
+            "January,February,March",
+        ),
+        (
+            "[0, 1, 2].map((i) => new Intl.DateTimeFormat(i ? 'de' : 'en-US', { weekday: 'long', timeZone: i > 1 ? 'Asia/Tokyo' : 'UTC' }).format(0)).join()",
+            "Thursday,Donnerstag,Donnerstag",
+        ),
+        (
+            "['en-GB', 'de', 'en-GB', undefined].map((l) => new Date(Date.UTC(2026, 0, 2, 15)).toLocaleDateString(l, { timeZone: 'UTC' })).join(' ')",
+            "02/01/2026 2.1.2026 02/01/2026 1/2/2026",
+        ),
+        (
+            "['en-GB', 'de', 'en-GB'].map((l) => new Date(Date.UTC(2026, 0, 2, 15)).toLocaleTimeString(l, { timeZone: 'UTC' }) + '|' + new Date(Date.UTC(2026, 0, 2, 15)).toLocaleString(l, { timeZone: 'UTC' })).join(' ')",
+            "15:00:00|02/01/2026, 15:00:00 15:00:00|2.1.2026, 15:00:00 15:00:00|02/01/2026, 15:00:00",
+        ),
+        (
+            "[1234.5, 1234.5].map((n, i) => n.toLocaleString(i ? 'de' : 'en', { style: i ? 'percent' : 'decimal' })).join(' ')",
+            "1,234.5 123,450%",
+        ),
+        (
+            "[new Intl.NumberFormat('en', { maximumFractionDigits: 0 }).format(2.5), new Intl.NumberFormat('en', { maximumFractionDigits: 0 }).format(-2.5), (2.5).toLocaleString('en')].join()",
+            "3,-3,2.5",
+        ),
+    ]);
+}
+
+/// What format and formatToParts do with their argument: Number() it
+/// (through valueOf), use the page's Date.now() for undefined, and throw
+/// for times out of range. A time in range whose local time is not has
+/// NaN fields and no names, and no day period at all.
+#[test]
+fn format_arguments() {
+    let js = page();
+    let out = eval(
+        &js,
+        r#"
+        const f = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', hour: 'numeric' });
+        const now = Date.now;
+        Date.now = () => 0;
+        const r = [f.format(), f.format({ valueOf: () => 864e5 }), f.format(new Date(1.5e12)), f.format('86400000')];
+        Date.now = now;
+        for (const x of [NaN, Infinity, 8.64e15 + 1]) {
+          try { f.format(x); r.push('no error'); } catch (e) { r.push(e.name + ': ' + e.message); }
+        }
+        const far = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', hour: 'numeric' });
+        r.push(far.format(8.64e15), JSON.stringify(far.formatToParts(8.64e15)));
+        const period = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Tokyo', dayPeriod: 'long' });
+        try { period.format(8.64e15); } catch (e) { r.push(e.name + ': ' + e.message); }
+        const n = new Intl.NumberFormat('en');
+        r.push(n.format({ valueOf: () => 1e6 }), n.format('12.5'), n.format(12345678901234567890n), n.format(-0));
+        r
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"["Jan 1970, 12 AM","Jan 1970, 12 AM","Jul 2017, 2 AM","Jan 1970, 12 AM","RangeError: Invalid time value","RangeError: Invalid time value","RangeError: Invalid time value"," NaN at 12 AM","[{\"type\":\"month\"},{\"type\":\"literal\",\"value\":\" \"},{\"type\":\"day\",\"value\":\"NaN\"},{\"type\":\"literal\",\"value\":\" at \"},{\"type\":\"hour\",\"value\":\"12\"},{\"type\":\"literal\",\"value\":\" \"},{\"type\":\"dayPeriod\",\"value\":\"AM\"}]","TypeError: cannot read property '1' of undefined","1,000,000","12.5","12,345,678,901,234,567,890","-0"]"#
+    );
+}
+
+/// The built-in methods Intl makes locale-sensitive keep their shape, pass
+/// their receiver and arguments on, and still check their receiver.
+#[test]
+fn locale_methods_pass_their_receiver_and_arguments() {
+    let js = page();
+    let out = eval(
+        &js,
+        r#"[
+          Number.prototype.toLocaleString.length, Date.prototype.toLocaleDateString.length,
+          String.prototype.localeCompare.length, Date.prototype.toLocaleTimeString.name,
+          Number.prototype.toLocaleString.call(new Number(1234), 'en', { minimumFractionDigits: 1 }),
+          BigInt.prototype.toLocaleString.call(10n ** 6n),
+          'a'.localeCompare('B', undefined, { sensitivity: 'base' }),
+          'item10'.localeCompare('item9', 'en', { numeric: true }),
+          new Date(NaN).toLocaleString(),
+          (() => { try { Date.prototype.toLocaleString.call({}); } catch (e) { return e.name; } })(),
+          (() => { try { Number.prototype.toLocaleString.call('1'); } catch (e) { return e.name; } })(),
+        ]"#,
+    );
+    assert_eq!(
+        out,
+        r#"[0,0,0,"toLocaleTimeString","1,234.0","1,000,000",-1,1,"Invalid Date","TypeError","TypeError"]"#
+    );
+}
+
+/// The lists supportedValuesOf gives come from the Rust tables.
+#[test]
+fn supported_values_come_from_the_tables() {
+    let js = page();
+    let out = eval(
+        &js,
+        r#"{
+          const zones = Intl.supportedValuesOf('timeZone');
+          const units = Intl.supportedValuesOf('unit');
+          const currencies = Intl.supportedValuesOf('currency');
+          [zones.length > 400, zones.includes('America/New_York'), zones.some((z) => z.startsWith('Etc') || !z.includes('/')),
+           zones.join() === zones.slice().sort().join(), units.length, units[0], units.includes('kilometer'),
+           currencies.length, currencies[0], currencies.join() === currencies.slice().sort().join(),
+           zones !== Intl.supportedValuesOf('timeZone')]
+        }"#,
+    );
+    assert_eq!(
+        out,
+        r#"[true,true,false,true,45,"acre",true,35,"AED",true,true]"#
+    );
+}

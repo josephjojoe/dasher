@@ -1,0 +1,14 @@
+<!doctype html>
+<title>More</title>
+<ul id="items"></ul>
+<script>
+  // Fetches "more" again as soon as the last answer arrives, forever.
+  (function more() {
+    fetch('/api/products').then((r) => r.json()).then((products) => {
+      const li = document.createElement('li');
+      li.textContent = products.length;
+      document.getElementById('items').append(li);
+      more();
+    });
+  })();
+</script>

@@ -42,7 +42,7 @@ use url::Url;
 use crate::console::{ConsoleLevel, ConsoleMessage};
 use crate::data_url;
 use crate::dom;
-use crate::loader::LoaderHooks;
+use crate::events::{self, HostTarget};
 use crate::net::decode_utf8;
 use crate::remote::TaskSender;
 use crate::runtime::{JsRuntime, Shared, note_module_error};
@@ -148,6 +148,9 @@ pub(crate) struct ModuleState {
     /// Modulepreload links already handled, which the parser and scripts
     /// may both report.
     preload_links: RefCell<HashSet<NodeId>>,
+    /// Holds on the links whose module is being fetched, so they are still
+    /// there to get their `load` or `error` event if script removes them.
+    preload_holds: RefCell<HashMap<NodeId, dom::HeldNode>>,
 }
 
 impl ModuleState {
@@ -612,8 +615,11 @@ fn finish_preload(ctx: &Ctx<'_>, id: u32, link: NodeId) -> rquickjs::Result<()> 
     } else {
         "error"
     };
-    let target = dom::wrap(ctx, &shared.dom, link)?;
-    LoaderHooks::get(ctx)?.fire_simple(target.into_value(), event)
+    // Only a listener makes the link a wrapper, which then keeps it alive;
+    // the hold keeps it until the event is fired.
+    let fired = events::fire(ctx, HostTarget::Node(link), event, false, false);
+    shared.modules.preload_holds.borrow_mut().remove(&link);
+    fired.map(drop)
 }
 
 // ---------------------------------------------------------------------------
@@ -859,6 +865,11 @@ fn link_connected(shared: &Rc<Shared>, link: NodeId) {
         return;
     };
     let credentials = credentials_for(cross_origin.as_deref());
+    shared
+        .modules
+        .preload_holds
+        .borrow_mut()
+        .insert(link, dom::HeldNode::new(&shared.dom, link));
     start_graph(
         shared,
         String::from(url),

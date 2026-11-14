@@ -7,6 +7,10 @@
 //! work a real page asks for repeatable, so two builds can be compared on
 //! the same input without the network or the site changing between runs.
 //!
+//! With `DASHER_REPLAY_LOG` also set, every request a replay answers or
+//! refuses is printed to stderr as `replay: <hit|miss> <method> <url>`, to
+//! count the requests a page makes.
+//!
 //! Requests are matched by method and URL. Pages build some URLs from the
 //! clock or a random number (cache busters), so a request that has no exact
 //! match falls back to a recorded one with the same method, host and path.
@@ -118,6 +122,10 @@ impl Store {
             .get(&exact_key(method, url))
             .or_else(|| self.by_path.get(&path_key(method, url)));
         let found = meta.and_then(|meta| read(meta));
+        if std::env::var_os("DASHER_REPLAY_LOG").is_some() {
+            let what = if found.is_some() { "hit" } else { "miss" };
+            eprintln!("replay: {what} {method} {url}");
+        }
         if found.is_none() && std::env::var_os("DASHER_REPLAY_MISSES").is_some() {
             if let Ok(mut misses) = self.misses.lock() {
                 misses.push(exact_key(method, url));

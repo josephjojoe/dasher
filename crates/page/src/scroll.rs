@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 use dasher_dom::{Document, NodeKind};
 
+use dasher_js::Budget;
+
 use crate::Page;
+use crate::budget::DEFAULT_PAGE_TIME_BUDGET;
 use crate::settle::{NetworkIdle, SettleError, SettleOptions, SettleOutcome};
 
 /// Default for [`AutoScrollOptions::max_scrolls`].
@@ -69,6 +72,7 @@ impl Default for AutoScrollOptions {
                 selector: None,
                 predicate: None,
                 timeout: Duration::from_secs(5),
+                page_time_budget: Some(DEFAULT_PAGE_TIME_BUDGET),
             },
             timeout: Some(Duration::from_secs(60)),
         }
@@ -93,6 +97,10 @@ pub enum AutoScrollStop {
     Interrupted,
     /// The page went over a resource limit and can run no more.
     LimitExceeded(dasher_js::ResourceLimit),
+    /// The page's [work budget](crate::WorkBudget) ran out:
+    /// [`Budget::Cpu`] or [`Budget::Requests`]. (A round whose settle
+    /// spends its page-time budget just ends, and scrolling goes on.)
+    BudgetExhausted(Budget),
 }
 
 /// What [`Page::auto_scroll`] did.
@@ -114,7 +122,7 @@ impl Page {
     /// Each round scrolls the window down to the bottom of the document a
     /// viewport at a time, letting the page handle each step (`scroll`
     /// events, `IntersectionObserver` callbacks; see
-    /// [`LayoutMode`](dasher_js::LayoutMode)), then
+    /// [`Visibility`](dasher_js::Visibility)), then
     /// [settles](Self::settle) with [`AutoScrollOptions::settle`]. A round
     /// brought new content if the elements or text in the document changed.
     ///
@@ -144,7 +152,13 @@ impl Page {
             self.scroll_down();
             report.scrolls += 1;
             match self.settle(&settle).await? {
-                SettleOutcome::Settled | SettleOutcome::TimedOut => {}
+                SettleOutcome::Settled
+                | SettleOutcome::TimedOut
+                | SettleOutcome::BudgetExhausted(Budget::PageTime) => {}
+                SettleOutcome::BudgetExhausted(budget) => {
+                    report.stopped = AutoScrollStop::BudgetExhausted(budget);
+                    return Ok(report);
+                }
                 SettleOutcome::NavigationRequested => {
                     report.stopped = AutoScrollStop::NavigationRequested;
                     return Ok(report);
@@ -180,6 +194,9 @@ impl Page {
     /// to each step, so whatever watches for elements coming into view
     /// sees every one pass, then scrolls to the very bottom.
     fn scroll_down(&self) {
+        // Scrolling is what brings appended content into view under the
+        // default visibility.
+        self.js.reveal();
         for _ in 0..MAX_STEPS {
             let more = self.js.eval_truthy(STEP_DOWN).unwrap_or(false);
             // Scroll listeners and IntersectionObserver callbacks; errors are

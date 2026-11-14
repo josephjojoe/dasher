@@ -34,6 +34,7 @@ pub fn settle_name(outcome: SettleOutcome) -> &'static str {
         SettleOutcome::NavigationRequested => "navigation_requested",
         SettleOutcome::Interrupted => "interrupted",
         SettleOutcome::LimitExceeded(_) => "limit_exceeded",
+        SettleOutcome::BudgetExhausted(_) => "budget_exhausted",
     }
 }
 
@@ -46,6 +47,7 @@ pub fn scroll_json(report: &AutoScrollReport) -> JsonValue {
         AutoScrollStop::NavigationRequested => "navigation_requested",
         AutoScrollStop::Interrupted => "interrupted",
         AutoScrollStop::LimitExceeded(_) => "limit_exceeded",
+        AutoScrollStop::BudgetExhausted(_) => "budget_exhausted",
     };
     json!({
         "scrolls": report.scrolls,

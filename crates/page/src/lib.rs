@@ -103,24 +103,60 @@
 //! - a CSS selector matches;
 //! - a JavaScript predicate is truthy.
 //!
-//! The default waits for both kinds of quiet, 500ms each, for up to 10s.
+//! The default waits for network idle, 500ms of it, for up to 10s.
 //! Quiet periods are page time, so under the virtual clock a page that is
 //! only waiting on timers settles without real waiting.
+//!
+//! # Budgets
+//!
+//! Some pages never go quiet: a carousel or ticker changes the document on
+//! a timer forever, a feed fetches "more stories" as soon as the last
+//! batch arrives. Under the virtual clock, skipping from one tick to the
+//! next would turn a page doing 20ms of work a second into a busy loop
+//! that runs until the timeout. Three budgets bound every page load, and
+//! when one runs out the page is left as it stands. That is not an error:
+//! what ended it is reported as [`SettleOutcome::BudgetExhausted`],
+//! [`AutoScrollStop::BudgetExhausted`] or [`Page::budget_exhausted`], with
+//! the [`Budget`] that ran out.
+//!
+//! - **Page time** ([`SettleOptions::page_time_budget`], 5 s by default):
+//!   how much page time one settle may use, skipped or passing for real
+//!   while the page is idle (not running scripts, no requests in flight).
+//!   Once it is used up the clock stops skipping and the quiet conditions
+//!   are given up.
+//! - **CPU** ([`WorkBudget::cpu`], 10 s by default): CPU time of the
+//!   page's thread, from the start of [`Page::load`] through settling and
+//!   scrolling.
+//! - **Requests** ([`WorkBudget::requests`], 1000 by default): requests
+//!   made through the page's session over the same span.
+//!
+//! The CPU and request budgets are set with [`PageOptions::budget`] and
+//! replaced with [`Page::set_budget`]; a page that used one up runs no JS
+//! until it gets another.
+//!
+//! Callbacks waiting in `requestIdleCallback` run as page time passes, but
+//! never hold a page open: a page whose only work left is idle callbacks
+//! counts as idle.
 //!
 //! # Scrolling and lazy content
 //!
 //! Nothing is laid out, but layout queries get synthetic answers chosen so
-//! that lazy content loads (see [`LayoutMode`]). By default every element
-//! is in view: `IntersectionObserver` reports it intersecting as soon as it
-//! is observed, so lazy images and sections load during the settle, and
-//! the document is tall enough to scroll. [`Page::auto_scroll`] then works
+//! that lazy content loads (see [`Visibility`]). By default everything the
+//! document holds when the load event has run is in view:
+//! `IntersectionObserver` reports it intersecting as soon as it is
+//! observed, so lazy images and sections present at load arrive during the
+//! settle, and the document is tall enough to scroll. What the page
+//! inserts after load is below the fold, pushing what follows it down, so
+//! a loader that keeps checking whether its "load more" element is still
+//! in view stops after about a viewport of new content, as in a browser.
+//! [`Page::auto_scroll`] reveals it before each round, and so works
 //! through infinite feeds: it scrolls to the bottom a viewport at a time,
 //! settles, and repeats until scrolling brings nothing new or a limit is
 //! hit. Feeds that listen for `scroll` events and ones that watch a
 //! sentinel element with `IntersectionObserver` both keep loading.
 //!
 //! [`ClockMode::Virtual`]: dasher_js::ClockMode::Virtual
-//! [`LayoutMode`]: dasher_js::LayoutMode
+//! [`Visibility`]: dasher_js::Visibility
 //!
 //! ```no_run
 //! use dasher_net::Client;
@@ -138,6 +174,7 @@
 //! # }
 //! ```
 
+mod budget;
 mod charset;
 mod page;
 mod refresh;
@@ -145,6 +182,10 @@ mod script;
 mod scroll;
 mod settle;
 
+pub use budget::{
+    DEFAULT_CPU_BUDGET, DEFAULT_PAGE_TIME_BUDGET, DEFAULT_REQUEST_BUDGET, WorkBudget,
+};
+pub use dasher_js::Budget;
 pub use page::{DEFAULT_MAX_NAVIGATIONS, DEFAULT_MAX_REFRESH_DELAY, LoadError, Page, PageOptions};
 pub use scroll::{AutoScrollOptions, AutoScrollReport, AutoScrollStop, DEFAULT_MAX_SCROLLS};
 pub use settle::{

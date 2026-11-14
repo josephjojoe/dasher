@@ -8,9 +8,8 @@
 // control values, cached collections, style objects) is kept in a private
 // field stamped onto the wrapper, so it is traced and collected with it.
 //
-// Nothing is laid out. Geometry comes from internals.elementBox, which
-// makes every rendered element a visible, in-viewport box; the page
-// lifecycle and scrolling code can replace it.
+// Nothing is laid out. Geometry is the synthetic layout of dom/layout.rs,
+// which makes every rendered element a box as wide as the viewport.
 (function (native, internals) {
   'use strict';
 
@@ -24,7 +23,6 @@
   const ArrayIsArray = Array.isArray;
   const ReflectApply = Reflect.apply;
   const queueTask = internals.queueTask;
-  const unproxy = N.unproxy;
 
   function tag(ctor, name) {
     defineProperty(ctor.prototype, Symbol.toStringTag, { value: name, configurable: true });
@@ -33,6 +31,14 @@
   const KEY = Symbol('dom');
   function illegal(key) {
     if (key !== KEY) throw new TypeError('Illegal constructor');
+  }
+
+  // The stand-in for a member Rust implements: N.init puts a native
+  // function in its place on the prototype (see "Native members" in
+  // dom.rs), so the stand-in only gives the property its place and
+  // attributes. The list of such members is MEMBERS in dom/members.rs.
+  function nativeMember() {
+    throw new TypeError('Illegal invocation');
   }
 
   function requireArgs(args, n, what) {
@@ -67,20 +73,11 @@
   const state = State.of;
 
   // ---------------------------------------------------------------------
-  // Collections. Live ones are Rust objects behind a Proxy that answers
-  // indexed (and, for HTMLCollection, named) properties; methods reach the
-  // Rust object through native.dom.unproxy. Static NodeLists are arrays
-  // with NodeList.prototype.
-
-  function arrayIndex(key) {
-    if (typeof key !== 'string') return -1;
-    const n = +key;
-    return n >>> 0 === n && n !== 4294967295 && String(n) === key ? n : -1;
-  }
-
-  function listLength(list) {
-    return ArrayIsArray(list) ? list.length : N.collLength(list);
-  }
+  // Collections. Live ones are native objects (dom/lists.rs) that answer
+  // indexed (and, for HTMLCollection, named) properties themselves; their
+  // `length`, `item` and `namedItem` are native members. Static NodeLists
+  // are arrays with NodeList.prototype. As in browsers, the iteration
+  // members are Array.prototype's, which work on both.
 
   function listItem(list, i) {
     if (ArrayIsArray(list)) {
@@ -90,62 +87,14 @@
     return N.collItem(list, i);
   }
 
-  function makeHandler(named) {
-    return {
-      get(target, key, receiver) {
-        const i = arrayIndex(key);
-        if (i >= 0) {
-          const v = N.collItem(target, i);
-          return v === null ? undefined : v;
-        }
-        if (named && typeof key === 'string' && !(key in target)) {
-          const v = N.collNamed(target, key);
-          return v === null ? undefined : v;
-        }
-        return Reflect.get(target, key, receiver);
-      },
-      has(target, key) {
-        const i = arrayIndex(key);
-        if (i >= 0) return i < N.collLength(target);
-        if (named && typeof key === 'string' && !(key in target)) return N.collNamed(target, key) !== null;
-        return Reflect.has(target, key);
-      },
-      set(target, key, value, receiver) {
-        if (arrayIndex(key) >= 0) return true;
-        return Reflect.set(target, key, value, receiver);
-      },
-      ownKeys(target) {
-        const keys = [];
-        const n = N.collLength(target);
-        for (let i = 0; i < n; i++) keys.push(String(i));
-        if (named) for (const name of N.collNames(target)) if (!keys.includes(name)) keys.push(name);
-        return keys.concat(Reflect.ownKeys(target));
-      },
-      getOwnPropertyDescriptor(target, key) {
-        const i = arrayIndex(key);
-        if (i >= 0) {
-          const v = N.collItem(target, i);
-          return v === null ? undefined : { value: v, writable: false, enumerable: true, configurable: true };
-        }
-        if (named && typeof key === 'string' && !Reflect.has(target, key)) {
-          const v = N.collNamed(target, key);
-          if (v !== null) return { value: v, writable: false, enumerable: false, configurable: true };
-        }
-        return Reflect.getOwnPropertyDescriptor(target, key);
-      },
-    };
-  }
-  const nodeListHandler = makeHandler(false);
-  const htmlCollectionHandler = makeHandler(true);
-
   const KIND = { childNodes: 0, children: 1, tag: 2, tagNS: 3, className: 4, name: 5, selector: 6 };
 
   function nodeList(root, kind, a, b) {
-    return new Proxy(N.collection(root, kind, a, b, NodeList.prototype), nodeListHandler);
+    return N.collection(root, kind, a, b, NodeList.prototype, false);
   }
 
   function htmlCollection(root, kind, a, b, proto = HTMLCollection.prototype) {
-    return new Proxy(N.collection(root, kind, a, b, proto), htmlCollectionHandler);
+    return N.collection(root, kind, a, b, proto, true);
   }
 
   // A collection cached on the node, so repeated reads return the same one.
@@ -163,8 +112,13 @@
     return setPrototypeOf(array, NodeList.prototype);
   }
 
-  function* iterate(list) {
-    for (let i = 0; i < listLength(list); i++) yield listItem(list, i);
+  // Array.prototype's iteration members, in place of the stand-ins below.
+  function arrayIteration(Ctor, keys) {
+    for (const key of keys) {
+      const desc = Object.getOwnPropertyDescriptor(Ctor.prototype, key);
+      desc.value = Array.prototype[key === Symbol.iterator ? 'values' : key];
+      defineProperty(Ctor.prototype, key, desc);
+    }
   }
 
   class NodeList {
@@ -172,28 +126,18 @@
       illegal(key);
     }
     get length() {
-      return N.collLength(this);
+      return nativeMember();
     }
     item(index) {
       return listItem(this, index >>> 0);
     }
-    forEach(callback, thisArg) {
-      for (let i = 0; i < listLength(this); i++) ReflectApply(callback, thisArg, [listItem(this, i), i, this]);
-    }
-    *entries() {
-      let i = 0;
-      for (const v of iterate(this)) yield [i++, v];
-    }
-    *keys() {
-      for (let i = 0; i < listLength(this); i++) yield i;
-    }
-    values() {
-      return iterate(this);
-    }
-    [Symbol.iterator]() {
-      return iterate(this);
-    }
+    forEach() {}
+    entries() {}
+    keys() {}
+    values() {}
+    [Symbol.iterator]() {}
   }
+  arrayIteration(NodeList, ['forEach', 'entries', 'keys', 'values', Symbol.iterator]);
   tag(NodeList, 'NodeList');
 
   class HTMLCollection {
@@ -201,18 +145,17 @@
       illegal(key);
     }
     get length() {
-      return N.collLength(this);
+      return nativeMember();
     }
     item(index) {
-      return N.collItem(this, index >>> 0);
+      return nativeMember(index);
     }
     namedItem(name) {
-      return N.collNamed(this, str(name));
+      return nativeMember(name);
     }
-    [Symbol.iterator]() {
-      return iterate(this);
-    }
+    [Symbol.iterator]() {}
   }
+  arrayIteration(HTMLCollection, [Symbol.iterator]);
   tag(HTMLCollection, 'HTMLCollection');
 
   class HTMLFormControlsCollection extends HTMLCollection {}
@@ -304,20 +247,20 @@
       super();
     }
     get nodeType() {
-      return N.nodeType(this);
+      return nativeMember();
     }
     get nodeName() {
-      return N.nodeName(this);
+      return nativeMember();
     }
     get baseURI() {
       return internals.baseURL();
     }
     get isConnected() {
       // A shadow tree is connected when its host is.
-      return N.isConnected(this);
+      return nativeMember();
     }
     get ownerDocument() {
-      return N.nodeType(this) === 9 ? null : N.ownerDocument(this);
+      return nativeMember();
     }
     getRootNode(options) {
       let root = N.rootNode(this);
@@ -327,31 +270,31 @@
       return root;
     }
     get parentNode() {
-      return N.nav(this, 0);
+      return nativeMember();
     }
     get parentElement() {
-      return N.nav(this, 5);
+      return nativeMember();
     }
     hasChildNodes() {
-      return N.nav(this, 1) !== null;
+      return nativeMember();
     }
     get childNodes() {
-      return cached(this, 'childNodes', () => nodeList(this, KIND.childNodes, null, null));
+      return nativeMember();
     }
     get firstChild() {
-      return N.nav(this, 1);
+      return nativeMember();
     }
     get lastChild() {
-      return N.nav(this, 2);
+      return nativeMember();
     }
     get previousSibling() {
-      return N.nav(this, 3);
+      return nativeMember();
     }
     get nextSibling() {
-      return N.nav(this, 4);
+      return nativeMember();
     }
     get nodeValue() {
-      return N.data(this);
+      return nativeMember();
     }
     set nodeValue(value) {
       const type = N.nodeType(this);
@@ -381,8 +324,7 @@
       return N.compare(this, other);
     }
     contains(other) {
-      if (other === null || other === undefined) return false;
-      return N.contains(this, other);
+      return nativeMember(other);
     }
     lookupPrefix(namespace) {
       for (let el = this.nodeType === 1 ? this : this.parentElement; el; el = el.parentElement) {
@@ -460,16 +402,16 @@
   // ParentNode. https://dom.spec.whatwg.org/#interface-parentnode
   const ParentNode = {
     get children() {
-      return cached(this, 'children', () => htmlCollection(this, KIND.children, null, null));
+      return nativeMember();
     },
     get firstElementChild() {
-      return N.nav(this, 6);
+      return nativeMember();
     },
     get lastElementChild() {
-      return N.nav(this, 7);
+      return nativeMember();
     },
     get childElementCount() {
-      return N.childCount(this, true);
+      return nativeMember();
     },
     prepend(...nodes) {
       connected(N.insert(this, convertNodes(nodes), N.nav(this, 1)));
@@ -528,10 +470,10 @@
 
   const NonDocumentTypeChildNode = {
     get previousElementSibling() {
-      return N.nav(this, 8);
+      return nativeMember();
     },
     get nextElementSibling() {
-      return N.nav(this, 9);
+      return nativeMember();
     },
   };
 
@@ -563,13 +505,13 @@
 
   class CharacterData extends Node {
     get data() {
-      return N.data(this);
+      return nativeMember();
     }
     set data(value) {
       N.setData(this, value === null ? '' : str(value));
     }
     get length() {
-      return N.data(this).length;
+      return nativeMember();
     }
     substringData(offset, count) {
       const data = N.data(this);
@@ -858,29 +800,6 @@
     return flat;
   }
 
-  // Event retargeting: the target an event's listeners at `node` see, when
-  // it was dispatched at `target` inside a shadow tree.
-  // https://dom.spec.whatwg.org/#retarget
-  function retargetTo(target, node) {
-    for (;;) {
-      if (!(target instanceof Node)) return target;
-      const root = N.rootNode(target);
-      const host = N.shadowHost(root);
-      if (host === null) return target;
-      if (node instanceof Node && isShadowIncludingInclusiveAncestor(root, node)) return target;
-      target = host;
-    }
-  }
-
-  function isShadowIncludingInclusiveAncestor(ancestor, node) {
-    for (;;) {
-      if (N.contains(ancestor, node)) return true;
-      const host = N.shadowHost(N.rootNode(node));
-      if (host === null) return false;
-      node = host;
-    }
-  }
-
   // ---------------------------------------------------------------------
   // Attributes: Attr and NamedNodeMap.
 
@@ -888,7 +807,7 @@
   // an element's attribute, made on demand (so not identity-stable).
   class Attr extends Node {
     static create(owner, name, ns, value) {
-      const attr = Object.create(Attr.prototype);
+      const attr = internals.createTarget(Attr.prototype);
       new AttrState(attr, owner, name, ns, value);
       return attr;
     }
@@ -971,61 +890,16 @@
     return null;
   }
 
-  const namedNodeMapHandler = {
-    get(target, key, receiver) {
-      const i = arrayIndex(key);
-      const el = mapOwner(target);
-      if (i >= 0) {
-        const a = attrAt(el, i);
-        return a === null ? undefined : a;
-      }
-      if (typeof key === 'string' && !(key in target)) {
-        const a = attrNamed(el, key);
-        return a === null ? undefined : a;
-      }
-      return Reflect.get(target, key, receiver);
-    },
-    has(target, key) {
-      const i = arrayIndex(key);
-      if (i >= 0) return i < N.attrCount(mapOwner(target));
-      return Reflect.has(target, key);
-    },
-    ownKeys(target) {
-      const keys = [];
-      const n = N.attrCount(mapOwner(target));
-      for (let i = 0; i < n; i++) keys.push(String(i));
-      return keys.concat(Reflect.ownKeys(target));
-    },
-    getOwnPropertyDescriptor(target, key) {
-      const i = arrayIndex(key);
-      if (i >= 0) {
-        const a = attrAt(mapOwner(target), i);
-        return a === null ? undefined : { value: a, writable: false, enumerable: true, configurable: true };
-      }
-      return Reflect.getOwnPropertyDescriptor(target, key);
-    },
-  };
-
-  class MapState extends Stamp {
-    #el;
-    constructor(o, el) {
-      super(o);
-      this.#el = el;
-    }
-    static owner(o) {
-      o = unproxy(o);
-      if (!(#el in o)) throw new TypeError('Illegal invocation');
-      return o.#el;
-    }
-  }
-  const mapOwner = MapState.owner;
+  // `el.attributes` is a native object (dom/lists.rs), whose indexed and
+  // named properties come from attrAt and attrNamed.
+  const mapOwner = N.mapOwner;
 
   class NamedNodeMap {
     constructor(key) {
       illegal(key);
     }
     get length() {
-      return N.attrCount(mapOwner(this));
+      return nativeMember();
     }
     item(index) {
       return attrAt(mapOwner(this), index >>> 0);
@@ -1063,271 +937,83 @@
   }
   tag(NamedNodeMap, 'NamedNodeMap');
 
-  function namedNodeMap(el) {
-    const target = Object.create(NamedNodeMap.prototype);
-    new MapState(target, el);
-    return new Proxy(target, namedNodeMapHandler);
-  }
 
   // ---------------------------------------------------------------------
-  // DOMTokenList (classList, relList).
+  // DOMTokenList (classList, relList), CSSStyleDeclaration (el.style,
+  // getComputedStyle) and DOMStringMap (dataset) are host objects made in
+  // Rust (dom/host.rs), which answers their indexed and named properties;
+  // their members are natives (see nativeMember() above). What stays here
+  // only builds on the natives, which it calls as the prototypes had them
+  // when N.init ran (see `natives` below), not as page script may change
+  // them.
 
-  const ASCII_WS = /[\t\n\f\r ]+/;
-
-  class TokenState extends Stamp {
-    #t;
-    constructor(o, el, attr, supported) {
-      super(o);
-      this.#t = { el, attr, supported };
-    }
-    static get(o) {
-      o = unproxy(o);
-      if (!(#t in o)) throw new TypeError('Illegal invocation');
-      return o.#t;
-    }
-  }
-  const tokenState = TokenState.get;
-
-  function tokens(t) {
-    const v = N.getAttr(t.el, t.attr);
-    if (v === null) return [];
-    const out = [];
-    for (const tok of v.split(ASCII_WS)) if (tok && !out.includes(tok)) out.push(tok);
-    return out;
-  }
-
-  function checkToken(token, what) {
-    token = str(token);
-    if (token === '') throw domException('SyntaxError', "Failed to execute '" + what + "' on 'DOMTokenList': The token provided must not be empty.");
-    if (/[\t\n\f\r ]/.test(token)) {
-      throw domException('InvalidCharacterError', "Failed to execute '" + what + "' on 'DOMTokenList': The token provided ('" + token + "') contains HTML space characters, which are not valid in tokens.");
-    }
-    return token;
-  }
-
-  function writeTokens(t, list) {
-    N.setAttr(t.el, t.attr, list.join(' '));
-  }
+  const natives = {};
 
   class DOMTokenList {
     constructor(key) {
       illegal(key);
     }
     get length() {
-      return tokens(tokenState(this)).length;
+      return nativeMember();
     }
     item(index) {
-      const v = tokens(tokenState(this))[index >>> 0];
-      return v === undefined ? null : v;
+      return nativeMember();
     }
     contains(token) {
-      return tokens(tokenState(this)).includes(str(token));
+      return nativeMember();
     }
-    add(...toAdd) {
-      const t = tokenState(this);
-      const checked = toAdd.map((x) => checkToken(x, 'add'));
-      const list = tokens(t);
-      for (const tok of checked) if (!list.includes(tok)) list.push(tok);
-      writeTokens(t, list);
+    add(...tokens) {
+      return nativeMember();
     }
-    remove(...toRemove) {
-      const t = tokenState(this);
-      const checked = toRemove.map((x) => checkToken(x, 'remove'));
-      if (N.getAttr(t.el, t.attr) === null) return;
-      writeTokens(t, tokens(t).filter((x) => !checked.includes(x)));
+    remove(...tokens) {
+      return nativeMember();
     }
     toggle(token, force) {
-      const t = tokenState(this);
-      token = checkToken(token, 'toggle');
-      const list = tokens(t);
-      if (list.includes(token)) {
-        if (force === true) return true;
-        writeTokens(t, list.filter((x) => x !== token));
-        return false;
-      }
-      if (force === false) return false;
-      list.push(token);
-      writeTokens(t, list);
-      return true;
+      return nativeMember();
     }
     replace(token, newToken) {
-      const t = tokenState(this);
-      token = checkToken(token, 'replace');
-      newToken = checkToken(newToken, 'replace');
-      const list = tokens(t);
-      const i = list.indexOf(token);
-      if (i < 0) return false;
-      const out = [];
-      for (const x of list) {
-        const v = x === token ? newToken : x;
-        if (!out.includes(v)) out.push(v);
-      }
-      writeTokens(t, out);
-      return true;
+      return nativeMember();
     }
     supports(token) {
-      const t = tokenState(this);
-      if (t.supported === null) {
-        throw new TypeError("Failed to execute 'supports' on 'DOMTokenList': DOMTokenList has no supported tokens.");
-      }
-      return t.supported.includes(str(token).toLowerCase());
+      return nativeMember();
     }
     get value() {
-      const t = tokenState(this);
-      const v = N.getAttr(t.el, t.attr);
-      return v === null ? '' : v;
+      return nativeMember();
     }
     set value(value) {
-      const t = tokenState(this);
-      N.setAttr(t.el, t.attr, str(value));
+      nativeMember();
     }
     toString() {
-      return this.value;
+      return nativeMember();
     }
     forEach(callback, thisArg) {
-      const list = tokens(tokenState(this));
+      const list = tokenArray(this);
       for (let i = 0; i < list.length; i++) ReflectApply(callback, thisArg, [list[i], i, this]);
     }
     entries() {
-      return tokens(tokenState(this)).entries();
+      return tokenArray(this).entries();
     }
     keys() {
-      return tokens(tokenState(this)).keys();
+      return tokenArray(this).keys();
     }
     values() {
-      return tokens(tokenState(this)).values();
+      return tokenArray(this).values();
     }
     [Symbol.iterator]() {
-      return tokens(tokenState(this)).values();
+      return tokenArray(this).values();
     }
   }
   tag(DOMTokenList, 'DOMTokenList');
 
-  const tokenListHandler = {
-    get(target, key, receiver) {
-      const i = arrayIndex(key);
-      if (i >= 0) {
-        const v = tokens(tokenState(target))[i];
-        return v;
-      }
-      return Reflect.get(target, key, receiver);
-    },
-    has(target, key) {
-      const i = arrayIndex(key);
-      if (i >= 0) return i < tokens(tokenState(target)).length;
-      return Reflect.has(target, key);
-    },
-  };
-
-  function tokenList(el, attr, supported = null) {
-    const target = Object.create(DOMTokenList.prototype);
-    new TokenState(target, el, attr, supported);
-    return new Proxy(target, tokenListHandler);
-  }
-
-  // ---------------------------------------------------------------------
-  // Inline style: CSSStyleDeclaration over the style attribute.
-
-  function kebab(prop) {
-    if (prop.startsWith('--') || prop.includes('-')) return prop.toLowerCase().startsWith('--') ? prop : prop.toLowerCase();
-    if (prop === 'cssFloat') return 'float';
-    let out = prop.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
-    if (/^(webkit|moz|ms|o)-/.test(out)) out = '-' + out;
+  function tokenArray(list) {
+    const n = ReflectApply(natives.tokensLength, list, []);
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(ReflectApply(natives.tokensItem, list, [i]));
     return out;
   }
 
-  function camel(name) {
-    if (name === 'float') return 'cssFloat';
-    let n = name;
-    if (n.startsWith('-ms-')) n = n.slice(1);
-    else if (n.startsWith('-')) n = n.slice(1).replace(/^(\w)/, (c) => c.toUpperCase());
-    return n.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-  }
-
-  // Splits declarations on semicolons outside strings and brackets.
-  function parseDeclarations(text) {
-    const decls = [];
-    let depth = 0;
-    let quote = '';
-    let start = 0;
-    const push = (end) => {
-      const part = text.slice(start, end);
-      const colon = part.indexOf(':');
-      if (colon > 0) {
-        let name = part.slice(0, colon).trim();
-        let value = part.slice(colon + 1).trim();
-        let important = false;
-        const m = /!\s*important\s*$/i.exec(value);
-        if (m) {
-          important = true;
-          value = value.slice(0, m.index).trim();
-        }
-        if (!name.startsWith('--')) name = name.toLowerCase();
-        if (name && value) {
-          const i = decls.findIndex((d) => d[0] === name);
-          if (i >= 0) decls.splice(i, 1);
-          decls.push([name, value, important]);
-        }
-      }
-      start = end + 1;
-    };
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (quote) {
-        if (c === '\\') i++;
-        else if (c === quote) quote = '';
-      } else if (c === '"' || c === "'") {
-        quote = c;
-      } else if (c === '(' || c === '[') {
-        depth++;
-      } else if ((c === ')' || c === ']') && depth > 0) {
-        depth--;
-      } else if (c === ';' && depth === 0) {
-        push(i);
-      }
-    }
-    push(text.length);
-    return decls;
-  }
-
-  function serializeDeclarations(decls) {
-    return decls.map(([n, v, imp]) => n + ': ' + v + (imp ? ' !important' : '') + ';').join(' ');
-  }
-
-  class StyleState extends Stamp {
-    #s;
-    constructor(o, s) {
-      super(o);
-      this.#s = s;
-    }
-    static get(o) {
-      o = unproxy(o);
-      if (!(#s in o)) throw new TypeError('Illegal invocation');
-      return o.#s;
-    }
-  }
-  const styleState = StyleState.get;
-
-  // The declarations: parsed from the owner's style attribute (re-parsed
-  // only when it changed), or fixed for a computed style.
-  function declarations(s) {
-    if (s.owner === null) return s.decls;
-    const text = N.getAttr(s.owner, 'style');
-    if (text !== s.text) {
-      s.text = text;
-      s.decls = text === null ? [] : parseDeclarations(text);
-    }
-    return s.decls;
-  }
-
-  function writeDeclarations(s, decls) {
-    if (s.readOnly) {
-      throw domException('NoModificationAllowedError', 'These styles are computed, and therefore read-only.');
-    }
-    const text = serializeDeclarations(decls);
-    s.decls = decls;
-    s.text = text;
-    N.setAttr(s.owner, 'style', text);
+  function tokenList(el, attr, supported = null) {
+    return N.tokenList(el, attr, supported === null ? undefined : supported);
   }
 
   class CSSStyleDeclaration {
@@ -1335,120 +1021,44 @@
       illegal(key);
     }
     get cssText() {
-      const s = styleState(this);
-      return s.owner === null ? serializeDeclarations(s.decls) : serializeDeclarations(declarations(s));
+      return nativeMember();
     }
     set cssText(value) {
-      const s = styleState(this);
-      writeDeclarations(s, parseDeclarations(value === null ? '' : str(value)));
+      nativeMember();
     }
     get length() {
-      return declarations(styleState(this)).length;
+      return nativeMember();
     }
     item(index) {
-      const d = declarations(styleState(this))[index >>> 0];
-      return d === undefined ? '' : d[0];
+      return nativeMember();
     }
     getPropertyValue(property) {
-      const name = str(property);
-      const key = name.startsWith('--') ? name : name.toLowerCase();
-      const d = declarations(styleState(this)).find((x) => x[0] === key);
-      return d === undefined ? '' : d[1];
+      return nativeMember();
     }
     getPropertyPriority(property) {
-      const name = str(property).toLowerCase();
-      const d = declarations(styleState(this)).find((x) => x[0] === name);
-      return d !== undefined && d[2] ? 'important' : '';
+      return nativeMember();
     }
     setProperty(property, value, priority = '') {
-      const s = styleState(this);
-      let name = str(property);
-      if (!name.startsWith('--')) name = name.toLowerCase();
-      if (value === null || value === undefined || str(value).trim() === '') {
-        this.removeProperty(name);
-        return;
-      }
-      const v = str(value).trim();
-      const important = str(priority).toLowerCase() === 'important';
-      const decls = declarations(s).slice();
-      const i = decls.findIndex((d) => d[0] === name);
-      if (i >= 0) decls[i] = [name, v, important];
-      else decls.push([name, v, important]);
-      writeDeclarations(s, decls);
+      return nativeMember();
     }
     removeProperty(property) {
-      const s = styleState(this);
-      let name = str(property);
-      if (!name.startsWith('--')) name = name.toLowerCase();
-      const decls = declarations(s);
-      const i = decls.findIndex((d) => d[0] === name);
-      if (i < 0) return '';
-      const old = decls[i][1];
-      writeDeclarations(s, decls.filter((_, j) => j !== i));
-      return old;
+      return nativeMember();
     }
     get cssFloat() {
-      return this.getPropertyValue('float');
+      return nativeMember();
     }
     set cssFloat(value) {
-      this.setProperty('float', value);
+      nativeMember();
     }
     get parentRule() {
       return null;
     }
     *[Symbol.iterator]() {
-      for (const d of declarations(styleState(this))) yield d[0];
+      const n = ReflectApply(natives.styleLength, this, []);
+      for (let i = 0; i < n; i++) yield ReflectApply(natives.styleItem, this, [i]);
     }
   }
   tag(CSSStyleDeclaration, 'CSSStyleDeclaration');
-
-  const CSS_PROP = /^-?-?[a-zA-Z][a-zA-Z0-9-]*$/;
-  const styleHandler = {
-    get(target, key, receiver) {
-      if (typeof key !== 'string' || key in target) return Reflect.get(target, key, receiver);
-      const i = arrayIndex(key);
-      if (i >= 0) {
-        const d = declarations(styleState(target))[i];
-        return d === undefined ? undefined : d[0];
-      }
-      if (!CSS_PROP.test(key)) return undefined;
-      return CSSStyleDeclaration.prototype.getPropertyValue.call(target, kebab(key));
-    },
-    set(target, key, value, receiver) {
-      if (typeof key !== 'string' || key in target) return Reflect.set(target, key, value, receiver);
-      if (arrayIndex(key) >= 0 || !CSS_PROP.test(key)) return true;
-      CSSStyleDeclaration.prototype.setProperty.call(target, kebab(key), value);
-      return true;
-    },
-    has(target, key) {
-      return typeof key === 'string' ? (key in target || CSS_PROP.test(key)) : Reflect.has(target, key);
-    },
-    ownKeys(target) {
-      const decls = declarations(styleState(target));
-      return decls.map((_, i) => String(i)).concat(Reflect.ownKeys(target));
-    },
-    getOwnPropertyDescriptor(target, key) {
-      const i = arrayIndex(key);
-      if (i >= 0) {
-        const d = declarations(styleState(target))[i];
-        return d === undefined ? undefined : { value: d[0], writable: false, enumerable: true, configurable: true };
-      }
-      return Reflect.getOwnPropertyDescriptor(target, key);
-    },
-  };
-
-  function makeStyle(owner, decls, readOnly) {
-    const target = Object.create(CSSStyleDeclaration.prototype);
-    new StyleState(target, { owner, decls, text: undefined, readOnly });
-    return new Proxy(target, styleHandler);
-  }
-
-  function inlineStyle(el) {
-    return cached(el, 'style', () => makeStyle(el, [], false));
-  }
-
-  // ---------------------------------------------------------------------
-  // dataset: DOMStringMap over data-* attributes.
 
   class DOMStringMap {
     constructor(key) {
@@ -1457,93 +1067,34 @@
   }
   tag(DOMStringMap, 'DOMStringMap');
 
-  function dataAttr(key) {
-    if (/-[a-z]/.test(key)) {
-      throw domException('SyntaxError', "'" + key + "' is not a valid property name.");
-    }
-    return 'data-' + key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
-  }
-
-  function dataKey(attr) {
-    return attr.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-  }
-
-  function dataset(el) {
-    const handler = {
-      get(target, key, receiver) {
-        if (typeof key !== 'string' || key in target) return Reflect.get(target, key, receiver);
-        const v = N.getAttr(el, 'data-' + key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()));
-        return v === null ? undefined : v;
-      },
-      set(target, key, value) {
-        if (typeof key !== 'string') return false;
-        N.setAttr(el, dataAttr(key), str(value));
-        return true;
-      },
-      deleteProperty(target, key) {
-        if (typeof key !== 'string') return true;
-        N.removeAttr(el, 'data-' + key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()));
-        return true;
-      },
-      has(target, key) {
-        if (typeof key !== 'string') return Reflect.has(target, key);
-        return N.getAttr(el, 'data-' + key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())) !== null;
-      },
-      ownKeys() {
-        const keys = [];
-        const n = N.attrCount(el);
-        for (let i = 0; i < n; i++) {
-          const a = N.attr(el, i);
-          if (a[1] === null && a[0].startsWith('data-') && !/[A-Z]/.test(a[0])) keys.push(dataKey(a[0]));
-        }
-        return keys;
-      },
-      getOwnPropertyDescriptor(target, key) {
-        if (typeof key !== 'string') return undefined;
-        const v = N.getAttr(el, 'data-' + key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()));
-        return v === null ? undefined : { value: v, writable: true, enumerable: true, configurable: true };
-      },
-      defineProperty(target, key, desc) {
-        if (typeof key !== 'string' || !('value' in desc)) return false;
-        N.setAttr(el, dataAttr(key), str(desc.value));
-        return true;
-      },
-    };
-    return new Proxy(Object.create(DOMStringMap.prototype), handler);
+  // el.style = text.
+  function setStyleText(el, value) {
+    ReflectApply(natives.setCssText, ReflectApply(natives.style, el, []), [value]);
   }
 
   // ---------------------------------------------------------------------
-  // Geometry. Nothing is laid out (see LayoutMode in window.rs): every
+  // Geometry. Nothing is laid out (see Visibility in window.rs): every
   // rendered element is a box as wide as the viewport, hidden ones are
-  // empty. In the default 'inView' layout each box is one 20px line at the
-  // top of the viewport, so anything gated on visibility counts as visible
-  // and in view. In the 'scrolled' layout the elements under <body> are
-  // stacked in document order, a line each, every element spanning its
-  // descendants (N.layoutLines), and boxes move as the page scrolls. Either
-  // way the root element is as tall as the content, at least the viewport.
+  // empty. Under 'all' each box is one 20px line at the top of the
+  // viewport, so anything gated on visibility counts as visible and in
+  // view. Under the default 'loaded' the same holds for what the document
+  // held at the last reveal (the load event, then each auto-scroll), but
+  // elements inserted since take a line each in a stack from the top
+  // (N.loadedLines), pushing what follows them down and out of view once
+  // they fill a viewport. Boxes stay put when scrolling under both. Under
+  // 'viewport' the elements under <body> are stacked in document order, a
+  // line each, every element spanning its descendants (N.layoutLines), and
+  // boxes move as the page scrolls. Either way the root element is as tall
+  // as the content, at least the viewport.
   //
-  // internals.elementBox gives an element's [x, y, width, height] in
-  // document coordinates; replace it to change all of this.
+  // The boxes are computed in Rust (DomState::element_box in
+  // dom/layout.rs): N.elementBox(el) gives an element's [x, y, width,
+  // height] in document coordinates, and clientWidth, offsetTop and the
+  // like are native getters reading the same boxes.
 
   const LINE = 20;
-  const SCROLLED = env.layout === 'scrolled';
-  const ROOT_BOX = { version: -1, height: 0 };
-
-  function rootHeight() {
-    const v = N.version();
-    if (ROOT_BOX.version !== v) {
-      ROOT_BOX.version = v;
-      let lines;
-      if (SCROLLED) {
-        const body = N.docPart(2);
-        lines = body === null ? 0 : N.layoutLines([body])[1];
-      } else {
-        lines = N.count(documentNode, 'body *');
-      }
-      ROOT_BOX.height = Math.max(env.height, lines * LINE);
-    }
-    return ROOT_BOX.height;
-  }
+  const SCROLLED = env.visibility === 'viewport';
+  const LOADED = env.visibility === 'loaded';
 
   function rendered(el) {
     return N.isConnected(el) && N.matches(el, ':visible');
@@ -1557,29 +1108,21 @@
     return lines[0] < 0 ? null : [lines[0] * LINE, lines[1] * LINE];
   }
 
-  function defaultElementBox(el) {
-    if (!rendered(el)) return [0, 0, 0, 0];
-    const name = N.elementName(el);
-    if (name[1] === HTML_NS && (name[0] === 'html' || name[0] === 'body')) {
-      return [0, 0, env.width, rootHeight()];
-    }
-    if (SCROLLED) {
-      const stacked = stackedBox(el);
-      if (stacked !== null) return [0, stacked[0], env.width, stacked[1]];
-    }
-    return [0, 0, env.width, LINE];
+  // The 'loaded' box for the [line, lines] pair at lines[i]: at least a
+  // line tall, so elements that take no room in the stack are not empty.
+  function loadedBox(lines, i) {
+    return [0, Math.max(0, lines[i]) * LINE, env.width, Math.max(1, lines[i + 1]) * LINE];
   }
-  internals.elementBox = defaultElementBox;
-  if (SCROLLED) {
-    internals.scrollLimit = () => [0, Math.max(0, rootHeight() - env.height)];
+  if (SCROLLED || LOADED) {
+    internals.scrollLimit = () => [0, Math.max(0, N.rootHeight() - env.height)];
   }
 
   function box(el) {
-    return internals.elementBox(el);
+    return N.elementBox(el);
   }
 
   // An element's box relative to the viewport, as getBoundingClientRect()
-  // reports it. In the 'inView' layout boxes stay put when scrolling.
+  // reports it. Under 'all' and 'loaded' boxes stay put when scrolling.
   function clientBox(el) {
     const b = box(el);
     if (!SCROLLED || (b[2] === 0 && b[3] === 0)) return b;
@@ -1728,33 +1271,31 @@
 
   class Element extends Node {
     get namespaceURI() {
-      return N.elementName(this)[1];
+      return nativeMember();
     }
     get prefix() {
       return N.elementName(this)[2];
     }
     get localName() {
-      return N.elementName(this)[0];
+      return nativeMember();
     }
     get tagName() {
-      return N.tagName(this);
+      return nativeMember();
     }
     get id() {
-      const v = N.getAttr(this, 'id');
-      return v === null ? '' : v;
+      return nativeMember();
     }
     set id(value) {
       N.setAttr(this, 'id', str(value));
     }
     get className() {
-      const v = N.getAttr(this, 'class');
-      return v === null ? '' : v;
+      return nativeMember();
     }
     set className(value) {
       N.setAttr(this, 'class', str(value));
     }
     get classList() {
-      return cached(this, 'classList', () => tokenList(this, 'class'));
+      return nativeMember();
     }
     set classList(value) {
       N.setAttr(this, 'class', str(value));
@@ -1770,7 +1311,7 @@
       return cached(this, 'part', () => tokenList(this, 'part'));
     }
     get attributes() {
-      return cached(this, 'attributes', () => namedNodeMap(this));
+      return nativeMember();
     }
     hasAttributes() {
       return N.attrCount(this) > 0;
@@ -1903,8 +1444,7 @@
       return N.closest(this, str(selectors));
     }
     get shadowRoot() {
-      const root = N.shadowRoot(this);
-      return root !== null && !(shadowBits(root) & 1) ? root : null;
+      return nativeMember();
     }
     get assignedSlot() {
       return assignedSlot(this);
@@ -1926,13 +1466,17 @@
     get clientTop() { return 0; }
     get clientLeft() { return 0; }
     get clientWidth() {
-      return isRootScroller(this) && N.elementName(this)[0] === 'html' ? env.width : box(this)[2];
+      return nativeMember();
     }
     get clientHeight() {
-      return isRootScroller(this) && N.elementName(this)[0] === 'html' ? env.height : box(this)[3];
+      return nativeMember();
     }
-    get scrollWidth() { return box(this)[2]; }
-    get scrollHeight() { return box(this)[3]; }
+    get scrollWidth() {
+      return nativeMember();
+    }
+    get scrollHeight() {
+      return nativeMember();
+    }
     get scrollTop() {
       return isRootScroller(this) ? internals.scrollPosition()[1] : state(this).scrollTop || 0;
     }
@@ -2017,9 +1561,11 @@
   // Attribute reflection helpers for HTML element interfaces.
 
   function resolveURL(url) {
-    const parts = internals.urlParse(url, internals.baseURL());
-    return parts === undefined ? url : parts[internals.URL_PARTS.HREF];
+    return internals.urlHref(url, internals.baseURL()) ?? url;
   }
+
+  // The accessors reflect() defined, for N.init.
+  const reflected = [];
 
   // spec: { prop: type } or { prop: [type, attr, extra] }. Types: 'string',
   // 'url', 'bool', 'long', 'ulong', 'number', 'enum' (extra: [values,
@@ -2103,6 +1649,9 @@
           throw new Error('bad reflect type ' + type);
       }
       defineProperty(Ctor.prototype, prop, { get, set, enumerable: true, configurable: true });
+      // N.init makes the accessor native if it is still this one then (see
+      // "Reflected attributes" in dom/attrs.rs).
+      reflected.push([Ctor.prototype, prop, type, attrName, extra, get]);
     }
   }
 
@@ -2150,13 +1699,13 @@
       super(key);
     }
     get dataset() {
-      return cached(this, 'dataset', () => dataset(this));
+      return nativeMember();
     }
     get style() {
-      return inlineStyle(this);
+      return nativeMember();
     }
     set style(value) {
-      inlineStyle(this).cssText = value;
+      setStyleText(this, value);
     }
     get innerText() {
       return N.innerText(this);
@@ -2207,10 +1756,18 @@
       if (name === 'body' || name === 'html' || box(this)[2] === 0) return null;
       return N.docPart(2);
     }
-    get offsetTop() { return box(this)[1]; }
-    get offsetLeft() { return box(this)[0]; }
-    get offsetWidth() { return box(this)[2]; }
-    get offsetHeight() { return box(this)[3]; }
+    get offsetTop() {
+      return nativeMember();
+    }
+    get offsetLeft() {
+      return nativeMember();
+    }
+    get offsetWidth() {
+      return nativeMember();
+    }
+    get offsetHeight() {
+      return nativeMember();
+    }
     click() {
       if (state(this).clicking || this.disabled === true) return;
       state(this).clicking = true;
@@ -2409,8 +1966,7 @@
     get href() {
       const v = N.getAttr(this, 'href');
       if (v === null) return internals.documentURL();
-      const parts = internals.urlParse(v, internals.documentURL());
-      return parts === undefined ? v : parts[internals.URL_PARTS.HREF];
+      return internals.urlHref(v, internals.documentURL()) ?? v;
     },
     set href(v) { N.setAttr(this, 'href', str(v)); },
   });
@@ -3280,20 +2836,9 @@
     return null;
   }
 
-  internals.handlerAttribute = (target, type) => {
-    let el;
-    if (target === globalThis) {
-      if (!WINDOW_HANDLER_TYPES.has(type)) return null;
-      el = N.docPart(2);
-      if (el === null || !isBodyLike(el)) return null;
-    } else if (target instanceof Element && handlerTarget(target, type) === target) {
-      el = target;
-    } else {
-      return null;
-    }
-    const source = N.getAttr(el, 'on' + type);
-    return source === null ? null : [el, source];
-  };
+  // Which content attributes set handlers, for the native lookup of an
+  // attribute an element was made with (see src/events/dispatch.rs).
+  internals.handlerTypes([...WINDOW_HANDLER_TYPES], [...ELEMENT_HANDLER_TYPES]);
 
   // Elements whose form owner is on a handler's scope chain.
   const FORM_ASSOCIATED = [
@@ -3415,13 +2960,13 @@
 
   class SVGElement extends Element {
     get dataset() {
-      return cached(this, 'dataset', () => dataset(this));
+      return nativeMember();
     }
     get style() {
-      return inlineStyle(this);
+      return nativeMember();
     }
     set style(value) {
-      inlineStyle(this).cssText = value;
+      setStyleText(this, value);
     }
     get className() {
       const el = this;
@@ -3497,10 +3042,10 @@
 
   class MathMLElement extends Element {
     get dataset() {
-      return cached(this, 'dataset', () => dataset(this));
+      return nativeMember();
     }
     get style() {
-      return inlineStyle(this);
+      return nativeMember();
     }
   }
   tag(MathMLElement, 'MathMLElement');
@@ -3594,60 +3139,9 @@
   }
 
   // ---------------------------------------------------------------------
-  // getComputedStyle: the inline style over defaults by element type.
+  // getComputedStyle is native (dom/host.rs): set after N.init below.
 
-  const DISPLAY = {
-    block: 'address article aside blockquote body center details dialog dd div dl dt fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr html legend listing main menu nav ol p plaintext pre search section summary ul xmp',
-    'list-item': 'li',
-    table: 'table', 'table-row': 'tr', 'table-cell': 'td th', 'table-row-group': 'tbody',
-    'table-header-group': 'thead', 'table-footer-group': 'tfoot', 'table-caption': 'caption',
-    'table-column': 'col', 'table-column-group': 'colgroup', 'inline-block': 'button input select textarea img video canvas iframe meter progress',
-    none: 'area base datalist head link meta noscript script style template title param source track',
-  };
-  const displayOf = new Map();
-  for (const [display, names] of Object.entries(DISPLAY)) for (const n of names.split(' ')) displayOf.set(n, display);
-
-  function getComputedStyle(element, pseudoElement) {
-    void pseudoElement;
-    if (!(element instanceof Element)) {
-      throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
-    }
-    const name = N.elementName(element);
-    const b = box(element);
-    const defaults = [
-      ['display', name[1] === HTML_NS ? displayOf.get(name[0]) || 'inline' : 'inline'],
-      ['visibility', 'visible'], ['opacity', '1'], ['position', 'static'], ['float', 'none'],
-      ['overflow', 'visible'], ['overflow-x', 'visible'], ['overflow-y', 'visible'],
-      ['width', b[2] + 'px'], ['height', b[3] + 'px'], ['top', 'auto'], ['left', 'auto'],
-      ['right', 'auto'], ['bottom', 'auto'], ['z-index', 'auto'], ['font-size', '16px'],
-      ['font-family', 'Arial, sans-serif'], ['font-weight', '400'], ['font-style', 'normal'],
-      ['line-height', 'normal'], ['color', 'rgb(0, 0, 0)'], ['background-color', 'rgba(0, 0, 0, 0)'],
-      ['background-image', 'none'], ['box-sizing', 'content-box'], ['transform', 'none'],
-      ['pointer-events', 'auto'], ['cursor', 'auto'], ['white-space', 'normal'],
-      ['text-align', 'start'], ['text-decoration', 'none'], ['direction', 'ltr'],
-      ['content', 'normal'], ['clip', 'auto'], ['clip-path', 'none'], ['filter', 'none'],
-      ['transition', 'all 0s ease 0s'], ['animation-name', 'none'], ['animation-duration', '0s'],
-      ['transition-duration', '0s'], ['scroll-behavior', 'auto'],
-    ];
-    for (const side of ['top', 'right', 'bottom', 'left']) {
-      defaults.push(['margin-' + side, '0px'], ['padding-' + side, '0px'], ['border-' + side + '-width', '0px']);
-    }
-    const decls = defaults.map(([n, v]) => [n, v, false]);
-    const inline = N.getAttr(element, 'style');
-    if (inline !== null) {
-      for (const d of parseDeclarations(inline)) {
-        const i = decls.findIndex((x) => x[0] === d[0]);
-        if (i >= 0) decls[i] = [d[0], d[1], false];
-        else decls.push([d[0], d[1], false]);
-      }
-    }
-    // Hidden by an attribute or an ancestor: report display: none.
-    if (!N.matches(element, ':visible')) {
-      const visibility = decls.find((x) => x[0] === 'visibility');
-      if (visibility[1] === 'visible') decls.find((x) => x[0] === 'display')[1] = 'none';
-    }
-    return makeStyle(null, decls, true);
-  }
+  let getComputedStyle;
 
   // ---------------------------------------------------------------------
   // Traversal: TreeWalker and NodeIterator.
@@ -4521,6 +4015,7 @@
   const svgProtos = {};
   for (const [tagName, C] of Object.entries(SVG_TAGS)) svgProtos[tagName] = C.prototype;
 
+  const nativeFunctions = {};
   N.init({
     Element: Element.prototype,
     HTMLElement: HTMLElement.prototype,
@@ -4535,42 +4030,55 @@
     Document: HTMLDocument.prototype,
     html: htmlProtos,
     svg: svgProtos,
+    // Where the native members go (see nativeMember() above).
+    interfaces: {
+      Node: Node.prototype,
+      CharacterData: CharacterData.prototype,
+      Element: Element.prototype,
+      Document: Document.prototype,
+      DocumentFragment: DocumentFragment.prototype,
+      DocumentType: DocumentType.prototype,
+      NodeList: NodeList.prototype,
+      HTMLCollection: HTMLCollection.prototype,
+      NamedNodeMap: NamedNodeMap.prototype,
+      HTMLElement: HTMLElement.prototype,
+      SVGElement: SVGElement.prototype,
+      MathMLElement: MathMLElement.prototype,
+      CSSStyleDeclaration: CSSStyleDeclaration.prototype,
+      DOMTokenList: DOMTokenList.prototype,
+      DOMStringMap: DOMStringMap.prototype,
+      // Native functions that are not members, filled in by N.init.
+      functions: nativeFunctions,
+    },
+    // Hooks of the native members: what to do with the scripts an
+    // insertion connected, and the base URL that reflected URLs resolve
+    // against.
+    hooks: {
+      connected: (scripts) => connected(scripts),
+      baseURL: () => internals.baseURL(),
+      attrAt,
+      attrNamed,
+    },
+    reflected,
   }, (name, message) => domException(name, message));
   documentNode = N.document();
+  getComputedStyle = nativeFunctions.getComputedStyle;
+  {
+    const get = (C, name) => Object.getOwnPropertyDescriptor(C.prototype, name).get;
+    natives.tokensLength = get(DOMTokenList, 'length');
+    natives.tokensItem = DOMTokenList.prototype.item;
+    natives.styleLength = get(CSSStyleDeclaration, 'length');
+    natives.styleItem = CSSStyleDeclaration.prototype.item;
+    natives.setCssText = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'cssText').set;
+    natives.style = get(HTMLElement, 'style');
+  }
 
   // ---------------------------------------------------------------------
   // Hooks for the other glue and the page loader.
 
-  internals.eventParent = (target, event) => {
-    if (!(target instanceof Node) || target instanceof Attr) return null;
-    const parent = N.nav(target, 0);
-    if (parent !== null) return parent;
-    if (target === documentNode) return event.type === 'load' ? null : globalThis;
-    // Composed events leave a shadow tree for its host, as do events that
-    // came into it through a slot.
-    if (N.nodeType(target) !== 11) return null;
-    const origin = event.target;
-    if (event.composed || !(origin instanceof Node) || N.rootNode(origin) !== target) return N.shadowHost(target);
-    return null;
-  };
-  // A slotted node's event path goes through its slot.
-  const eventParentOf = internals.eventParent;
-  internals.eventParent = (target, event) => {
-    if (N.hasShadowRoots() && target instanceof Node && N.nodeType(target) !== 11) {
-      const parent = N.nav(target, 0);
-      if (parent !== null && N.nodeType(parent) === 1 && N.shadowRoot(parent) !== null) {
-        const slot = findSlot(target, false);
-        if (slot !== null) return slot;
-      }
-    }
-    return eventParentOf(target, event);
-  };
-  // The targets listeners along `path` see, or null if they all see the
-  // original target, as they do unless it is in a shadow tree.
-  internals.retarget = (target, path) => {
-    if (!(target instanceof Node) || N.shadowHost(N.rootNode(target)) === null) return null;
-    return path.map((node) => retargetTo(target, node));
-  };
+  // A slotted node's event path goes through its slot (the rest of the
+  // path is worked out natively, see src/events/dispatch.rs).
+  internals.slotFor = (node) => findSlot(node, false);
   internals.scrollTarget = () => documentNode;
 
   // For XMLHttpRequest's responseXML: a document parsed from a response,
@@ -4587,8 +4095,8 @@
       base.version = v;
       base.url = url;
       const href = N.baseHref();
-      const parts = href === null || href === undefined ? undefined : internals.urlParse(href, url);
-      base.href = parts === undefined ? url : parts[internals.URL_PARTS.HREF];
+      const resolved = href === null || href === undefined ? undefined : internals.urlHref(href, url);
+      base.href = resolved ?? url;
     }
     return base.href;
   };
@@ -4596,6 +4104,8 @@
   // For IntersectionObserver.
   internals.geometry = {
     scrolled: SCROLLED,
+    loaded: LOADED,
+    loadedBox,
     rendered,
     clientBox,
     isElement: (value) => value instanceof Element,

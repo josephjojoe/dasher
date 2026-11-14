@@ -3,8 +3,8 @@
 use std::time::{Duration, Instant};
 
 use dasher::{
-    AutoScrollOptions, AutoScrollStop, Browser, ClockMode, ConsoleLevel, Error, GotoOptions,
-    JsonValue, SettleOptions, SettleOutcome,
+    AutoScrollOptions, AutoScrollStop, Browser, Budget, ClockMode, ConsoleLevel, Error,
+    GotoOptions, JsonValue, SettleOptions, SettleOutcome, WorkBudget,
 };
 use dasher_test_server::{FixtureResponse, FixtureServer, fixtures_dir};
 use serde::Deserialize;
@@ -403,9 +403,9 @@ async fn manual_scrolling_reaches_the_page() {
     assert_eq!(page.evaluate("scrollY").await.unwrap(), 400);
     page.scroll_by(0.0, -100.0).unwrap();
     assert_eq!(page.evaluate("scrollY").await.unwrap(), 300);
-    // A scroll to the bottom fires the feed's listener; settling lets the
-    // fetch it started land.
-    page.scroll_to(0.0, f64::INFINITY).unwrap();
+    // A scroll to the bottom (scrolling stops there) fires the feed's
+    // listener; settling lets the fetch it started land.
+    page.scroll_to(0.0, 1e9).unwrap();
     page.settle(&SettleOptions::default()).await.unwrap();
     assert_eq!(page.count("article").unwrap(), 6);
 }
@@ -592,4 +592,79 @@ async fn memory_usage_covers_the_current_document() {
         after.js_heap >= usage.js_heap + 1_000_000,
         "{usage:?} then {after:?}"
     );
+}
+
+#[tokio::test]
+async fn a_page_that_never_goes_quiet_ends_on_its_page_time_budget() {
+    let server = server();
+    let mut page = browser().new_page();
+    // By default only the network has to go idle, which it does.
+    let navigation = page.goto(&server.url("/ticker.html")).await.unwrap();
+    assert_eq!(navigation.settle, Some(SettleOutcome::Settled));
+    assert_eq!(navigation.budget_exhausted, None);
+
+    // Waiting for DOM quiet too, the page never gets there.
+    let options = GotoOptions::settle(SettleOptions {
+        dom_quiet: Some(dasher::DEFAULT_QUIET),
+        ..SettleOptions::default()
+    });
+    let started = Instant::now();
+    let navigation = page
+        .goto_with(&server.url("/ticker.html"), &options)
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(!navigation.timed_out);
+    assert_eq!(navigation.budget_exhausted, Some(Budget::PageTime));
+    assert_eq!(
+        navigation.settle,
+        Some(SettleOutcome::BudgetExhausted(Budget::PageTime))
+    );
+    assert_eq!(page.text("#news").unwrap().as_deref(), Some("Headline"));
+    // Five seconds of page time at four ticks a second.
+    let ticks: u32 = page
+        .evaluate_as("+document.getElementById('clock').textContent")
+        .await
+        .unwrap();
+    assert!((18..=24).contains(&ticks), "{ticks}");
+}
+
+#[tokio::test]
+async fn the_work_budget_bounds_a_navigation_and_is_lifted_after() {
+    let server = server();
+    let mut page = browser().new_page();
+    let options = GotoOptions::default().with_budget(WorkBudget {
+        requests: Some(30),
+        ..WorkBudget::default()
+    });
+    let navigation = page
+        .goto_with(&server.url("/more.html"), &options)
+        .await
+        .unwrap();
+    assert_eq!(navigation.budget_exhausted, Some(Budget::Requests));
+    assert_eq!(
+        navigation.settle,
+        Some(SettleOutcome::BudgetExhausted(Budget::Requests))
+    );
+    assert!(
+        (30..=32).contains(&navigation.requests),
+        "{}",
+        navigation.requests
+    );
+    // The page can still be read and evaluated.
+    let items = page.count("li").unwrap();
+    assert!((25..=31).contains(&items), "{items}");
+    let title: String = page.evaluate_as("document.title").await.unwrap();
+    assert_eq!(title, "More");
+
+    // Without a budget, the same page runs to the timeout.
+    let options = GotoOptions::default()
+        .with_budget(WorkBudget::unlimited())
+        .with_timeout(Duration::from_millis(500));
+    let navigation = page
+        .goto_with(&server.url("/more.html"), &options)
+        .await
+        .unwrap();
+    assert!(navigation.timed_out);
+    assert_eq!(navigation.budget_exhausted, None);
 }

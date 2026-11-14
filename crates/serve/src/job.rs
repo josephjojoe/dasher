@@ -39,7 +39,7 @@ pub const DEFAULT_QUIET: Duration = Duration::from_millis(500);
 pub struct Job {
     /// The `http(s)` URL to load.
     pub url: String,
-    /// When the page counts as loaded. Defaults to [`Wait::Settled`].
+    /// When the page counts as loaded. Defaults to [`Wait::NetworkIdle`].
     #[serde(default)]
     pub wait: Wait,
     /// The quiet period, in milliseconds, of the wait strategies: how long
@@ -53,6 +53,19 @@ pub struct Job {
     /// 30 000; the service may cap it. When loading runs out of time the
     /// page is used as far as it got.
     pub timeout_ms: Option<u64>,
+    /// The most page time, in milliseconds, to spend waiting for the page
+    /// to go quiet: skipped ahead by the virtual clock, or idle (not
+    /// running scripts, no requests in flight). Pages that update
+    /// themselves on a timer forever never go quiet; once this is spent
+    /// the quiet periods are given up and the page is used as it stands.
+    /// Defaults to 5000; 0 for no limit.
+    pub page_time_budget_ms: Option<u64>,
+    /// The most CPU time, in milliseconds, loading, waiting and scrolling
+    /// may use. Defaults to 10 000; 0 for no limit.
+    pub cpu_budget_ms: Option<u64>,
+    /// The most requests the page may make: the document, scripts,
+    /// `fetch()` and XHR. Defaults to 1000; 0 for no limit.
+    pub request_budget: Option<u64>,
     /// Scrolls the page after it has loaded to bring in infinite feeds
     /// and lazy content: `true`, or `{"max_scrolls": n}`.
     #[serde(default)]
@@ -88,6 +101,10 @@ pub struct Job {
     /// only waiting on them.
     #[serde(default)]
     pub realtime: bool,
+    /// What counts as in view, which decides how much lazy content loads
+    /// and what it costs. Defaults to [`Visibility::Loaded`].
+    #[serde(default)]
+    pub visibility: Visibility,
 }
 
 impl Job {
@@ -136,6 +153,32 @@ impl Job {
         self.quiet_ms.map_or(DEFAULT_QUIET, Duration::from_millis)
     }
 
+    /// The page-time budget for settling; `None` for none.
+    pub fn page_time_budget(&self) -> Option<Duration> {
+        match self.page_time_budget_ms {
+            None => Some(dasher::DEFAULT_PAGE_TIME_BUDGET),
+            Some(0) => None,
+            Some(ms) => Some(Duration::from_millis(ms)),
+        }
+    }
+
+    /// The CPU and request budget for the whole page load.
+    pub fn work_budget(&self) -> dasher::WorkBudget {
+        let defaults = dasher::WorkBudget::default();
+        dasher::WorkBudget {
+            cpu: match self.cpu_budget_ms {
+                None => defaults.cpu,
+                Some(0) => None,
+                Some(ms) => Some(Duration::from_millis(ms)),
+            },
+            requests: match self.request_budget {
+                None => defaults.requests,
+                Some(0) => None,
+                Some(n) => Some(n),
+            },
+        }
+    }
+
     /// Whether the page's HTML is returned.
     pub fn wants_html(&self) -> bool {
         self.html.unwrap_or(self.extract.is_empty())
@@ -158,7 +201,8 @@ impl Job {
 pub enum Wait {
     /// The `load` event has fired.
     Load,
-    /// No requests in flight for the quiet period.
+    /// No requests in flight for the quiet period (the default).
+    #[default]
     #[serde(alias = "networkidle", alias = "networkidle0")]
     NetworkIdle,
     /// At most two requests in flight for the quiet period.
@@ -166,9 +210,34 @@ pub enum Wait {
     NetworkIdle2,
     /// No DOM changes for the quiet period.
     DomQuiet,
-    /// Both `network-idle` and `dom-quiet` (the default).
-    #[default]
+    /// Both `network-idle` and `dom-quiet`.
     Settled,
+}
+
+/// What counts as in view: `"loaded"`, `"all"` or `"viewport"`. See
+/// [`dasher::Visibility`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Visibility {
+    /// The page as it stood at load is in view; what it adds later is
+    /// below the fold until scrolling reveals it (the default).
+    #[default]
+    Loaded,
+    /// Everything is in view, always: the most lazy content, but a page
+    /// that keeps loading more can run to the timeout.
+    All,
+    /// Only what is scrolled to: the least work and the least content.
+    Viewport,
+}
+
+impl From<Visibility> for dasher::Visibility {
+    fn from(v: Visibility) -> Self {
+        match v {
+            Visibility::Loaded => Self::Loaded,
+            Visibility::All => Self::All,
+            Visibility::Viewport => Self::Viewport,
+        }
+    }
 }
 
 /// Whether, and how far, to scroll the page after loading it.
@@ -380,7 +449,7 @@ mod tests {
     #[test]
     fn a_url_alone_uses_the_defaults() {
         let job = job(json!({"url": "https://example.com/"})).unwrap();
-        assert_eq!(job.wait, Wait::Settled);
+        assert_eq!(job.wait, Wait::NetworkIdle);
         assert_eq!(job.timeout(), DEFAULT_JOB_TIMEOUT);
         assert_eq!(job.quiet(), DEFAULT_QUIET);
         assert_eq!(job.scroll, Scroll::Off);
@@ -388,6 +457,7 @@ mod tests {
         assert!(job.wants_html());
         assert!(job.extract.is_empty() && job.headers.is_empty());
         assert!(!job.realtime);
+        assert_eq!(job.visibility, Visibility::Loaded);
     }
 
     #[test]
@@ -410,6 +480,7 @@ mod tests {
             "block": ["*ads*"],
             "proxy": "http://proxy:3128",
             "realtime": true,
+            "visibility": "viewport",
         }))
         .unwrap();
         assert_eq!(job.wait, Wait::NetworkIdle2);
@@ -432,6 +503,15 @@ mod tests {
         );
         assert_eq!(job.selectors().collect::<Vec<_>>(), [".item", "h1"]);
         assert!(job.realtime);
+        assert_eq!(job.visibility, Visibility::Viewport);
+    }
+
+    #[test]
+    fn visibility_is_one_of_three_names() {
+        let visibility = |v| job(json!({"url": "u", "visibility": v})).map(|j| j.visibility);
+        assert_eq!(visibility(json!("all")), Ok(Visibility::All));
+        assert_eq!(visibility(json!("loaded")), Ok(Visibility::Loaded));
+        assert!(visibility(json!("everything")).is_err());
     }
 
     #[test]

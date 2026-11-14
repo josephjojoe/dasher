@@ -1,0 +1,11 @@
+<!doctype html>
+<title>Idle work forever</title>
+<p id="status">loading</p>
+<script>
+  // Analytics-style idle work that reschedules itself forever.
+  window.idle = 0;
+  (function again() { requestIdleCallback(() => { window.idle++; again(); }); })();
+  fetch('/api/items').then((r) => r.json()).then(() => {
+    document.getElementById('status').textContent = 'done';
+  });
+</script>
