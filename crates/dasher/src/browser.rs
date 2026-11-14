@@ -4,7 +4,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dasher_js::{ClockMode, RuntimeOptions, StorageStore, Viewport, Visibility, WindowOptions};
+use dasher_js::{
+    ClockMode, RuntimeOptions, ScriptCache, ScriptCacheOptions, StorageStore, Viewport,
+    Visibility, WindowOptions,
+};
 use dasher_net::header::{HeaderName, HeaderValue};
 use dasher_net::{Client, Cookie, CookieJar, HeaderMap, Proxy, RequestPolicy, Url, header};
 
@@ -122,6 +125,12 @@ impl Browser {
         self.inner.cookies.clear();
     }
 
+    /// The cache of compiled scripts its pages share, if it has one (see
+    /// [`BrowserBuilder::script_cache`]).
+    pub fn script_cache(&self) -> Option<&ScriptCache> {
+        self.inner.runtime.script_cache.as_ref()
+    }
+
     pub(crate) fn runtime_options(&self) -> &RuntimeOptions {
         &self.inner.runtime
     }
@@ -157,6 +166,8 @@ pub struct BrowserBuilder {
     max_dom_nodes: Option<usize>,
     max_navigations: usize,
     timeout: Duration,
+    /// `None` until set: a cache of the browser's own.
+    script_cache: Option<Option<ScriptCache>>,
 }
 
 impl Default for BrowserBuilder {
@@ -177,6 +188,7 @@ impl Default for BrowserBuilder {
             max_dom_nodes: Some(dasher_js::DEFAULT_MAX_DOM_NODES),
             max_navigations: dasher_page::DEFAULT_MAX_NAVIGATIONS,
             timeout: DEFAULT_TIMEOUT,
+            script_cache: None,
         }
     }
 }
@@ -334,6 +346,26 @@ impl BrowserBuilder {
         self
     }
 
+    /// Where pages keep compiled scripts for later pages: a
+    /// [`ScriptCache`], or `None` to compile every script from its text.
+    ///
+    /// By default each browser has a cache of its own, in memory, of
+    /// [`DEFAULT_SCRIPT_CACHE_BYTES`](crate::DEFAULT_SCRIPT_CACHE_BYTES)
+    /// (32 MiB), shared by its pages and its clones. A script compiled
+    /// once is read back by every later page that loads the same text,
+    /// whatever its URL, so a page's second visit (and a site that shares
+    /// a bundle with one visited before) skips most of its compiling. The
+    /// cache fills up to its bound and stays that size, which counts
+    /// against the process's memory; pass `None` for a browser that opens
+    /// a single page. Pass a cache made with
+    /// [`ScriptCache::new`](crate::ScriptCache::new) to bound it
+    /// differently, to keep it on disk too, or to share one between
+    /// browsers.
+    pub fn script_cache(mut self, cache: Option<ScriptCache>) -> Self {
+        self.script_cache = Some(cache);
+        self
+    }
+
     /// The default time limit for page operations: a whole
     /// [`goto`](Page::goto), waiting for a selector, awaiting an
     /// evaluated promise. Defaults to [`DEFAULT_TIMEOUT`]. Pages can
@@ -412,6 +444,9 @@ impl BrowserBuilder {
             max_dom_nodes: self.max_dom_nodes,
             clock: self.clock,
             window,
+            script_cache: self
+                .script_cache
+                .unwrap_or_else(|| Some(ScriptCache::new(ScriptCacheOptions::default()))),
             ..RuntimeOptions::default()
         };
         Ok(Browser {

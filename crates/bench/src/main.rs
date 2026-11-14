@@ -18,6 +18,7 @@
 
 mod fixtures;
 mod micro;
+mod pages;
 mod report;
 mod sys;
 
@@ -34,6 +35,8 @@ use crate::report::{Budgets, Results};
 const USAGE: &str = "\
 usage: dasher-bench [options]
        dasher-bench micro [options]   (CPU per operation; see `micro --help`)
+       dasher-bench pages [options]   (recorded real pages in one process;
+                                       see `pages --help`)
 
 Loads each fixture page in a fresh process and reports peak RSS, per-page
 memory, time to settle, idle RSS, memory over sequential jobs, cold start
@@ -66,6 +69,7 @@ fn main() -> ExitCode {
         Some("child-page") => child(|| child_page(&args[1..])),
         Some("child-jobs") => child(|| child_jobs(&args[1..])),
         Some("micro") => micro::main(&args[1..]),
+        Some("pages") => pages::main(&args[1..]),
         _ => match parse(&args) {
             Ok(Some(options)) => run(&options),
             Ok(None) => {

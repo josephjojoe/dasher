@@ -56,6 +56,7 @@ use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -174,12 +175,18 @@ struct State {
 struct Key([u8; 32]);
 
 impl Key {
-    fn new(lazy: bool, text: &[u8]) -> Self {
-        let mut input = Vec::with_capacity(ENGINE_ID.len() + 8 + text.len());
+    fn new(kind: Kind, lazy: bool, text: &[u8]) -> Self {
+        let mut input = Vec::with_capacity(ENGINE_ID.len() + 16 + text.len());
         input.extend_from_slice(ENGINE_ID.as_bytes());
-        // The kind: a classic script, and whether functions wait for
-        // their first call (`DASHER_EAGER_JS` turns that off).
-        input.extend_from_slice(if lazy { b"\0classic" } else { b"\0eager\0\0" });
+        // What changes what the text compiles to: a classic script (always
+        // sloppy at its start; a "use strict" is in the text) or a module,
+        // and whether functions wait for their first call
+        // (`DASHER_EAGER_JS` turns that off).
+        input.extend_from_slice(match kind {
+            Kind::Classic => b"\0classic",
+            Kind::Module => b"\0module\0",
+        });
+        input.extend_from_slice(if lazy { b"\0lazy\0" } else { b"\0eager" });
         input.extend_from_slice(text);
         let mut key = [0; 32];
         key.copy_from_slice(digest(&SHA256, &input).as_ref());
@@ -428,6 +435,7 @@ pub(crate) struct PageScripts {
 
 struct Used {
     key: Key,
+    kind: Kind,
     text: Arc<Text>,
     /// The entry's hints, when the script came from the cache.
     entry: Option<(Arc<[u32]>, u8)>,
@@ -437,7 +445,24 @@ struct Used {
     ran: Vec<u32>,
 }
 
-/// Classic scripts run through the cache.
+/// What a script is compiled as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Classic,
+    Module,
+}
+
+impl Kind {
+    fn eval_flags(self) -> i32 {
+        let kind = match self {
+            Self::Classic => qjs::JS_EVAL_TYPE_GLOBAL,
+            Self::Module => qjs::JS_EVAL_TYPE_MODULE,
+        };
+        (kind | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32
+    }
+}
+
+/// Where a script came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Origin {
     /// From a URL, or given by the host.
@@ -487,22 +512,73 @@ impl PageScripts {
         name: &str,
         origin: Origin,
     ) -> rquickjs::Result<bool> {
-        if source.len() < MIN_SCRIPT_LEN || source.len() > u32::MAX as usize / 2 {
-            return Ok(false);
+        match self.compile(ctx, source, name, Kind::Classic, origin) {
+            None => Ok(false),
+            Some(function) => run(ctx, function?).map(|()| true),
         }
-        let key = Key::new(self.lazy, source.as_bytes());
-        let filename = CString::new(name)?;
+    }
+
+    /// Compiles the module `source` named `name`, or reads it from the
+    /// cache, and returns it; `None` when it is too short to go through the
+    /// cache. Its imports are loaded on the way, as `JS_Eval` loads them.
+    pub(crate) fn compile_module(
+        &self,
+        ctx: &Ctx<'_>,
+        source: &str,
+        name: &str,
+    ) -> Option<rquickjs::Result<NonNull<qjs::JSModuleDef>>> {
+        let value = match self.compile(ctx, source, name, Kind::Module, Origin::External)? {
+            Ok(value) => value,
+            Err(e) => return Some(Err(e)),
+        };
+        // SAFETY: a module value: QuickJS's list of loaded modules holds the
+        // module too, so the value's own reference is freed once its
+        // pointer is read.
+        let module = unsafe {
+            let module = qjs::JS_VALUE_GET_PTR(value).cast::<qjs::JSModuleDef>();
+            qjs::JS_FreeValue(ctx.as_raw().as_ptr(), value);
+            module
+        };
+        Some(NonNull::new(module).ok_or(rquickjs::Error::Unknown))
+    }
+
+    /// The compiled script, read from the cache or compiled from `source`
+    /// (and then noted for an entry), not run yet.
+    fn compile(
+        &self,
+        ctx: &Ctx<'_>,
+        source: &str,
+        name: &str,
+        kind: Kind,
+        origin: Origin,
+    ) -> Option<rquickjs::Result<qjs::JSValue>> {
+        if source.len() < MIN_SCRIPT_LEN || source.len() > u32::MAX as usize / 2 {
+            return None;
+        }
+        let Ok(filename) = CString::new(name) else {
+            return Some(Err(rquickjs::Error::Unknown));
+        };
+        let key = Key::new(kind, self.lazy, source.as_bytes());
         let raw = ctx.as_raw().as_ptr();
         // SAFETY: `raw` is the live context `ctx` wraps, locked for this call.
         let rt = unsafe { qjs::JS_GetRuntime(raw) };
-        let tag = self.used.borrow().len() as u64 + 1;
 
         if let Some(entry) = self.cache.lookup(&key, source.len()) {
+            // The slot is taken first: a module's imports are read while it
+            // is, and they take slots of their own.
+            let tag = self.note(Used {
+                key,
+                kind,
+                text: Arc::clone(&entry.text),
+                entry: Some((Arc::clone(&entry.hints), entry.rebuilds)),
+                build: false,
+                ran: Vec::new(),
+            });
             let src = JSScriptSource::new(&entry.text, filename.as_ptr(), tag, &[]);
-            // SAFETY: the code was written by `build` with this engine
-            // build (the disk checks that), for this text, which `src`
-            // describes and `entry` keeps alive.
-            let function = with_source(rt, &src, || unsafe {
+            // SAFETY: the code was written by `Compiler` with this engine
+            // build (files say which build wrote them), for this text,
+            // which `src` describes and `entry` keeps alive.
+            let value = with_source(rt, &src, || unsafe {
                 qjs::JS_ReadObject(
                     raw,
                     entry.code.as_ptr(),
@@ -511,46 +587,44 @@ impl PageScripts {
                 )
             });
             // SAFETY: inspects the tag of a value.
-            if !unsafe { qjs::JS_IsException(function) } {
-                self.used.borrow_mut().push(Used {
-                    key,
-                    text: Arc::clone(&entry.text),
-                    entry: Some((Arc::clone(&entry.hints), entry.rebuilds)),
-                    build: false,
-                    ran: Vec::new(),
-                });
-                return run(ctx, function).map(|()| true);
+            if !unsafe { qjs::JS_IsException(value) } {
+                return Some(Ok(value));
             }
-            // Out of memory, most likely: compile it instead.
+            // Out of memory, or an import failed to load: compiling says
+            // which, as it would have without the cache.
             drop(ctx.catch());
+            self.used.borrow_mut()[usize::try_from(tag - 1).unwrap_or(0)].entry = None;
         }
 
         let build = self.cache.note_miss(&key, source.len(), origin == Origin::Inline);
         let text = Text::new(source.as_bytes());
+        let tag = self.note(Used {
+            key,
+            kind,
+            text: Arc::clone(&text),
+            entry: None,
+            build: false,
+            ran: Vec::new(),
+        });
         let src = JSScriptSource::new(&text, filename.as_ptr(), tag, &[]);
         // SAFETY: `src` describes `text`, which outlives the call; the
         // input is exactly `src.buf`, as the engine checks.
-        let function = with_source(rt, &src, || unsafe {
-            qjs::JS_Eval(
-                raw,
-                src.buf,
-                src.len as _,
-                filename.as_ptr(),
-                (qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32,
-            )
+        let value = with_source(rt, &src, || unsafe {
+            qjs::JS_Eval(raw, src.buf, src.len as _, filename.as_ptr(), kind.eval_flags())
         });
         // SAFETY: inspects the tag of a value.
-        if unsafe { qjs::JS_IsException(function) } {
-            return Err(rquickjs::Error::Exception);
+        if unsafe { qjs::JS_IsException(value) } {
+            return Some(Err(rquickjs::Error::Exception));
         }
-        self.used.borrow_mut().push(Used {
-            key,
-            text,
-            entry: None,
-            build,
-            ran: Vec::new(),
-        });
-        run(ctx, function).map(|()| true)
+        self.used.borrow_mut()[usize::try_from(tag - 1).unwrap_or(0)].build = build;
+        Some(Ok(value))
+    }
+
+    /// Takes the next slot for a script, and returns its tag.
+    fn note(&self, used: Used) -> u64 {
+        let mut all = self.used.borrow_mut();
+        all.push(used);
+        all.len() as u64
     }
 
     /// Makes or remakes the entries this page has reason to: scripts it
@@ -565,7 +639,7 @@ impl PageScripts {
                 u.ran.sort_unstable();
                 u.ran.dedup();
                 match &u.entry {
-                    None if u.build => Some((u.key, u.text, u.ran, 0)),
+                    None if u.build => Some((u.key, u.kind, u.text, u.ran, 0)),
                     None => None,
                     Some((hints, rebuilds)) => {
                         let wanted = (hints.len() / REBUILD_SHARE).max(1);
@@ -576,7 +650,7 @@ impl PageScripts {
                         all.extend_from_slice(&u.ran);
                         all.sort_unstable();
                         all.dedup();
-                        Some((u.key, u.text, all, rebuilds + 1))
+                        Some((u.key, u.kind, u.text, all, rebuilds + 1))
                     }
                 }
             })
@@ -587,8 +661,8 @@ impl PageScripts {
         let Some(compiler) = Compiler::new(self.lazy) else {
             return;
         };
-        for (key, text, hints, rebuilds) in builds {
-            if let Some(code) = compiler.compile(&text, &hints) {
+        for (key, kind, text, hints, rebuilds) in builds {
+            if let Some(code) = compiler.compile(kind, &text, &hints) {
                 self.cache.insert(
                     key,
                     Entry {
@@ -636,6 +710,7 @@ unsafe extern "C" fn on_lazy_compile(opaque: *mut c_void, tag: u64, start: u32) 
 struct Compiler {
     context: rquickjs::Context,
     _runtime: rquickjs::Runtime,
+    count: std::cell::Cell<u32>,
 }
 
 impl Compiler {
@@ -647,17 +722,23 @@ impl Compiler {
             unsafe {
                 let rt = qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
                 JS_SetLazyFunctions(rt, lazy);
+                qjs::JS_SetModuleLoaderFunc(rt, None, Some(empty_module), std::ptr::null_mut());
             }
         });
         Some(Self {
             context,
             _runtime: runtime,
+            count: std::cell::Cell::new(0),
         })
     }
 
     /// Compiles `text` with the functions at `hints` compiled with it, and
     /// writes it out for the cache.
-    fn compile(&self, text: &Arc<Text>, hints: &[u32]) -> Option<Vec<u8>> {
+    fn compile(&self, kind: Kind, text: &Arc<Text>, hints: &[u32]) -> Option<Vec<u8>> {
+        // Modules of one name would find each other when they import.
+        let count = self.count.get() + 1;
+        self.count.set(count);
+        let name = CString::new(format!("dasher:script-cache/{count}")).ok()?;
         self.context.with(|ctx| {
             let raw = ctx.as_raw().as_ptr();
             // SAFETY: `raw` is live and locked. `src` describes `text`,
@@ -668,13 +749,7 @@ impl Compiler {
                 qjs::JS_UpdateStackTop(rt);
                 let src = JSScriptSource::new(text, std::ptr::null(), 0, hints);
                 let function = with_source(rt, &src, || {
-                    qjs::JS_Eval(
-                        raw,
-                        src.buf,
-                        src.len as _,
-                        c"dasher:script-cache".as_ptr(),
-                        (qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32,
-                    )
+                    qjs::JS_Eval(raw, src.buf, src.len as _, name.as_ptr(), kind.eval_flags())
                 });
                 if qjs::JS_IsException(function) {
                     drop(ctx.catch());
@@ -698,6 +773,20 @@ impl Compiler {
             }
         })
     }
+}
+
+/// Compiling a module loads what it imports: here every import is a
+/// module with no exports, since nothing is linked or run.
+unsafe extern "C" fn empty_module(
+    ctx: *mut qjs::JSContext,
+    name: *const c_char,
+    _opaque: *mut c_void,
+) -> *mut qjs::JSModuleDef {
+    unsafe extern "C" fn init(_: *mut qjs::JSContext, _: *mut qjs::JSModuleDef) -> std::ffi::c_int {
+        0
+    }
+    // SAFETY: called by the engine with a live context and a C string.
+    unsafe { qjs::JS_NewCModule(ctx, name, Some(init)) }
 }
 
 // ---------------------------------------------------------------------

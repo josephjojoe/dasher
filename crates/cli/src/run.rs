@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use dasher::{
-    AutoScrollOptions, Browser, ClockMode, Error, GotoOptions, JsonValue, Navigation, NetworkIdle,
+    AutoScrollOptions, Browser, ClockMode, Error, GotoOptions, JsonValue, ScriptCache, ScriptCacheOptions, Navigation, NetworkIdle,
     Page, SettleOptions,
 };
 use dasher_serve::report::{
@@ -77,9 +77,15 @@ async fn run(options: &Options) -> ExitCode {
     };
     // The process is about to exit and the output is written. Freeing the
     // page object by object first was 5% of a heavy page's CPU time, so
-    // leave its memory for the OS to take back.
-    #[allow(clippy::mem_forget)]
-    std::mem::forget(page);
+    // leave its memory for the OS to take back; unless the page is to
+    // leave its compiled scripts in the cache directory, which it does
+    // once it is freed.
+    if options.script_cache_dir.is_some() {
+        drop(page);
+    } else {
+        #[allow(clippy::mem_forget)]
+        std::mem::forget(page);
+    }
     code
 }
 
@@ -112,6 +118,13 @@ fn browser(options: &Options) -> dasher::Result<Browser> {
     if let Some(nodes) = options.max_dom_nodes {
         builder = builder.max_dom_nodes((nodes > 0).then_some(nodes));
     }
+    // One page: a cache in memory would only be filled for nothing.
+    builder = builder.script_cache(options.script_cache_dir.clone().map(|dir| {
+        ScriptCache::new(ScriptCacheOptions {
+            dir: Some(dir),
+            ..ScriptCacheOptions::default()
+        })
+    }));
     builder.build()
 }
 

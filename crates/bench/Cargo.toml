@@ -10,6 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# For `dasher-bench pages`: answer requests from recordings (see
+# dasher-net's feature of the same name).
+replay = ["dasher/replay"]
+
 [dependencies]
 dasher.workspace = true
 dasher-test-server.workspace = true

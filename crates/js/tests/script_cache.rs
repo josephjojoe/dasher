@@ -219,3 +219,82 @@ fn a_cache_directory_starts_a_new_process_warm() {
     assert_ne!(std::fs::read(&file).unwrap(), bytes);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+mod modules {
+    use dasher_js::{
+        ClockMode, JsRuntime, ModuleCredentials, ModuleGraphStatus, RunLimits, RunOutcome,
+        RuntimeOptions, ScriptCache, WindowOptions,
+    };
+    use dasher_net::Client;
+    use dasher_test_server::{FixtureResponse, FixtureServer};
+
+    fn padded(source: &str) -> FixtureResponse {
+        let padding = format!("\n/*{}*/\n", "m".repeat(1500));
+        FixtureResponse::ok("text/javascript", format!("{source}{padding}"))
+    }
+
+    fn server() -> FixtureServer {
+        FixtureServer::builder()
+            .route("/app/main.js", |_| {
+                padded(
+                    r#"
+                    import { greet, count } from "./lib/greet.js";
+                    import * as again from "./lib/greet.js";
+                    globalThis.log.push(greet("world"), count(), again.count());
+                    globalThis.meta = import.meta.url;
+                    globalThis.later = () => import("./lib/late.js").then((m) => m.late());
+                    export const done = true;
+                    "#,
+                )
+            })
+            .route("/app/lib/greet.js", |_| {
+                padded(
+                    r#"
+                    let n = 0;
+                    export function greet(name) { return "hello " + name + " from " + import.meta.url.split("/").pop(); }
+                    export function count() { return ++n; }
+                    "#,
+                )
+            })
+            .route("/app/lib/late.js", |_| padded("export function late() { return 'late'; }"))
+            .start()
+            .unwrap()
+    }
+
+    async fn load(server: &FixtureServer, cache: &ScriptCache) -> String {
+        let js = JsRuntime::new(RuntimeOptions {
+            clock: ClockMode::Virtual,
+            network: Some(Client::builder().build().unwrap().session()),
+            window: WindowOptions {
+                url: server.url("/app/index.html"),
+                ..WindowOptions::default()
+            },
+            script_cache: Some(cache.clone()),
+            ..RuntimeOptions::default()
+        })
+        .unwrap();
+        js.run_script("globalThis.log = [];", "setup.js").unwrap();
+        let graph = js.fetch_module_graph(&server.url("/app/main.js"), ModuleCredentials::SameOrigin);
+        assert_eq!(js.run(RunLimits::default()).await, RunOutcome::Idle);
+        assert_eq!(js.module_graph_status(graph), ModuleGraphStatus::Ready);
+        assert!(js.run_module_graph(graph));
+        js.run_script("later().then((v) => log.push(v));", "check.js").unwrap();
+        assert_eq!(js.run(RunLimits::default()).await, RunOutcome::Idle);
+        assert_eq!(js.take_errors(), []);
+        js.eval_json("[log, meta.split('/').pop()]").unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn modules_are_cached_too() {
+        let server = server();
+        let cache = super::cache();
+        let first = load(&server, &cache).await;
+        assert_eq!(first, r#"[["hello world from greet.js",1,2,"late"],"main.js"]"#);
+        assert_eq!(super::counts(cache.stats()), (3, 0, 3));
+        for round in 0..2 {
+            assert_eq!(load(&server, &cache).await, first, "round {round}");
+        }
+        let stats = cache.stats();
+        assert_eq!((stats.misses, stats.hits), (3, 6), "{stats:?}");
+    }
+}
