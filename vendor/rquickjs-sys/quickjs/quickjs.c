@@ -4636,17 +4636,14 @@ static JSValue js_concat_string_int(JSContext *ctx, JSValue str, int32_t n,
    `x += a + b`, without making `a + b` first; concatenation of strings
    is associative). Return 1 if done (the sum is in *target and the pieces
    are consumed), 0 to take the general path, -1 on exception. */
+static int js_append_in_place(JSContext *ctx, JSValue *pv, JSValue *target,
+                              JSValue *pieces, int n);
+
 static int js_add_string_in_place(JSContext *ctx, JSValue *target,
                                   JSValue *pieces, int n, const uint8_t *pc,
                                   JSValue *var_buf, JSVarRef **var_refs)
 {
     JSValue *pv;
-    JSString *p1, *p;
-    char buf[2][16];
-    const uint8_t *src[2];
-    uint32_t len2[2], len, i, k;
-    bool wide2[2];
-    size_t size, cap;
     int op;
 
     op = *pc;
@@ -4679,6 +4676,23 @@ static int js_add_string_in_place(JSContext *ctx, JSValue *target,
     default:
         return 0;
     }
+    return js_append_in_place(ctx, pv, target, pieces, n);
+}
+
+/* Append pieces[0..n) to *target, a string that the variable *pv also
+   refers to, if those are its only two references (see
+   js_add_string_in_place). Return 1 if done, 0 if not possible, -1 on
+   exception (with *pv and *target as they were). */
+static int js_append_in_place(JSContext *ctx, JSValue *pv, JSValue *target,
+                              JSValue *pieces, int n)
+{
+    JSString *p1, *p;
+    char buf[2][16];
+    const uint8_t *src[2];
+    uint32_t len2[2], len, i, k;
+    bool wide2[2];
+    size_t size, cap;
+
     if (JS_VALUE_GET_TAG(*pv) != JS_TAG_STRING ||
         JS_VALUE_GET_PTR(*pv) != JS_VALUE_GET_PTR(*target))
         return 0;
@@ -18817,6 +18831,23 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                     op1 = JS_ToPrimitiveFree(ctx, op1, HINT_NONE);
                     if (JS_IsException(op1))
                         goto exception;
+                    /* dasher: the variable holds the only reference to
+                       its string: append in place (see
+                       js_add_string_in_place) */
+                    {
+                        JSValue t = js_dup(*pv);
+                        int r = js_append_in_place(ctx, pv, &t, &op1, 1);
+                        if (r) {
+                            if (r < 0) {
+                                JS_FreeValue(ctx, t);
+                                JS_FreeValue(ctx, op1);
+                                goto exception;
+                            }
+                            set_value(ctx, pv, t);
+                            BREAK;
+                        }
+                        JS_FreeValue(ctx, t);
+                    }
                     op1 = JS_ConcatString(ctx, js_dup(*pv), op1);
                     if (JS_IsException(op1))
                         goto exception;

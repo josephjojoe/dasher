@@ -54,6 +54,31 @@
   fz("q");
   out.push(f.length, f.slice(0, 12), f.slice(-9), g, w, n2, o2, fz(2));
 
+  // `s += "literal"`, `s += local` and `s += argument` (OP_add_loc)
+  function addLoc(arg) {
+    let lit = "lit";
+    const before = lit;
+    lit += "x";
+    let h1 = "";
+    for (let i = 0; i < 500; i++) h1 += "<li>";
+    const other = "\u0100";
+    let h2 = "a";
+    const snap = h2;
+    for (let i = 0; i < 5; i++) h2 += other;
+    let h3 = "";
+    for (let i = 0; i < 5; i++) h3 += arg;
+    let h4 = "q";
+    h4 += 42;
+    let h5 = "s";
+    try {
+      h5 += Symbol("no");
+    } catch (e) {
+      h5 += "!" + e.name;
+    }
+    return [before, lit, "lit", h1.length, h1.slice(0, 8), snap, h2, h3, h4, h5];
+  }
+  out.push(addLoc("ab"), addLoc(7));
+
   // A closure variable, and a string that is a property key (an atom).
   function counter() {
     let acc = "";

@@ -295,3 +295,213 @@ properties and text, stack positions and early errors against what the
 engine gives with every function compiled with its script. test262 (tc39
 `main` of 2026-11-13, 41,841 tests) fails the same tests either way.
 
+## `quickjs/quickjs.c`: no dump code
+
+Upstream turns its dump code on (`ENABLE_DUMPS`) whenever `NDEBUG` is
+unset, and dasher's build never sets `NDEBUG`, to keep the assertions.
+With it every string carries a 16-byte link in a list of all strings
+(`JSRuntime.string_list`, read only to report leaks at exit), kept up to
+date on every string allocation and free. Nothing in dasher or rquickjs
+sets a dump flag. Here `ENABLE_DUMPS` is no longer defined by default; the
+assertions stay. Build with `-DENABLE_DUMPS` to get the dumps back.
+
+Measured: on 11 heavy recorded pages (Linux, aarch64, three runs each,
+against the same build with the dump code), peak RSS 1 to 3 MiB less on
+most (wired.com 176 to 173 MiB, techcrunch.com 90 to 88, angular.dev 43
+to 40), none higher beyond run-to-run noise (theverge.com swings between
+149 and 163 MiB in every build), and CPU time 0 to 4% less.
+
+A smaller heap moves the points at which the cycle collector runs (when
+the heap has grown by half since the last run), and a loop that keeps a
+large structure alive can get one collection more or fewer. Before
+functions were compiled lazily, "promise chain" (100,000 pending `then`s)
+got one more: 1,240 to 1,330 ns per step, all of it in the collector, and
+the same loop in a standalone `qjs` was unchanged. On current main it is
+1,370 before and 1,346 after.
+
+## `quickjs/quickjs.c`: `s += x` appends in place
+
+QuickJS-NG appends to the left string in place when it holds the only
+reference and its block has room (`JS_ConcatString`). In `s += x` on a
+variable that never happens: the variable and the operand on the stack
+both refer to the string, so each step copies the whole string into a new
+one. Only `+=` with a constant, an argument or a variable on the right is
+compiled to `OP_add_loc`, which reads the variable directly, and that one
+duplicated the value before calling `JS_ConcatString` too.
+
+Here the string path of `OP_add` (`js_add_string_in_place`) looks at the
+instruction after it. When the sum is stored straight back
+(`put_loc`/`set_loc`/`put_loc_check`/`put_var_ref`... with an optional
+`dup`) into the variable the left operand was read from, and that string
+has exactly those two references, no one can see the old string again, so
+the right operand is appended in place. When the block is full the string
+is grown with `js_realloc`, which keeps the slab allocator's rounding as
+spare room; past 8 KiB an eighth is added, so long strings built in a
+loop are not copied on every step. `s += a + b`, with `a` a string (an
+`OP_add` directly followed by another), appends `a` and `b` without making
+`a + b` first; concatenation of strings is associative, and the
+intermediate string is never visible. `OP_add_loc` (`+=` with a
+constant, argument or variable on the right) does the same when the
+variable holds the only reference to its string. A string that is an atom
+or a slice is never written to; upstream's in-place path now checks that
+too.
+
+`JS_ConcatString` also joins a string and an int32 without making a
+string of the number first (`js_concat_string_int`).
+
+Measured: the "string concat" micro-benchmark (`s += "ab" + (i & 7)`,
+reset at 1,000 characters) goes from 159 to 78 ns per step; V8 without its
+JIT takes 46; `s += "<li>"` from 129 to 66 ns. The rest is the
+interpreter around the additions.
+`crates/js/tests/fixtures/strings.js` checks aliases, closures, property
+keys (atoms), wide strings, `s += s + x`, objects with `toString` and long
+strings against what the engine gives without the change.
+
+## `quickjs/quickjs.c`: JSON.parse reads the string itself
+
+Upstream's `JSON.parse` converts its argument to UTF-8 and runs a token
+reader over that (`JS_ParseJSON`): every string is built through a
+`StringBuffer`, every key becomes a string and then an atom, every
+property is defined through `JS_DefinePropertyValue` and every array
+element appended one at a time, and every number goes through `strtod`
+and comes out as a double.
+
+`json_parse_fast` reads the 8-bit or 16-bit string directly. Values and
+keys are collected on a value stack; an array is made with
+`JS_NewArrayFrom` at its final length, and an object is made in one go
+when its members are known. The context keeps the shape the last object
+starting with each of 64 first atoms ended with (`ctx->json_shapes`): an
+object whose keys come in the same order is made from that shape with
+`JS_NewObjectFromShape`, and its keys are compared with the shape's atoms
+instead of being looked up. Other keys are found with `__JS_FindAtom` on
+the characters in place. A string without escapes is copied once.
+Integers of up to 15 digits become int32 values where they fit (`-0`
+stays a double); other numbers still go through `strtod` on the same
+text. The object an object follows is held while its members are parsed,
+since a nested object can replace it in the cache.
+
+The fast parser only accepts valid JSON. On anything else, or when the
+native stack runs short, it gives up and `JS_ParseJSON` runs on the same
+text, so error messages and their positions are upstream's, and so is the
+nesting depth at which the stack overflows (between 10,000 and 20,000
+levels in dasher, either way). Property order, `__proto__` as an own key,
+repeated keys (the last value wins, in the first position), lone
+surrogates and revivers are as before: the reviver runs over the finished
+value, as upstream's does.
+
+Measured: parsing a 2.1 MB array of 20,000 records takes 10 ms instead of
+38 (Node `--jitless`: 62), and the run's peak RSS falls from 27.0 to
+23.9 MiB, since arrays are made at their length instead of grown.
+
+## `quickjs/quickjs.c`: JSON.stringify writes plain objects from their shape
+
+Upstream's `JSON.stringify` makes, for each object, an array of its keys
+as strings with `Object.keys`, looks each key up again by string, quotes
+it into a new string, and for each array element makes a string of its
+index whether or not anything needs it. It checks for cycles with
+`Array.prototype.includes` on an array it pushes and pops.
+
+Here (`js_json_to_str`): a plain object whose shape is hashed, with no
+key that sorts first as an array index and only data properties among
+its enumerable string keys, is written straight from its shape. The
+shape is held while its members are written, so it cannot change; if the
+object gets another shape meanwhile (a `toJSON` or getter further down
+changed it), the remaining keys are read with an ordinary `Get`, as the
+spec has it. Fast array elements are read in place. Keys passed to
+`toJSON` and replacers are made only when one is called. Strings are
+quoted, and numbers formatted, straight into the output buffer. The cycle
+check is a scan of a C array of the objects being written, and the
+wrapper object `{"": value}` is made only for a replacer function. The
+last shape found to qualify is remembered for the next object. Anything
+else (replacer arrays, proxies, class instances with accessors, objects
+with integer keys) takes upstream's path.
+
+Measured: writing the 2.1 MB array above takes 12 ms instead of 53 (Node
+`--jitless`: 16). The "JSON" micro-benchmark (`JSON.parse(JSON.stringify(o))`
+of a small nested object) goes from 4,533 to 1,489 ns, with both changes;
+V8 without its JIT takes 1,276.
+
+`crates/js/tests/fixtures/json.js` checks key order, `__proto__`, repeated
+keys, numbers, lone surrogates, error messages and their positions,
+revivers, `toJSON` on objects, prototypes and BigInts, getters, objects
+changed while they are written, replacer functions and arrays, gaps,
+cycles, proxies and wrappers, plus 3,000 random documents (a third of them
+broken) through parse and stringify, against what the engine gives without
+the changes. V8 differs only in the wording of error messages.
+
+## `quickjs/quickjs.c`: string search, split, replace and case
+
+`indexOf`, `lastIndexOf`, `includes`, `startsWith` and `endsWith` compared
+the strings character by character at every position (`string_cmp`). Here
+8-bit strings are searched with `memchr` for the first character and
+`memcmp` for the rest, and the others use `memcmp` where both strings are
+the same width (`string_indexof`, `string_lastindexof`,
+`string_match_at`). `replace` and `split` use the same search. `split`
+collects its pieces and makes the array once, `replace` with a
+replacement that has no `$` uses it as it is instead of running
+`GetSubstitution`, and its buffer is made at the first match at about the
+size of the result. `toLowerCase` and `toUpperCase` map an 8-bit string
+within Latin-1 by table (except `toUpperCase` of µ, ß and ÿ, whose upper
+case is outside it), and return the same string when nothing changes.
+`JS_ToString` of a string returns it without a call.
+
+Measured: the "string methods" micro-benchmark goes from 1,557 to 914 ns
+per step; V8 without its JIT takes 581. The fixture in
+`crates/js/tests/fixtures/strings.js` runs 3,000 random searches, splits,
+replacements and case mappings over 8-bit, Latin-1 and wide strings with
+surrogates and compares a hash of the answers with the engine's without
+the change; V8 gives the same answers.
+
+## `quickjs/quickjs.c`: an atom's index is kept in its string
+
+`js_get_atom_index`, which every `obj[key]` with a string key that is
+already an atom goes through, found an atom's index by walking its hash
+chain. A string's `first_weak_ref` field is only ever used by symbols (a
+symbol can be held weakly; nothing else in the atom table can), so for
+other atoms it now holds the atom's index (`JSString.atom_index`, a union
+with `first_weak_ref`), and `JS_FreeAtomStruct` only looks for weak
+references on symbols.
+
+Measured: 10 million `o[k]` reads with keys from `Object.keys`, 75 to
+69 ns each.
+
+## What the six changes above measure together
+
+On 14 heavy recorded pages (Linux, aarch64 profiling build; main at
+`045dfd2` with and without these changes, seven runs per page alternating
+the builds, medians): 2.9% less CPU time summed over the pages (35.4 to
+34.4 s), less on every page (0.9% on github.com to 4.4% on
+theverge.com), and 1.3% less peak RSS (1135 to 1120 MiB), with no page
+higher beyond its run-to-run noise. yahoo.com is left out: on this main it
+runs into a limit after 10 s in both builds. In profiles of ten of these
+pages, the functions these changes replace or skip (`js_get_atom_index`,
+`JS_ToQuotedString`, `JS_ToStringInternal`, `string_getc`,
+`json_next_token`) went from 1.8% of the samples to 0.3%, `js_json_quote`
+included; JSON and the String methods are now under 0.2% of CPU each
+there. On the 2.1 MB JSON document above, parse and
+stringify are 3.8 and 4.4 times faster.
+
+The micro-benchmarks, against Node 22 `--jitless --single-threaded` on the
+same machine (ns per operation, median of five runs):
+
+| benchmark | before | after | V8 without JIT | after ÷ V8 |
+| --- | ---: | ---: | ---: | ---: |
+| string concat | 160 | 77.3 | 44.3 | 1.7× |
+| string methods | 1,632 | 928 | 561 | 1.7× |
+| JSON | 4,538 | 1,487 | 1,174 | 1.3× |
+
+Most of what is left of the first two is the interpreter around the
+calls (`let` loop counters going through `post_inc`'s slow path, method
+lookups on a string) and allocation, which DAS-36 and DAS-46 work on.
+With both of those merged in as they stood on 2026-11-14 the three come
+to 55.2, 730 and 1,248 ns, 1.25, 1.3 and 1.06 times V8.
+
+Tried and left out: a smaller load factor or a per-runtime cache in front
+of the atom hash table. `__JS_FindAtom` is 2.5% of CPU on the heavy pages,
+nearly all of it the parser looking up identifiers, but chains average
+1.25 entries (measured over a megabyte of bundle source) and the time is
+the cache misses on the bucket and the atom itself, which a different
+table would not avoid. The conversions between UTF-8 and engine strings
+at the Rust boundary (`JS_NewStringLen`, `JS_ToCStringLen2` and rquickjs's
+`String::from_str`/`to_string`) came to under 0.5% of CPU on the heavy
+pages, so they were left alone here.
