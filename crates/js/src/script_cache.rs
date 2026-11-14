@@ -83,7 +83,9 @@ const MAX_SEEN: usize = 4096;
 
 /// The engine build, from `build.rs`.
 const ENGINE_ID: &str = env!("DASHER_ENGINE_ID");
-const FILE_MAGIC: &[u8; 8] = b"dshrjsc1";
+const FILE_MAGIC: &[u8; 8] = b"dshrjsc2";
+/// zstd's fastest level: written once per entry, it still halves the code.
+const CODE_LEVEL: i32 = 1;
 
 /// How a [`ScriptCache`] is bounded, and where it keeps files.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,7 +232,12 @@ impl Text {
 #[derive(Clone)]
 struct Entry {
     text: Arc<Text>,
+    /// The compiled script, compressed (zstd): bytecode compresses to
+    /// about half, and a page reads it once. The text is not compressed,
+    /// since the pages using the script share it as it is.
     code: Arc<[u8]>,
+    /// Bytes of `code` uncompressed.
+    code_len: usize,
     /// Ascending offsets of the functions compiled with the script.
     hints: Arc<[u32]>,
     /// Ascending offsets of functions pages compiled on their first call,
@@ -241,15 +248,23 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(text: Arc<Text>, code: Vec<u8>, hints: Vec<u32>, rebuilds: u8) -> Self {
-        Self {
+    fn new(text: Arc<Text>, code: &[u8], hints: Vec<u32>, rebuilds: u8) -> Option<Self> {
+        Some(Self {
             text,
-            code: code.into(),
+            code: zstd::bulk::compress(code, CODE_LEVEL).ok()?.into(),
+            code_len: code.len(),
             hints: hints.into(),
             wanted: Arc::new([]),
             rebuilds,
             used: 0,
-        }
+        })
+    }
+
+    /// The compiled script, for `JS_ReadObject`.
+    fn code(&self) -> Option<Vec<u8>> {
+        zstd::bulk::decompress(&self.code, self.code_len)
+            .ok()
+            .filter(|code| code.len() == self.code_len)
     }
 
     fn size(&self) -> usize {
@@ -624,17 +639,20 @@ impl PageScripts {
                 ran: Vec::new(),
             });
             let src = JSScriptSource::new(&entry.text, filename.as_ptr(), tag, &[]);
-            // SAFETY: the code was written by `Compiler` with this engine
-            // build (files say which build wrote them), for this text,
-            // which `src` describes and `entry` keeps alive.
+            let code = entry.code().unwrap_or_default();
+            // SAFETY: the code was written by this engine build (files say
+            // which build wrote them, and are checksummed), for this text,
+            // which `src` describes and `entry` keeps alive. Empty code
+            // fails to read.
             let value = with_source(rt, &src, || unsafe {
                 qjs::JS_ReadObject(
                     raw,
-                    entry.code.as_ptr(),
-                    entry.code.len() as _,
+                    code.as_ptr(),
+                    code.len() as _,
                     (qjs::JS_READ_OBJ_BYTECODE as i32) | JS_READ_OBJ_SCRIPT,
                 )
             });
+            drop(code);
             // SAFETY: inspects the tag of a value.
             if !unsafe { qjs::JS_IsException(value) } {
                 return Some(Ok(value));
@@ -674,9 +692,11 @@ impl PageScripts {
         // The entry is written now, before any of the script has run, so
         // nothing of the page is in it; the functions it runs are noted
         // for the next time the entry is made (see `finish`).
-        if build && let Some(code) = write(ctx, value) {
-            self.cache
-                .insert(key, Entry::new(text, code, Vec::new(), 0));
+        if build
+            && let Some(entry) =
+                write(ctx, value).and_then(|code| Entry::new(text, &code, Vec::new(), 0))
+        {
+            self.cache.insert(key, entry);
             self.used.borrow_mut()[slot(tag)].how = How::Created;
         }
         Some(Ok(value))
@@ -732,9 +752,11 @@ impl PageScripts {
             return;
         };
         for (key, kind, text, hints, rebuilds) in builds {
-            if let Some(code) = compiler.compile(kind, &text, &hints) {
-                self.cache
-                    .insert(key, Entry::new(text, code, hints, rebuilds));
+            if let Some(entry) = compiler
+                .compile(kind, &text, &hints)
+                .and_then(|code| Entry::new(text, &code, hints, rebuilds))
+            {
+                self.cache.insert(key, entry);
             }
         }
     }
@@ -995,6 +1017,7 @@ fn encode(key: &Key, entry: &Entry) -> Vec<u8> {
     out.extend_from_slice(&key.0);
     out.extend_from_slice(&(text.len() as u64).to_le_bytes());
     out.extend_from_slice(&(entry.code.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(entry.code_len as u64).to_le_bytes());
     out.extend_from_slice(&(entry.hints.len() as u64).to_le_bytes());
     out.extend_from_slice(&(entry.wanted.len() as u64).to_le_bytes());
     out.push(entry.rebuilds);
@@ -1027,12 +1050,13 @@ fn decode(key: &Key, bytes: &[u8]) -> Option<Entry> {
         return None;
     }
     let text_len = u64_at(take(8)?)?;
+    let code_size = u64_at(take(8)?)?;
     let code_len = u64_at(take(8)?)?;
     let hint_count = u64_at(take(8)?)?;
     let wanted_count = u64_at(take(8)?)?;
     let rebuilds = take(1)?[0];
     let text = Text::new(take(text_len)?);
-    let code: Arc<[u8]> = take(code_len)?.into();
+    let code: Arc<[u8]> = take(code_size)?.into();
     let mut offsets = |n: usize| -> Option<Arc<[u32]>> {
         Some(
             take(n.checked_mul(4)?)?
@@ -1049,6 +1073,7 @@ fn decode(key: &Key, bytes: &[u8]) -> Option<Entry> {
     Some(Entry {
         text,
         code,
+        code_len,
         hints,
         wanted,
         rebuilds,
