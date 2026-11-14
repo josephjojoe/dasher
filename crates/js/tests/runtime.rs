@@ -399,6 +399,27 @@ fn bracket_lookahead_answers_are_the_same_when_remembered() {
     );
 }
 
+/// The parser's fast paths (see `vendor/rquickjs-sys/PATCHES.md`): the
+/// bracket lookahead stops once a bracket cannot be an arrow function's
+/// parameters or a destructuring pattern, numbers, strings and names are
+/// read without the general routines when they are plain, and binary
+/// operators are parsed by precedence climbing. Each answer is the one the
+/// engine gives without them, with functions compiled lazily or with
+/// their script.
+#[test]
+fn parser_fast_paths_read_scripts_as_before() {
+    let js = runtime();
+    js.run_script(include_str!("fixtures/parser.js"), "parser.js")
+        .unwrap();
+    assert_eq!(
+        js.eval_json("JSON.parse(parser)").unwrap().as_deref(),
+        Some(
+            r#"{"targets":[1,[0,2],3,[4,5]],"object":[5,6,7,8,{"w":9}],"oddTargets":[null,"undefined"],"computed":["t","p"],"literals":[1,3,4,2,2],"notPatterns":["SyntaxError","SyntaxError","SyntaxError","SyntaxError","SyntaxError","SyntaxError","SyntaxError","SyntaxError","SyntaxError","ok","ok","SyntaxError"],"parens":[2,1,6,1,"call",7],"arrows":[12,8,6,true,2,3],"notArrows":["SyntaxError","SyntaxError","SyntaxError","SyntaxError","ok","ok"],"loops":[0,1,"a",7,3,"once"],"numbers":[0,7,123456789,1234567890,4294967296,0.5,5,0.5,1000,1000,31,15,5,"5","5.0",2147483647,2147483648,true,null],"numberTypes":["bigint","number",true],"legacy":[15,19,8],"badNumbers":["SyntaxError","SyntaxError","SyntaxError","SyntaxError","SyntaxError","SyntaxError"],"strings":["","plain","double","it's","tab\there","café","café","A","linecontinued","a\"b","a'b","1234","\u0000"],"stringLengths":[0,5,6,4,8,4,4,1,13,3,3,4,1],"badStrings":["SyntaxError","SyntaxError","SyntaxError","SyntaxError"],"names":["escaped","unicode","symbols","of","y"],"badNames":["SyntaxError","SyntaxError","SyntaxError"],"binary":[5,8,32,true,3,512,4,true,false,true,1,3,5,2,0],"inOperator":["in"],"privateIn":[true,"SyntaxError"]}"#
+        )
+    );
+    assert!(js.errors().is_empty());
+}
+
 /// Closures are made from a cached shape with `length`, `name` and
 /// `prototype` stored in place (see `PATCHES.md`). Scripts see the same
 /// properties, in the same order, as when each was defined in turn, and a
