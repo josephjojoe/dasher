@@ -1814,6 +1814,17 @@ static inline void js_dbuf_init(JSContext *ctx, DynBuf *s)
     dbuf_init2(s, ctx, js_dbuf_realloc);
 }
 
+/* dasher: a buffer of the compiler, given room for 'size' bytes at once
+   rather than grown from nothing by half again at a time. They are freed,
+   or copied to their exact size, when the function is compiled. A failure
+   is noted in the buffer, as a later write would note it. */
+static inline void js_dbuf_init_size(JSContext *ctx, DynBuf *s, size_t size)
+{
+    dbuf_init2(s, ctx, js_dbuf_realloc);
+    if (size)
+        dbuf_realloc(s, size);
+}
+
 static inline int is_digit(int c) {
     return c >= '0' && c <= '9';
 }
@@ -31079,7 +31090,7 @@ static JSFunctionDef *js_new_function_def(JSContext *ctx,
 
     fd->is_eval = is_eval;
     fd->is_func_expr = is_func_expr;
-    js_dbuf_init(ctx, &fd->byte_code);
+    js_dbuf_init_size(ctx, &fd->byte_code, 64);
     fd->last_opcode_pos = -1;
     fd->func_name = JS_ATOM_NULL;
     fd->var_object_idx = -1;
@@ -33224,7 +33235,7 @@ static __exception int resolve_variables(JSContext *ctx, JSFunctionDef *s)
 
     cc.bc_buf = bc_buf = s->byte_code.buf;
     cc.bc_len = bc_len = s->byte_code.size;
-    js_dbuf_init(ctx, &bc_out);
+    js_dbuf_init_size(ctx, &bc_out, bc_len); /* dasher: about as long */
 
     /* first pass for runtime checks (must be done before the
        variables are created) */
@@ -33806,7 +33817,7 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
 
     cc.bc_buf = bc_buf = s->byte_code.buf;
     cc.bc_len = bc_len = s->byte_code.size;
-    js_dbuf_init(ctx, &bc_out);
+    js_dbuf_init_size(ctx, &bc_out, bc_len); /* dasher: about as long */
 
     if (s->jump_size) {
         s->jump_slots = js_mallocz(s->ctx, sizeof(*s->jump_slots) * s->jump_size);
