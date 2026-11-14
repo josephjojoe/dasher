@@ -36182,10 +36182,13 @@ static int js_lazy_begin(JSParseState *s, JSFunctionDef *fd,
         return 0;
     off = s->token.ptr - s->buf_start;
     /* as V8 does, a function in parentheses or after '!' is taken to be
-       called at once, unless its parent is not compiled now either; so is
-       one the embedder names (JSScriptSource.hints) */
-    compile_now = (ptr == s->iife_ptr || js_lazy_hinted(s, off)) &&
-        parent->lazy_state == JS_LAZY_NONE;
+       called at once, unless its parent is not compiled now either. One
+       the embedder names (JSScriptSource.hints) is compiled now whatever
+       its parent: a parent that is still a candidate may yet be kept (it
+       calls eval), and if it is dropped, it collects the names of the
+       function as it does those of a constructor it kept. */
+    compile_now = (ptr == s->iife_ptr && parent->lazy_state == JS_LAZY_NONE) ||
+        js_lazy_hinted(s, off);
     if (parent->lazy_record)
         r = js_lazy_take(parent, off);
     if (r) {

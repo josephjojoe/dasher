@@ -34,15 +34,19 @@ fn run_lazy(cache: &ScriptCache) {
 fn a_script_compiled_once_runs_the_same_from_the_cache() {
     let cache = cache();
     run_lazy(&cache);
-    // compiled from its text, and made into an entry when the page went
+    // compiled from its text, and written out as it was compiled
     assert_eq!(counts(cache.stats()), (1, 0, 1));
     run_lazy(&cache);
-    // read back, with the functions the first page ran compiled; the
-    // second page ran the same ones, so the entry stays
-    assert_eq!(counts(cache.stats()), (1, 1, 1));
+    // read back, its functions compiled on their first call as on the
+    // first page; then made again with them compiled in
+    assert_eq!(counts(cache.stats()), (1, 1, 2));
+    let late = cache.stats().compiled_late;
+    assert!(late > 20, "{late}");
     run_lazy(&cache);
-    assert_eq!(counts(cache.stats()), (1, 2, 1));
+    // a third page finds them compiled
+    assert_eq!(counts(cache.stats()), (1, 2, 2));
     let stats = cache.stats();
+    assert_eq!(stats.compiled_late, late);
     assert_eq!(stats.entries, 1);
     assert!(stats.bytes > LAZY.len(), "{stats:?}");
 }
@@ -90,7 +94,7 @@ fn functions_read_back_have_their_text_and_positions() {
         js.run_script(&source, "https://example.com/probe.js").unwrap();
         assert_eq!(probe(&js), expected, "round {round}");
     }
-    assert_eq!(counts(cache.stats()), (1, 2, 1));
+    assert_eq!(counts(cache.stats()), (1, 2, 2));
 
     // Another URL with the same text finds it too, and its functions say
     // they come from there.
@@ -116,10 +120,9 @@ var shared = (function () {
         format!("/*{}*/", "y".repeat(2000))
     );
     let cache = cache();
-    for round in 0..3 {
+    for _ in 0..3 {
         let js = page(&cache);
         js.run_script(&source, "shared.js").unwrap();
-        eprintln!("round {round}");
         // Each page starts from the script's own state, whatever the
         // pages before it did to its functions and objects.
         let seen = js
@@ -137,7 +140,7 @@ var shared = (function () {
         assert_eq!(seen, r#"[1,2,true,2,true,"a|b"]"#);
         assert_eq!(js.eval_json("typeof Function.prototype.poisoned").unwrap().as_deref(), Some(r#""number""#));
     }
-    assert_eq!(counts(cache.stats()), (1, 2, 1));
+    assert_eq!(counts(cache.stats()), (1, 2, 2));
 }
 
 #[test]

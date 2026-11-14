@@ -124,8 +124,12 @@ pub struct ScriptCacheStats {
     pub hit_bytes: u64,
     /// Bytes of script text compiled.
     pub miss_bytes: u64,
-    /// Entries made or remade after a page.
+    /// Entries written: when a script is first compiled, and again with
+    /// the functions pages ran compiled in.
     pub builds: u64,
+    /// Functions of scripts read from the cache that pages still compiled
+    /// on their first call, because the entry did not have them compiled.
+    pub compiled_late: u64,
     /// Entries dropped from memory to make room.
     pub evictions: u64,
     /// Entries in memory now.
@@ -229,14 +233,28 @@ struct Entry {
     code: Arc<[u8]>,
     /// Ascending offsets of the functions compiled with the script.
     hints: Arc<[u32]>,
+    /// Ascending offsets of functions pages compiled on their first call,
+    /// for the next time the entry is made.
+    wanted: Arc<[u32]>,
     rebuilds: u8,
     used: u64,
 }
 
 impl Entry {
+    fn new(text: Arc<Text>, code: Vec<u8>, hints: Vec<u32>, rebuilds: u8) -> Self {
+        Self {
+            text,
+            code: code.into(),
+            hints: hints.into(),
+            wanted: Arc::new([]),
+            rebuilds,
+            used: 0,
+        }
+    }
+
     fn size(&self) -> usize {
-        // the text, the code, the hints and the map's bookkeeping
-        self.text.bytes.len() + self.code.len() + self.hints.len() * 4 + 128
+        // the text, the code, the offsets and the map's bookkeeping
+        self.text.bytes.len() + self.code.len() + (self.hints.len() + self.wanted.len()) * 4 + 128
     }
 }
 
@@ -331,6 +349,25 @@ impl ScriptCache {
         let mut state = self.state();
         state.stats.builds += 1;
         self.insert_locked(&mut state, key, entry);
+    }
+
+    /// Notes functions a page compiled on their first call, for when the
+    /// entry is next made.
+    fn want(&self, key: &Key, ran: &[u32]) {
+        let updated = {
+            let mut state = self.state();
+            let state = &mut *state;
+            let Some(entry) = state.entries.get_mut(key) else {
+                return;
+            };
+            let before = entry.size();
+            entry.wanted = merge(&entry.wanted, ran).into();
+            state.bytes = state.bytes - before + entry.size();
+            entry.clone()
+        };
+        if let Some(disk) = &self.inner.disk {
+            disk.store(key, &updated);
+        }
     }
 
     fn insert_locked(&self, state: &mut State, key: Key, mut entry: Entry) {
@@ -437,12 +474,19 @@ struct Used {
     key: Key,
     kind: Kind,
     text: Arc<Text>,
-    /// The entry's hints, when the script came from the cache.
-    entry: Option<(Arc<[u32]>, u8)>,
-    /// Whether to make an entry for a script compiled from its text.
-    build: bool,
+    how: How,
     /// Offsets of the functions compiled on their first call.
     ran: Vec<u32>,
+}
+
+/// How a page came by a script.
+enum How {
+    /// Compiled from its text; no entry made.
+    Compiled,
+    /// Compiled from its text, and an entry made from that.
+    Created,
+    /// Read from an entry with these hints, wanted functions and rebuilds.
+    Read(Arc<[u32]>, Arc<[u32]>, u8),
 }
 
 /// What a script is compiled as.
@@ -570,8 +614,7 @@ impl PageScripts {
                 key,
                 kind,
                 text: Arc::clone(&entry.text),
-                entry: Some((Arc::clone(&entry.hints), entry.rebuilds)),
-                build: false,
+                how: How::Read(Arc::clone(&entry.hints), Arc::clone(&entry.wanted), entry.rebuilds),
                 ran: Vec::new(),
             });
             let src = JSScriptSource::new(&entry.text, filename.as_ptr(), tag, &[]);
@@ -593,7 +636,7 @@ impl PageScripts {
             // Out of memory, or an import failed to load: compiling says
             // which, as it would have without the cache.
             drop(ctx.catch());
-            self.used.borrow_mut()[usize::try_from(tag - 1).unwrap_or(0)].entry = None;
+            self.used.borrow_mut()[slot(tag)].how = How::Compiled;
         }
 
         let build = self.cache.note_miss(&key, source.len(), origin == Origin::Inline);
@@ -602,8 +645,7 @@ impl PageScripts {
             key,
             kind,
             text: Arc::clone(&text),
-            entry: None,
-            build: false,
+            how: How::Compiled,
             ran: Vec::new(),
         });
         let src = JSScriptSource::new(&text, filename.as_ptr(), tag, &[]);
@@ -616,7 +658,13 @@ impl PageScripts {
         if unsafe { qjs::JS_IsException(value) } {
             return Some(Err(rquickjs::Error::Exception));
         }
-        self.used.borrow_mut()[usize::try_from(tag - 1).unwrap_or(0)].build = build;
+        // The entry is written now, before any of the script has run, so
+        // nothing of the page is in it; the functions it runs are noted
+        // for the next time the entry is made (see `finish`).
+        if build && let Some(code) = write(ctx, value) {
+            self.cache.insert(key, Entry::new(text, code, Vec::new(), 0));
+            self.used.borrow_mut()[slot(tag)].how = How::Created;
+        }
         Some(Ok(value))
     }
 
@@ -632,29 +680,36 @@ impl PageScripts {
     /// it ran. Call it once the page's own runtime is gone, so that its
     /// memory and the compiler's are not needed at once.
     pub(crate) fn finish(&self) {
-        let used = self.used.take();
-        let builds: Vec<_> = used
-            .into_iter()
-            .filter_map(|mut u| {
-                u.ran.sort_unstable();
-                u.ran.dedup();
-                match &u.entry {
-                    None if u.build => Some((u.key, u.kind, u.text, u.ran, 0)),
-                    None => None,
-                    Some((hints, rebuilds)) => {
-                        let wanted = (hints.len() / REBUILD_SHARE).max(1);
-                        if *rebuilds >= MAX_REBUILDS || u.ran.len() < wanted {
-                            return None;
-                        }
-                        let mut all = hints.to_vec();
-                        all.extend_from_slice(&u.ran);
-                        all.sort_unstable();
-                        all.dedup();
-                        Some((u.key, u.kind, u.text, all, rebuilds + 1))
+        let mut builds = Vec::new();
+        for mut u in self.used.take() {
+            u.ran.sort_unstable();
+            u.ran.dedup();
+
+            match u.how {
+                How::Compiled => {}
+                // Made from this page's compile: the functions it ran are
+                // compiled in when a later page uses the entry, which
+                // scripts seen once never are.
+                How::Created => {
+                    if !u.ran.is_empty() {
+                        self.cache.want(&u.key, &u.ran);
                     }
                 }
-            })
-            .collect();
+                How::Read(hints, wanted, rebuilds) => {
+                    self.cache.state().stats.compiled_late += u.ran.len() as u64;
+                    let pending = merge(&wanted, &u.ran);
+                    if pending.is_empty() {
+                        continue;
+                    }
+                    if rebuilds < MAX_REBUILDS && pending.len() >= (hints.len() / REBUILD_SHARE).max(1)
+                    {
+                        builds.push((u.key, u.kind, u.text, merge(&hints, &pending), rebuilds + 1));
+                    } else if !u.ran.is_empty() {
+                        self.cache.want(&u.key, &u.ran);
+                    }
+                }
+            }
+        }
         if builds.is_empty() {
             return;
         }
@@ -663,18 +718,48 @@ impl PageScripts {
         };
         for (key, kind, text, hints, rebuilds) in builds {
             if let Some(code) = compiler.compile(kind, &text, &hints) {
-                self.cache.insert(
-                    key,
-                    Entry {
-                        text,
-                        code: code.into(),
-                        hints: hints.into(),
-                        rebuilds,
-                        used: 0,
-                    },
-                );
+                self.cache.insert(key, Entry::new(text, code, hints, rebuilds));
             }
         }
+    }
+}
+
+/// The index of a script's slot from its tag.
+fn slot(tag: u64) -> usize {
+    usize::try_from(tag - 1).unwrap_or(0)
+}
+
+/// Two ascending lists as one, without repeats.
+fn merge(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let mut all = Vec::with_capacity(a.len() + b.len());
+    all.extend_from_slice(a);
+    all.extend_from_slice(b);
+    all.sort_unstable();
+    all.dedup();
+    all
+}
+
+/// Writes a compiled script out for the cache, functions not compiled yet
+/// as they are.
+fn write(ctx: &Ctx<'_>, value: qjs::JSValue) -> Option<Vec<u8>> {
+    let raw = ctx.as_raw().as_ptr();
+    // SAFETY: `raw` is live and locked, and `value` a compiled script it
+    // owns. The buffer is the context's and is freed once, below.
+    unsafe {
+        let mut len = 0;
+        let buf = qjs::JS_WriteObject(
+            raw,
+            &mut len,
+            value,
+            (qjs::JS_WRITE_OBJ_BYTECODE as i32) | JS_WRITE_OBJ_SCRIPT,
+        );
+        if buf.is_null() {
+            drop(ctx.catch());
+            return None;
+        }
+        let code = std::slice::from_raw_parts(buf, len as usize).to_vec();
+        qjs::js_free(raw, buf.cast());
+        Some(code)
     }
 }
 
@@ -755,21 +840,9 @@ impl Compiler {
                     drop(ctx.catch());
                     return None;
                 }
-                let mut len = 0;
-                let buf = qjs::JS_WriteObject(
-                    raw,
-                    &mut len,
-                    function,
-                    (qjs::JS_WRITE_OBJ_BYTECODE as i32) | JS_WRITE_OBJ_SCRIPT,
-                );
+                let code = write(&ctx, function);
                 qjs::JS_FreeValue(raw, function);
-                if buf.is_null() {
-                    drop(ctx.catch());
-                    return None;
-                }
-                let code = std::slice::from_raw_parts(buf, len as usize).to_vec();
-                qjs::js_free(raw, buf.cast());
-                Some(code)
+                code
             }
         })
     }
@@ -899,11 +972,12 @@ fn encode(key: &Key, entry: &Entry) -> Vec<u8> {
     out.extend_from_slice(&(text.len() as u64).to_le_bytes());
     out.extend_from_slice(&(entry.code.len() as u64).to_le_bytes());
     out.extend_from_slice(&(entry.hints.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(entry.wanted.len() as u64).to_le_bytes());
     out.push(entry.rebuilds);
     out.extend_from_slice(text);
     out.extend_from_slice(&entry.code);
-    for hint in entry.hints.iter() {
-        out.extend_from_slice(&hint.to_le_bytes());
+    for offset in entry.hints.iter().chain(entry.wanted.iter()) {
+        out.extend_from_slice(&offset.to_le_bytes());
     }
     let sum = digest(&SHA256, &out);
     out.extend_from_slice(sum.as_ref());
@@ -928,13 +1002,20 @@ fn decode(key: &Key, bytes: &[u8]) -> Option<Entry> {
     let text_len = u64_at(take(8)?)?;
     let code_len = u64_at(take(8)?)?;
     let hint_count = u64_at(take(8)?)?;
+    let wanted_count = u64_at(take(8)?)?;
     let rebuilds = take(1)?[0];
     let text = Text::new(take(text_len)?);
     let code: Arc<[u8]> = take(code_len)?.into();
-    let hints: Arc<[u32]> = take(hint_count.checked_mul(4)?)?
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let mut offsets = |n: usize| -> Option<Arc<[u32]>> {
+        Some(
+            take(n.checked_mul(4)?)?
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        )
+    };
+    let hints = offsets(hint_count)?;
+    let wanted = offsets(wanted_count)?;
     if !rest.is_empty() {
         return None;
     }
@@ -942,6 +1023,7 @@ fn decode(key: &Key, bytes: &[u8]) -> Option<Entry> {
         text,
         code,
         hints,
+        wanted,
         rebuilds,
         used: 0,
     })
