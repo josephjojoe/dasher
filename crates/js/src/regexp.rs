@@ -370,7 +370,7 @@ fn analyse_start(code: &[u8], flags: c_int) -> Start {
 /// Reads a compiled pattern (the bytecode after the search loop) into the
 /// [`Plan`] its searches follow.
 fn analyse(code: &[u8], flags: c_int) -> Plan {
-    let start = analyse_start(code, flags);
+    let Plan { start, run, .. } = analyse_quick(code, flags);
     let start_count = match &start {
         Start::Chars(chars) => chars.count,
         Start::Anywhere | Start::Line => usize::MAX,
@@ -378,7 +378,6 @@ fn analyse(code: &[u8], flags: c_int) -> Plan {
     let required = required_chars(code, flags)
         .filter(|chars| chars.count < start_count || chars.count <= 3 && start_count > 3)
         .map(Box::new);
-    let run = matches!(start, Start::Chars(_)) && leading_run(code);
     let pairs = if matches!(start, Start::Chars(_)) && !run {
         second_chars(code, flags)
     } else {
@@ -389,6 +388,19 @@ fn analyse(code: &[u8], flags: c_int) -> Plan {
         required,
         run,
         pairs,
+    }
+}
+
+/// The part of a [`Plan`] that takes no longer to work out than a search
+/// takes: what a pattern used once or twice gets.
+fn analyse_quick(code: &[u8], flags: c_int) -> Plan {
+    let start = analyse_start(code, flags);
+    let run = matches!(start, Start::Chars(_)) && leading_run(code);
+    Plan {
+        start,
+        required: None,
+        run,
+        pairs: None,
     }
 }
 
@@ -776,10 +788,16 @@ fn second_chars(code: &[u8], flags: c_int) -> Option<Vec<Pair>> {
 const CACHE_SLOTS: usize = 64;
 const CACHE_WAYS: usize = 4;
 
+/// How many searches a pattern runs with [`analyse_quick`]'s plan before
+/// it gets [`analyse`]'s. A page runs most of its patterns a few times and
+/// a few of them thousands of times.
+const FULL_PLAN_AFTER: u32 = 4;
+
 struct Cached {
     code: Box<[u8]>,
     flags: c_int,
     plan: Rc<Plan>,
+    searches: u32,
 }
 
 thread_local! {
@@ -788,7 +806,8 @@ thread_local! {
 }
 
 /// The [`Plan`] of a pattern, worked out the first time it is searched
-/// with. A set of slots is found by where the bytecode is, and a slot is
+/// with, and in full once it has been searched with a few times. A set of
+/// slots is found by where the bytecode is, and a slot is
 /// checked by what the bytecode is, so a pattern freed and another put at
 /// its address is noticed. A new plan goes in the set's last slot and the
 /// others move up, so the set keeps the patterns used last.
@@ -797,17 +816,22 @@ fn plan_of(code: &[u8], flags: c_int) -> Rc<Plan> {
     let set = (hash >> 40) % (CACHE_SLOTS / CACHE_WAYS) * CACHE_WAYS;
     CACHE.with_borrow_mut(|cache| {
         let ways = &mut cache[set..set + CACHE_WAYS];
-        for way in ways.iter().flatten() {
+        for way in ways.iter_mut().flatten() {
             if way.flags == flags && *way.code == *code {
+                way.searches = way.searches.saturating_add(1);
+                if way.searches == FULL_PLAN_AFTER {
+                    way.plan = Rc::new(analyse(code, flags));
+                }
                 return Rc::clone(&way.plan);
             }
         }
-        let plan = Rc::new(analyse(code, flags));
+        let plan = Rc::new(analyse_quick(code, flags));
         ways.rotate_left(1);
         ways[CACHE_WAYS - 1] = Some(Cached {
             code: code.into(),
             flags,
             plan: Rc::clone(&plan),
+            searches: 1,
         });
         plan
     })

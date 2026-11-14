@@ -46817,8 +46817,10 @@ static JSValue js_regexp_result(JSContext *ctx, uint8_t *re_bytecode,
         p->prop[2].u.value = js_int32((capture[0] - str_buf) >> shift);
         p->prop[3].u.value = str_val;
         str_val = JS_UNDEFINED;
-        if (expand_fast_array(ctx, p, capture_count))
+        p->u.array.u.values = js_malloc(ctx, sizeof(JSValue) * capture_count);
+        if (!p->u.array.u.values)
             goto fail;
+        p->u.array.u1.size = capture_count;
         for(i = 0; i < capture_count; i++) {
             uint8_t **match = &capture[2 * i];
             val = JS_UNDEFINED;

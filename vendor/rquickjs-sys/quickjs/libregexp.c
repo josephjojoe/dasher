@@ -2195,17 +2195,31 @@ static bool re_test_char(const REExecContext *s, const uint8_t *pc,
 /* dasher: false when the code at `pc` is sure to fail at `cptr` without
    doing anything first: it tests for one character, or for the end of a
    line, and that test fails. A greedy repeat that backs off asks this
-   before it hands each shorter length to the rest of the pattern. */
+   before it hands each shorter length to the rest of the pattern, and an
+   alternation before it saves a state to come back to a branch. */
 static bool re_may_continue(const REExecContext *s, const uint8_t *pc,
                             const uint8_t *cptr)
 {
     uint32_t c;
     int cbuf_type = s->cbuf_type;
 
+    /* noting where a group starts or ends has no effect once the code
+       after it fails: the matcher undoes it as it backs off */
+    for(;;) {
+        if (pc[0] == REOP_save_start || pc[0] == REOP_save_end)
+            pc += 2;
+        else if (pc[0] == REOP_save_reset)
+            pc += 3;
+        else
+            break;
+    }
     switch(pc[0]) {
     case REOP_char8:
     case REOP_char16:
     case REOP_char32:
+    case REOP_dot:
+    case REOP_range:
+    case REOP_range32:
         if (cptr >= s->cbuf_end)
             return false;
         PEEK_CHAR(c, cptr, s->cbuf_end, cbuf_type);
@@ -2357,6 +2371,17 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                 } else {
                     pc1 = pc;
                     pc = pc + (int)val;
+                }
+                /* dasher: no state to come back to for a branch that
+                   fails at its first opcode, and none to leave if it is
+                   the branch tried now (see re_may_continue()) */
+                if (lre_dasher_fast) {
+                    if (!re_may_continue(s, pc1, cptr))
+                        break;
+                    if (!re_may_continue(s, pc, cptr)) {
+                        pc = pc1;
+                        break;
+                    }
                 }
                 ret = push_state(s, capture, stack, stack_len,
                                  pc1, cptr, RE_EXEC_STATE_SPLIT, 0);
