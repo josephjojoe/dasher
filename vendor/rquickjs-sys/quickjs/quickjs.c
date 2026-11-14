@@ -20977,8 +20977,11 @@ static __exception int js_parse_template_part(JSParseState *s,
     StringBuffer b_s, *b = &b_s;
     JSValue str;
 
+    /* dasher: the bracket lookahead only needs to know where it ends */
+    if (s->in_skip)
+        b = NULL;
     /* p points to the first byte of the template part */
-    if (string_buffer_init(s->ctx, b, 32))
+    if (b && string_buffer_init(s->ctx, b, 32))
         goto fail;
     for(;;) {
         if (p >= s->buf_end)
@@ -20994,7 +20997,7 @@ static __exception int js_parse_template_part(JSParseState *s,
             break;
         }
         if (c == '\\') {
-            if (string_buffer_putc8(b, c))
+            if (b && string_buffer_putc8(b, c))
                 goto fail;
             if (p >= s->buf_end)
                 goto unexpected_eof;
@@ -21018,10 +21021,10 @@ static __exception int js_parse_template_part(JSParseState *s,
             }
             p = p_next;
         }
-        if (string_buffer_putc(b, c))
+        if (b && string_buffer_putc(b, c))
             goto fail;
     }
-    str = string_buffer_end(b);
+    str = b ? string_buffer_end(b) : JS_UNDEFINED;
     if (JS_IsException(str))
         return -1;
     s->token.val = TOK_TEMPLATE;
@@ -21033,7 +21036,8 @@ static __exception int js_parse_template_part(JSParseState *s,
  unexpected_eof:
     js_parse_error(s, "unexpected end of string");
  fail:
-    string_buffer_free(b);
+    if (b)
+        string_buffer_free(b);
     return -1;
 }
 
@@ -21047,8 +21051,11 @@ static __exception int js_parse_string(JSParseState *s, int sep,
     StringBuffer b_s, *b = &b_s;
     JSValue str;
 
+    /* dasher: the bracket lookahead only needs to know where it ends */
+    if (s->in_skip)
+        b = NULL;
     /* string */
-    if (string_buffer_init(s->ctx, b, 32))
+    if (b && string_buffer_init(s->ctx, b, 32))
         goto fail;
     for(;;) {
         if (p >= s->buf_end)
@@ -21151,10 +21158,10 @@ static __exception int js_parse_string(JSParseState *s, int sep,
                 goto invalid_utf8;
             p = p_next;
         }
-        if (string_buffer_putc(b, c))
+        if (b && string_buffer_putc(b, c))
             goto fail;
     }
-    str = string_buffer_end(b);
+    str = b ? string_buffer_end(b) : JS_UNDEFINED;
     if (JS_IsException(str))
         return -1;
     token->val = TOK_STRING;
@@ -21171,7 +21178,8 @@ static __exception int js_parse_string(JSParseState *s, int sep,
     if (do_throw)
         js_parse_error(s, "unexpected end of string");
  fail:
-    string_buffer_free(b);
+    if (b)
+        string_buffer_free(b);
     return -1;
 }
 
@@ -21365,6 +21373,147 @@ static void reparse_ident_token(JSParseState *s)
     }
 }
 
+/* dasher: the atom of 'p' (ASCII, 'len' bytes) if it is a keyword, 'of'
+   the other word the bracket lookahead looks at, else
+   JS_ATOM_empty_string, which stands for any other name: the lookahead
+   does not need their atoms */
+static JSAtom js_keyword_atom(const uint8_t *p, size_t len)
+{
+    if (len < 2 || len > 10)
+        return JS_ATOM_empty_string;
+    switch (p[0]) {
+    case 'a':
+        if (len == 5 && !memcmp(p, "await", 5))
+            return JS_ATOM_await;
+        break;
+    case 'b':
+        if (len == 5 && !memcmp(p, "break", 5))
+            return JS_ATOM_break;
+        break;
+    case 'c':
+        if (len == 8 && !memcmp(p, "continue", 8))
+            return JS_ATOM_continue;
+        if (len == 4 && !memcmp(p, "case", 4))
+            return JS_ATOM_case;
+        if (len == 5 && !memcmp(p, "catch", 5))
+            return JS_ATOM_catch;
+        if (len == 5 && !memcmp(p, "class", 5))
+            return JS_ATOM_class;
+        if (len == 5 && !memcmp(p, "const", 5))
+            return JS_ATOM_const;
+        break;
+    case 'd':
+        if (len == 6 && !memcmp(p, "delete", 6))
+            return JS_ATOM_delete;
+        if (len == 2 && !memcmp(p, "do", 2))
+            return JS_ATOM_do;
+        if (len == 7 && !memcmp(p, "default", 7))
+            return JS_ATOM_default;
+        if (len == 8 && !memcmp(p, "debugger", 8))
+            return JS_ATOM_debugger;
+        break;
+    case 'e':
+        if (len == 4 && !memcmp(p, "else", 4))
+            return JS_ATOM_else;
+        if (len == 4 && !memcmp(p, "enum", 4))
+            return JS_ATOM_enum;
+        if (len == 6 && !memcmp(p, "export", 6))
+            return JS_ATOM_export;
+        if (len == 7 && !memcmp(p, "extends", 7))
+            return JS_ATOM_extends;
+        break;
+    case 'f':
+        if (len == 5 && !memcmp(p, "false", 5))
+            return JS_ATOM_false;
+        if (len == 3 && !memcmp(p, "for", 3))
+            return JS_ATOM_for;
+        if (len == 7 && !memcmp(p, "finally", 7))
+            return JS_ATOM_finally;
+        if (len == 8 && !memcmp(p, "function", 8))
+            return JS_ATOM_function;
+        break;
+    case 'i':
+        if (len == 2 && !memcmp(p, "if", 2))
+            return JS_ATOM_if;
+        if (len == 2 && !memcmp(p, "in", 2))
+            return JS_ATOM_in;
+        if (len == 10 && !memcmp(p, "instanceof", 10))
+            return JS_ATOM_instanceof;
+        if (len == 6 && !memcmp(p, "import", 6))
+            return JS_ATOM_import;
+        if (len == 10 && !memcmp(p, "implements", 10))
+            return JS_ATOM_implements;
+        if (len == 9 && !memcmp(p, "interface", 9))
+            return JS_ATOM_interface;
+        break;
+    case 'l':
+        if (len == 3 && !memcmp(p, "let", 3))
+            return JS_ATOM_let;
+        break;
+    case 'n':
+        if (len == 4 && !memcmp(p, "null", 4))
+            return JS_ATOM_null;
+        if (len == 3 && !memcmp(p, "new", 3))
+            return JS_ATOM_new;
+        break;
+    case 'o':
+        if (len == 2 && !memcmp(p, "of", 2))
+            return JS_ATOM_of;
+        break;
+    case 'p':
+        if (len == 7 && !memcmp(p, "package", 7))
+            return JS_ATOM_package;
+        if (len == 7 && !memcmp(p, "private", 7))
+            return JS_ATOM_private;
+        if (len == 9 && !memcmp(p, "protected", 9))
+            return JS_ATOM_protected;
+        if (len == 6 && !memcmp(p, "public", 6))
+            return JS_ATOM_public;
+        break;
+    case 'r':
+        if (len == 6 && !memcmp(p, "return", 6))
+            return JS_ATOM_return;
+        break;
+    case 's':
+        if (len == 6 && !memcmp(p, "switch", 6))
+            return JS_ATOM_switch;
+        if (len == 5 && !memcmp(p, "super", 5))
+            return JS_ATOM_super;
+        if (len == 6 && !memcmp(p, "static", 6))
+            return JS_ATOM_static;
+        break;
+    case 't':
+        if (len == 4 && !memcmp(p, "true", 4))
+            return JS_ATOM_true;
+        if (len == 4 && !memcmp(p, "this", 4))
+            return JS_ATOM_this;
+        if (len == 6 && !memcmp(p, "typeof", 6))
+            return JS_ATOM_typeof;
+        if (len == 5 && !memcmp(p, "throw", 5))
+            return JS_ATOM_throw;
+        if (len == 3 && !memcmp(p, "try", 3))
+            return JS_ATOM_try;
+        break;
+    case 'v':
+        if (len == 3 && !memcmp(p, "var", 3))
+            return JS_ATOM_var;
+        if (len == 4 && !memcmp(p, "void", 4))
+            return JS_ATOM_void;
+        break;
+    case 'w':
+        if (len == 5 && !memcmp(p, "while", 5))
+            return JS_ATOM_while;
+        if (len == 4 && !memcmp(p, "with", 4))
+            return JS_ATOM_with;
+        break;
+    case 'y':
+        if (len == 5 && !memcmp(p, "yield", 5))
+            return JS_ATOM_yield;
+        break;
+    }
+    return JS_ATOM_empty_string;
+}
+
 /* 'c' is the first character. Return JS_ATOM_NULL in case of error */
 static JSAtom parse_ident(JSParseState *s, const uint8_t **pp,
                           bool *pident_has_escape, int c, bool is_private)
@@ -21426,6 +21575,9 @@ static __exception int next_token(JSParseState *s)
     }
 
     free_token(s, &s->token);
+#ifdef DASHER_COUNT
+    { extern long dc_tok[2]; dc_tok[s->in_skip != 0]++; }
+#endif
 
     p = s->last_ptr = s->buf_ptr;
     s->got_lf = false;
@@ -21570,10 +21722,23 @@ static __exception int next_token(JSParseState *s)
         s->mark = p;
         p++;
         ident_has_escape = false;
+        if (s->in_skip) {
+            /* dasher: the bracket lookahead needs to know only which
+               keyword, if any, a name is. A plain ASCII name gets no atom. */
+            const uint8_t *q = p;
+            while (*q < 0x80 && lre_js_is_ident_next(*q))
+                q++;
+            if (*q != '\\' && *q < 0x80) {
+                atom = js_keyword_atom(p - 1, q - (p - 1));
+                p = q;
+                goto got_ident;
+            }
+        }
     has_ident:
         atom = parse_ident(s, &p, &ident_has_escape, c, false);
         if (atom == JS_ATOM_NULL)
             goto fail;
+    got_ident:
         s->token.u.ident.atom = atom;
         s->token.u.ident.has_escape = ident_has_escape;
         s->token.u.ident.is_reserved = false;
@@ -21624,10 +21789,33 @@ static __exception int next_token(JSParseState *s)
             js_parse_error(s, "Octal literals are not allowed in strict mode");
             goto fail;
         }
+        /* dasher: a lone 0, as below for other short integers */
+        if (!is_digit(p[1]) && p[1] != '.' && p[1] != '_' && p[1] != '\\' &&
+            p[1] < 0x80 && !lre_js_is_ident_next(p[1])) {
+            p++;
+            s->token.val = TOK_NUMBER;
+            s->token.u.num.val = js_int32(0);
+            break;
+        }
         goto parse_number;
     case '1': case '2': case '3': case '4':
     case '5': case '6': case '7': case '8':
     case '9':
+        /* dasher: a short decimal integer, the common case, is read here:
+           what js_atof() gives for it, without its copy and conversion */
+        {
+            const uint8_t *q = p + 1;
+            uint32_t v = c - '0';
+            while (q < p + 9 && is_digit(*q))
+                v = v * 10 + (*q++ - '0');
+            if (!is_digit(*q) && *q != '.' && *q != '_' && *q != '\\' &&
+                *q < 0x80 && !lre_js_is_ident_next(*q)) {
+                p = q;
+                s->token.val = TOK_NUMBER;
+                s->token.u.num.val = js_int32(v);
+                break;
+            }
+        }
         /* number */
     parse_number:
         {
@@ -23591,8 +23779,24 @@ static bool js_skip_not_target(int first, int last, int prev)
 
 /* XXX: no longer works if regexps are present. Could use previous
    regexp parsing heuristics to handle most cases */
+#ifdef DASHER_COUNT
+static int js_parse_skip_parens_token3(JSParseState *s, int *pbits,
+                                       bool no_line_terminator, int ask);
 static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
                                        bool no_line_terminator, int ask)
+{
+    extern long dc_tok[2]; extern void dc_site(void *, long, int);
+    long before = dc_tok[1];
+    int r = js_parse_skip_parens_token3(s, pbits, no_line_terminator, ask);
+    dc_site(__builtin_return_address(0), dc_tok[1] - before, r == TOK_ERROR);
+    return r;
+}
+static int js_parse_skip_parens_token3(JSParseState *s, int *pbits,
+                                       bool no_line_terminator, int ask)
+#else
+static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
+                                       bool no_line_terminator, int ask)
+#endif
 {
     char state[256];
     /* dasher: for each open bracket, where it is and what is inside it */
@@ -23842,7 +24046,7 @@ static int js_parse_skip_parens_token2(JSParseState *s, int *pbits,
     return tok;
 }
 
-static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_terminator)
+static __attribute__((noinline)) int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_terminator)
 {
     return js_parse_skip_parens_token2(s, pbits, no_line_terminator, SKIP_ASK_ALL);
 }
