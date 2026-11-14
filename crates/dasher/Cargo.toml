@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 # See dasher-net's feature of the same name.
-replay = ["dasher-net/replay"]
+replay = ["dasher-net/replay", "dasher-js/replay"]
 
 [dependencies]
 dasher-css.workspace = true

@@ -162,6 +162,19 @@ impl DomState {
         !self.ce_reactions.borrow().is_empty()
     }
 
+    /// Whether `id` is a custom element.
+    pub(crate) fn is_custom(&self, id: NodeId) -> bool {
+        let custom = self.ce_custom.borrow();
+        !custom.is_empty() && custom.contains(&id)
+    }
+
+    /// Whether a definition exists for the name `local`, so creating an
+    /// element of that name involves the registry.
+    pub(crate) fn has_definition(&self, local: &str) -> bool {
+        let names = self.ce_names.borrow();
+        !names.is_empty() && names.contains(local)
+    }
+
     /// Marks `id` as a custom element, or not.
     pub(crate) fn set_custom(&self, id: NodeId, custom: bool) {
         let mut set = self.ce_custom.borrow_mut();
