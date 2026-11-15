@@ -604,19 +604,25 @@
   // finds (Dynatrace's, of XMLHttpRequest) misses the rest. `constructor`
   // and the symbol-keyed members (@@toStringTag, @@iterator) stay hidden,
   // as do the function's own `length`, `name` and `prototype`.
-  const NOT_MEMBERS = new Set(['length', 'name', 'prototype']);
-  const describe = Object.getOwnPropertyDescriptor;
-  function enumerable(object, key) {
-    if (!describe(object, key).enumerable) Object.defineProperty(object, key, { enumerable: true });
-  }
+  //
+  // Runs for some 2,300 members before every page, so it reads nothing
+  // back: defining a member that is already enumerable changes nothing.
+  // The built-ins are captured and the loops indexed because the streams'
+  // turn comes once page scripts have run (see lazy.js).
+  const ENUMERABLE = { enumerable: true };
+  const defineProperty = Object.defineProperty;
+  const ownNames = Object.getOwnPropertyNames;
   function interfaceMembers(ctor) {
-    for (const key of Object.getOwnPropertyNames(ctor)) {
-      if (!NOT_MEMBERS.has(key)) enumerable(ctor, key);
+    const statics = ownNames(ctor);
+    for (let i = 0; i < statics.length; i++) {
+      const key = statics[i];
+      if (key !== 'length' && key !== 'name' && key !== 'prototype') defineProperty(ctor, key, ENUMERABLE);
     }
     const proto = ctor.prototype;
     if (proto === null || typeof proto !== 'object') return;
-    for (const key of Object.getOwnPropertyNames(proto)) {
-      if (key !== 'constructor') enumerable(proto, key);
+    const members = ownNames(proto);
+    for (let i = 0; i < members.length; i++) {
+      if (members[i] !== 'constructor') defineProperty(proto, members[i], ENUMERABLE);
     }
   }
 
@@ -631,7 +637,7 @@
     for (const name of Object.keys(members)) {
       const value = members[name];
       if (typeof value === 'function') interfaceMembers(value);
-      Object.defineProperty(globalThis, name, {
+      defineProperty(globalThis, name, {
         value,
         writable: true,
         configurable: true,

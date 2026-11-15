@@ -8,6 +8,7 @@
   'use strict';
 
   const defineProperty = Object.defineProperty;
+  const values = Object.values;
 
   // Streams (streams.js). Reading one of the stream globals, or a body as
   // a stream (fetch.js, through `internals.streams`), loads them.
@@ -16,7 +17,8 @@
     if (streams === undefined) {
       streams = native.loadGlue('dasher:streams')(native, internals);
       // What `internals.expose` does for the interfaces of the other files.
-      for (const ctor of Object.values(streams.globals)) internals.interfaceMembers(ctor);
+      const interfaces = values(streams.globals);
+      for (let i = 0; i < interfaces.length; i++) internals.interfaceMembers(interfaces[i]);
     }
     return streams;
   };
