@@ -47,7 +47,7 @@ fn namespace_shape() {
     );
     assert_eq!(
         out,
-        r#"{"tag":"[object Intl]","enumerable":false,"members":["Collator","DateTimeFormat","ListFormat","Locale","NumberFormat","PluralRules","RelativeTimeFormat","getCanonicalLocales","supportedValuesOf"],"callable":[true,true,true],"name":"NumberFormat","ctor":true,"protoTag":"[object Intl.PluralRules]","needsNew":true}"#
+        r#"{"tag":"[object Intl]","enumerable":false,"members":["Collator","DateTimeFormat","DisplayNames","ListFormat","Locale","NumberFormat","PluralRules","RelativeTimeFormat","getCanonicalLocales","supportedValuesOf"],"callable":[true,true,true],"name":"NumberFormat","ctor":true,"protoTag":"[object Intl.PluralRules]","needsNew":true}"#
     );
 }
 
@@ -1456,6 +1456,227 @@ fn list_format() {
 /// Intl is evaluated on first use. Until then the global is an accessor;
 /// a page that replaces it, or a built-in method, keeps its replacement.
 // Expected values are Node 22's (ICU), for tags within what LIKELY knows.
+/// Every expectation here is what Chrome 157 answers.
+#[test]
+fn display_names() {
+    let of = |options: &str, code: &str| {
+        format!("new Intl.DisplayNames('en', {{ {options} }}).of('{code}')")
+    };
+    let cases: &[(&str, &str, &str)] = &[
+        ("type: 'region'", "US", "United States"),
+        ("type: 'region'", "HK", "Hong Kong"),
+        ("type: 'region'", "PS", "Palestine"),
+        ("type: 'region'", "TR", "Türkiye"),
+        ("type: 'region'", "CI", "Côte d’Ivoire"),
+        ("type: 'region'", "419", "Latin America"),
+        ("type: 'region'", "EU", "European Union"),
+        ("type: 'region'", "XK", "Kosovo"),
+        // Chrome names no other UN area, and looks codes up as written.
+        ("type: 'region'", "002", "002"),
+        ("type: 'region'", "us", "us"),
+        ("type: 'region'", "AA", "AA"),
+        ("type: 'region', fallback: 'none'", "AA", "undefined"),
+        ("type: 'region', fallback: 'none'", "DE", "Germany"),
+        ("type: 'region'", "GB", "United Kingdom"),
+        ("type: 'region', style: 'short'", "GB", "UK"),
+        ("type: 'region', style: 'narrow'", "US", "US"),
+        ("type: 'region', style: 'short'", "BA", "Bosnia"),
+        ("type: 'region', style: 'short'", "FR", "France"),
+        ("type: 'language'", "en", "English"),
+        ("type: 'language'", "EN", "English"),
+        ("type: 'language'", "fra", "French"),
+        ("type: 'language'", "en-US", "American English"),
+        ("type: 'language'", "en-us", "American English"),
+        ("type: 'language'", "es-419", "Latin American Spanish"),
+        ("type: 'language'", "zh-Hant", "Traditional Chinese"),
+        ("type: 'language'", "nl-BE", "Flemish"),
+        ("type: 'language'", "ar-001", "Modern Standard Arabic"),
+        ("type: 'language'", "zh-TW", "Chinese (Taiwan)"),
+        (
+            "type: 'language'",
+            "zh-Hans-CN",
+            "Chinese (Simplified, China)",
+        ),
+        (
+            "type: 'language'",
+            "en-Latn-US",
+            "English (Latin, United States)",
+        ),
+        ("type: 'language'", "sr-Latn", "Serbian (Latin)"),
+        (
+            "type: 'language'",
+            "en-US-posix",
+            "American English (POSIX)",
+        ),
+        (
+            "type: 'language'",
+            "sl-rozaj-biske",
+            "Slovenian (BISKE_ROZAJ)",
+        ),
+        ("type: 'language'", "af-MM", "Afrikaans (Myanmar [Burma])"),
+        ("type: 'language'", "en-XX", "English (XX)"),
+        ("type: 'language'", "xx-YY", "xx (YY)"),
+        ("type: 'language'", "english", "english"),
+        ("type: 'language', fallback: 'none'", "en-XX", "undefined"),
+        ("type: 'language', fallback: 'none'", "xx", "undefined"),
+        (
+            "type: 'language', fallback: 'none'",
+            "de-AT",
+            "Austrian German",
+        ),
+        (
+            "type: 'language', languageDisplay: 'standard'",
+            "en-US",
+            "English (United States)",
+        ),
+        (
+            "type: 'language', languageDisplay: 'standard'",
+            "zh-Hant",
+            "Chinese (Traditional)",
+        ),
+        ("type: 'language', style: 'short'", "az", "Azeri"),
+        (
+            "type: 'language', style: 'short'",
+            "af-GB",
+            "Afrikaans (UK)",
+        ),
+        (
+            "type: 'language', style: 'short'",
+            "en-GB",
+            "British English",
+        ),
+        ("type: 'script'", "Latn", "Latin"),
+        ("type: 'script'", "Hans", "Simplified"),
+        ("type: 'script'", "Zzzz", "Unknown Script"),
+        ("type: 'script'", "latn", "latn"),
+        ("type: 'script'", "Xxxx", "Xxxx"),
+        ("type: 'script', style: 'short'", "Cans", "UCAS"),
+        ("type: 'currency'", "USD", "US Dollar"),
+        ("type: 'currency'", "usd", "US Dollar"),
+        ("type: 'currency', style: 'narrow'", "JPY", "Japanese Yen"),
+        ("type: 'currency'", "BTC", "BTC"),
+        ("type: 'currency', fallback: 'none'", "ABC", "undefined"),
+        ("type: 'calendar'", "gregory", "Gregorian Calendar"),
+        (
+            "type: 'calendar'",
+            "islamic-umalqura",
+            "Hijri Calendar (Umm al-Qura)",
+        ),
+        ("type: 'calendar'", "roc", "Minguo Calendar"),
+        ("type: 'calendar'", "Gregory", "Gregory"),
+        ("type: 'calendar'", "foo", "foo"),
+        ("type: 'dateTimeField'", "weekOfYear", "week"),
+        ("type: 'dateTimeField', style: 'short'", "year", "yr."),
+        ("type: 'dateTimeField', style: 'narrow'", "year", "yr"),
+        (
+            "type: 'dateTimeField', style: 'narrow'",
+            "weekday",
+            "day of wk.",
+        ),
+        (
+            "type: 'dateTimeField', style: 'short'",
+            "dayPeriod",
+            "AM/PM",
+        ),
+        (
+            "type: 'dateTimeField', style: 'narrow'",
+            "timeZoneName",
+            "zone",
+        ),
+    ];
+    let js = page();
+    for (options, code, expected) in cases {
+        let source = of(options, code);
+        let out = eval(&js, &format!("String({source})"));
+        assert_eq!(out, format!("\"{expected}\""), "{source}");
+    }
+
+    // Codes of the wrong shape are errors, whatever the fallback.
+    let throws = |source: &str| {
+        eval(
+            &js,
+            &format!(
+                "(() => {{ try {{ {source}; return 'no error'; }} catch (e) {{ return e.name; }} }})()"
+            ),
+        )
+    };
+    for (options, code) in [
+        ("type: 'region'", "USA"),
+        ("type: 'region'", "1"),
+        ("type: 'region', fallback: 'none'", "A1"),
+        ("type: 'region'", "undefined"),
+        ("type: 'language'", "en_US"),
+        ("type: 'language'", "e"),
+        ("type: 'language'", "root"),
+        ("type: 'language'", "en-u-ca-gregory"),
+        ("type: 'language'", "zh-cmn"),
+        ("type: 'language'", "x-private"),
+        ("type: 'script'", "Latin"),
+        ("type: 'currency'", "US"),
+        ("type: 'calendar'", "ab"),
+        ("type: 'calendar'", "abcdefghi"),
+        ("type: 'dateTimeField'", "foo"),
+    ] {
+        let source = of(options, code);
+        assert_eq!(throws(&source), "\"RangeError\"", "{source}");
+    }
+    for (source, error) in [
+        ("new Intl.DisplayNames()", "TypeError"),
+        ("new Intl.DisplayNames('en')", "TypeError"),
+        ("new Intl.DisplayNames('en', {})", "TypeError"),
+        ("new Intl.DisplayNames('en', null)", "TypeError"),
+        (
+            "new Intl.DisplayNames('en', { type: 'planet' })",
+            "RangeError",
+        ),
+        (
+            "new Intl.DisplayNames('en', { type: 'region', style: 'tiny' })",
+            "RangeError",
+        ),
+        (
+            "new Intl.DisplayNames('en', { type: 'region', fallback: 'guess' })",
+            "RangeError",
+        ),
+        (
+            "new Intl.DisplayNames('e', { type: 'region' })",
+            "RangeError",
+        ),
+        ("Intl.DisplayNames('en', { type: 'region' })", "TypeError"),
+        (
+            "new Intl.DisplayNames('en', { type: 'region' }).of()",
+            "RangeError",
+        ),
+        (
+            "new Intl.DisplayNames('en', { type: 'region' }).of(2)",
+            "RangeError",
+        ),
+    ] {
+        assert_eq!(throws(source), format!("\"{error}\""), "{source}");
+    }
+
+    let out = eval(
+        &js,
+        r#"[
+          new Intl.DisplayNames('en', { type: 'region' }).resolvedOptions(),
+          new Intl.DisplayNames('en-GB', { type: 'language' }).resolvedOptions(),
+          new Intl.DisplayNames(undefined, { type: 'currency', style: 'short', fallback: 'none' }).resolvedOptions(),
+          new Intl.DisplayNames(['fr', 'en-AU'], { type: 'region' }).of('FR'),
+          Intl.DisplayNames.supportedLocalesOf(['en-GB', 'xx']),
+          Intl.DisplayNames.length, Intl.DisplayNames.name, Intl.DisplayNames.prototype.of.length,
+          String(new Intl.DisplayNames('en', { type: 'region' })),
+        ]"#,
+    );
+    assert_eq!(
+        out,
+        concat!(
+            r#"[{"locale":"en","style":"long","type":"region","fallback":"code"},"#,
+            r#"{"locale":"en-GB","style":"long","type":"language","fallback":"code","languageDisplay":"dialect"},"#,
+            r#"{"locale":"en-US","style":"short","type":"currency","fallback":"none"},"#,
+            r#""France",["en-GB"],2,"DisplayNames",1,"[object Intl.DisplayNames]"]"#
+        )
+    );
+}
+
 #[test]
 fn locale() {
     check(&[

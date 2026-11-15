@@ -9,7 +9,8 @@
 // Date toLocale*String and String localeCompare, so their locales and
 // options take effect. Intl.Locale takes tags apart and puts them back
 // together, and knows the likely script and region of about fifty
-// languages.
+// languages. Intl.DisplayNames names regions, languages, scripts,
+// currencies and calendars as Chrome does in English.
 //
 // This file is the JS surface: locales, reading and checking options,
 // resolvedOptions and the errors. Formatting runs in Rust (src/intl/),
@@ -32,7 +33,7 @@
   const bigintValue = BigInt.prototype.valueOf;
   const {
     numberFormatter, numberFormat, numberToParts, pluralSelect, timeZoneName, hostTimeZone,
-    dateFormatter, dateHasHour, dateFormat, dateToParts,
+    dateFormatter, dateHasHour, dateFormat, dateToParts, displayName,
   } = native;
   const Intl = {};
 
@@ -725,6 +726,99 @@
     toString() { return tagOf(this.#t); }
   }
 
+  // Display names: Chrome's English ones (src/intl/names.rs), whatever
+  // the locale. As there, codes are looked up as written except where
+  // noted, and a region, script or calendar in the wrong case has no name.
+
+  const FIELD_NAMES = {
+    era: ['era'], year: ['year', 'yr.', 'yr'], quarter: ['quarter', 'qtr.', 'qtr'],
+    month: ['month', 'mo.', 'mo'], weekOfYear: ['week', 'wk.', 'wk'],
+    weekday: ['day of the week', 'day of wk.'], day: ['day'], dayPeriod: ['AM/PM'],
+    hour: ['hour', 'hr.', 'hr'], minute: ['minute', 'min.', 'min'],
+    second: ['second', 'sec.', 'sec'], timeZoneName: ['time zone', 'zone'],
+  };
+  const DISPLAY_CODE = {
+    region: /^([a-z]{2}|\d{3})$/i,
+    script: /^[a-z]{4}$/i,
+    currency: /^[a-z]{3}$/i,
+    calendar: /^[a-z\d]{3,8}(-[a-z\d]{3,8})*$/i,
+  };
+  // A language, then a script, a region and variants: no extensions.
+  const LANGUAGE_ID = /^([a-z]{2,3}|[a-z]{5,8})(-[a-z]{4})?(-([a-z]{2}|\d{3}))?((-([a-z\d]{5,8}|\d[a-z\d]{3}))*)$/i;
+
+  // The name of `code` in a table, the shorter one for the shorter styles
+  // where there is one.
+  function nameIn(table, code, style) {
+    return (style !== 'long' && table !== 'currency' && table !== 'calendar'
+      ? displayName(table + 'Short', code) : undefined) ?? displayName(table, code) ?? undefined;
+  }
+
+  // A language tag's name, and whether every part of it had one:
+  // "American English", "Chinese (Traditional, Hong Kong)", "xx (Latin)".
+  function languageName(tag, style, dialect) {
+    const m = LANGUAGE_ID.exec(tag);
+    if (m === null) throw new RangeError('Invalid language tag: ' + tag);
+    const language = m[1].toLowerCase();
+    let script = m[2] && m[2][1].toUpperCase() + m[2].slice(2).toLowerCase();
+    let region = m[3] && m[3].slice(1).toUpperCase();
+    let name = nameIn('language', language, style);
+    let known = name !== undefined;
+    // A dialect's own name stands for the language and the one subtag.
+    if (dialect && known && (script === undefined) !== (region === undefined)) {
+      const own = displayName('dialect', displayName('language', language) + '-' + (script ?? region));
+      if (own != null) {
+        name = own;
+        script = region = undefined;
+      }
+    }
+    const parts = [];
+    for (const [table, code] of [['script', script], ['region', region]]) {
+      if (code === undefined) continue;
+      const part = nameIn(table, code, style);
+      if (part === undefined) known = false;
+      parts.push((part ?? code).replace(/\(/g, '[').replace(/\)/g, ']'));
+    }
+    if (m[5]) parts.push(m[5].slice(1).toUpperCase().split('-').sort().join('_'));
+    name ??= language;
+    return [parts.length ? name + ' (' + parts.join(', ') + ')' : name, known];
+  }
+
+  class DisplayNames {
+    #r;
+    constructor(locales, o) {
+      const locale = resolve(locales);
+      o = options(o);
+      const style = str(o, 'style', ['narrow', 'short', 'long'], 'long');
+      const type = str(o, 'type', ['language', 'region', 'script', 'currency', 'calendar', 'dateTimeField']);
+      if (type === undefined) throw new TypeError('Intl.DisplayNames requires a type option');
+      const fallback = str(o, 'fallback', ['code', 'none'], 'code');
+      const languageDisplay = str(o, 'languageDisplay', ['dialect', 'standard'], 'dialect');
+      this.#r = { locale, style, type, fallback };
+      if (type === 'language') this.#r.languageDisplay = languageDisplay;
+    }
+    of(code) {
+      const { style, type, fallback, languageDisplay } = this.#r;
+      code = String(code);
+      let name;
+      if (type === 'language') {
+        const [composed, known] = languageName(code, style, languageDisplay === 'dialect');
+        if (known || fallback === 'code') return composed;
+      } else if (type === 'dateTimeField') {
+        const names = Object.hasOwn(FIELD_NAMES, code) ? FIELD_NAMES[code] : undefined;
+        if (names === undefined) throw new RangeError('Invalid date and time field: ' + code);
+        return names[Math.min(['long', 'short', 'narrow'].indexOf(style), names.length - 1)];
+      } else {
+        if (!DISPLAY_CODE[type].test(code)) throw new RangeError('Invalid ' + type + ' code: ' + code);
+        // Currencies alone are found in either case.
+        name = nameIn(type, type === 'currency' ? code.toUpperCase() : code, style);
+      }
+      return name ?? (fallback === 'code' ? code : undefined);
+    }
+    resolvedOptions() {
+      return { ...this.#r };
+    }
+  }
+
   // The Intl namespace.
 
   function install(C, name, callable) {
@@ -753,6 +847,7 @@
   install(PluralRules, 'PluralRules');
   install(RelativeTimeFormat, 'RelativeTimeFormat');
   install(ListFormat, 'ListFormat');
+  install(DisplayNames, 'DisplayNames');
   defineProperty(Locale.prototype, Symbol.toStringTag, { value: 'Intl.Locale', configurable: true });
   hidden(Intl, { Locale });
 

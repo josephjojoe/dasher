@@ -1,5 +1,5 @@
-//! The native half of `intl.js`: number, plural and date formatting, and
-//! time zones.
+//! The native half of `intl.js`: number, plural and date formatting,
+//! time zones, and the names of regions, languages and the like.
 //!
 //! `intl.js` keeps the JS surface (locale negotiation, reading and checking
 //! options, resolvedOptions objects, the error messages) and hands the
@@ -13,6 +13,7 @@
 //! tables are unpacked once per process, on first use.
 
 mod date;
+mod names;
 mod number;
 mod tzdata;
 mod zones;
@@ -179,6 +180,12 @@ fn natives<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
     o.set(
         "currencies",
         Function::new(ctx.clone(), number::currencies)?,
+    )?;
+    o.set(
+        "displayName",
+        Function::new(ctx.clone(), |table: String, code: String| {
+            names::name(&table, &code)
+        })?,
     )?;
     o.set(
         "units",
