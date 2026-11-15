@@ -545,3 +545,25 @@ async fn mutation_observers_see_what_the_parser_inserts() {
     );
     assert_eq!(page.js().take_errors(), []);
 }
+
+#[tokio::test]
+async fn classic_scripts_load_from_data_urls() {
+    // Instagram loads its bootstrap scripts this way. `aGkoJ2InKQ==` is
+    // `hi('b')`.
+    let server = FixtureServer::builder()
+        .route("/data", |_| {
+            FixtureResponse::html(
+                "<script>var log = []; function hi(x) { log.push(x + ':' + document.currentScript.src.slice(0, 5)); }</script>\
+                 <script src=\"data:text/javascript,hi('a')\"></script>\
+                 <script src=\"data:application/x-javascript; charset=utf-8;base64,aGkoJ2InKQ==\" async></script>\
+                 <script src=\"data:text/javascript,hi(%27c%27)\" onload=\"log.push('load')\"></script>",
+            )
+        })
+        .start()
+        .unwrap();
+    let page = load(&server, "/data").await;
+    assert_eq!(
+        serde_list(&json(&page, "log.slice().sort()")),
+        ["a:data:", "b:data:", "c:data:", "load"]
+    );
+}

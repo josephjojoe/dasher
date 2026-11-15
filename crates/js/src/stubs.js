@@ -31,6 +31,11 @@
 //   BroadcastChannel                No other contexts exist; posts go nowhere.
 //   WebSocket, EventSource          Fail to connect: an error event, then
 //                                   close, as if the server were unreachable.
+//   Worker, SharedWorker            Constructed, but the script never loads:
+//                                   an error event; messages go nowhere.
+//   canvas.getContext('2d')         A CanvasRenderingContext2D that keeps its
+//                                   state and draws nothing; reads give
+//                                   transparent pixels.
 //   CSS.supports                    Answers true for everything.
 //   crypto.subtle                   Every method but digest() rejects with
 //                                   NotSupportedError.
@@ -38,8 +43,8 @@
 //                                   nothing; revokeObjectURL is a no-op.
 //
 // Deliberately absent, so feature detection takes the fallback path:
-// Worker, SharedWorker, navigator.serviceWorker, caches, indexedDB,
-// speechSynthesis, PaymentRequest, WebGL/canvas contexts and WebRTC.
+// navigator.serviceWorker, caches, indexedDB,
+// speechSynthesis, PaymentRequest, WebGL contexts and WebRTC.
 //
 // Not stubs but real implementations elsewhere: CSS.escape (below),
 // crypto.subtle.digest (crypto.js),
@@ -549,6 +554,191 @@
   tag(EventSource, 'EventSource');
   internals.defineEventHandlers(EventSource.prototype, ['onopen', 'onmessage', 'onerror']);
 
+  // Worker and SharedWorker: construction works, but the worker's script
+  // never loads. An error event follows, as in a browser whose worker
+  // script fails to load, so pages that create a worker without checking
+  // first (as some React apps do while rendering) carry on.
+  function workerUrl(url, what) {
+    const parts = internals.urlParse(url, internals.baseURL());
+    if (parts === undefined) {
+      throw domException('SyntaxError', 'Failed to construct ' + what + ": The URL '" + String(url) + "' is invalid.");
+    }
+    return parts[internals.URL_PARTS.HREF];
+  }
+  class Worker extends EventTarget {
+    #terminated = false;
+    constructor(url, options) {
+      if (arguments.length === 0) {
+        throw new TypeError("Failed to construct 'Worker': 1 argument required, but only 0 present.");
+      }
+      super();
+      void options;
+      workerUrl(url, "'Worker'");
+      queueTask(() => {
+        if (!this.#terminated) fire(this, 'error');
+      });
+    }
+    postMessage(message) {
+      if (arguments.length === 0) {
+        throw new TypeError("Failed to execute 'postMessage' on 'Worker': 1 argument required, but only 0 present.");
+      }
+      void message;
+    }
+    terminate() {
+      this.#terminated = true;
+    }
+  }
+  tag(Worker, 'Worker');
+  internals.defineEventHandlers(Worker.prototype, ['onmessage', 'onmessageerror', 'onerror']);
+
+  class SharedWorker extends EventTarget {
+    #port;
+    constructor(url, options) {
+      if (arguments.length === 0) {
+        throw new TypeError("Failed to construct 'SharedWorker': 1 argument required, but only 0 present.");
+      }
+      super();
+      void options;
+      workerUrl(url, "'SharedWorker'");
+      this.#port = new MessageChannel().port1;
+      queueTask(() => fire(this, 'error'));
+    }
+    get port() { return this.#port; }
+  }
+  tag(SharedWorker, 'SharedWorker');
+  internals.defineEventHandlers(SharedWorker.prototype, ['onerror']);
+
+  // A 2D canvas context that draws nothing. Pages draw charts, logos and
+  // fingerprints without checking getContext('2d') for null, so a context
+  // that keeps its state and ignores drawing lets them carry on. Pixels
+  // read back are transparent black; text is measured at about half the
+  // font size per character. WebGL and other contexts stay null.
+  class CanvasGradient {
+    constructor(key) { illegal(key); }
+    addColorStop(offset, color) { void offset; void color; }
+  }
+  tag(CanvasGradient, 'CanvasGradient');
+  class CanvasPattern {
+    constructor(key) { illegal(key); }
+    setTransform() {}
+  }
+  tag(CanvasPattern, 'CanvasPattern');
+  class ImageData {
+    #width; #height; #data;
+    constructor(a, b, c) {
+      let width = a, height = b, data;
+      if (typeof a === 'object' && a !== null) {
+        data = a;
+        width = b;
+        height = c === undefined ? data.length / 4 / width : c;
+      }
+      width = Math.trunc(Number(width)) || 0;
+      height = Math.trunc(Number(height)) || 0;
+      if (width <= 0 || height <= 0) {
+        throw domException('IndexSizeError', "Failed to construct 'ImageData': The source width is zero or not a number.");
+      }
+      this.#width = width;
+      this.#height = height;
+      this.#data = data || new Uint8ClampedArray(width * height * 4);
+    }
+    get width() { return this.#width; }
+    get height() { return this.#height; }
+    get data() { return this.#data; }
+    get colorSpace() { return 'srgb'; }
+  }
+  tag(ImageData, 'ImageData');
+  class TextMetrics {
+    constructor(key, width, size) {
+      illegal(key);
+      this.width = width;
+      this.actualBoundingBoxLeft = 0;
+      this.actualBoundingBoxRight = width;
+      this.actualBoundingBoxAscent = size * 0.75;
+      this.actualBoundingBoxDescent = size * 0.25;
+      this.fontBoundingBoxAscent = size * 0.9;
+      this.fontBoundingBoxDescent = size * 0.25;
+      this.emHeightAscent = size * 0.8;
+      this.emHeightDescent = size * 0.2;
+      this.hangingBaseline = size * 0.7;
+      this.alphabeticBaseline = 0;
+      this.ideographicBaseline = -size * 0.2;
+    }
+  }
+  tag(TextMetrics, 'TextMetrics');
+  class Path2D {
+    constructor(path) { void path; }
+  }
+  for (const name of ['addPath', 'closePath', 'moveTo', 'lineTo', 'bezierCurveTo', 'quadraticCurveTo',
+    'arc', 'arcTo', 'ellipse', 'rect', 'roundRect']) {
+    method(Path2D.prototype, name, noop);
+  }
+  tag(Path2D, 'Path2D');
+  const CONTEXT_STATE = {
+    fillStyle: '#000000', strokeStyle: '#000000', font: '10px sans-serif', textAlign: 'start',
+    textBaseline: 'alphabetic', direction: 'ltr', globalAlpha: 1, globalCompositeOperation: 'source-over',
+    lineWidth: 1, lineCap: 'butt', lineJoin: 'miter', miterLimit: 10, lineDashOffset: 0, shadowBlur: 0,
+    shadowColor: 'rgba(0, 0, 0, 0)', shadowOffsetX: 0, shadowOffsetY: 0, imageSmoothingEnabled: true,
+    imageSmoothingQuality: 'low', filter: 'none', letterSpacing: '0px', wordSpacing: '0px',
+    fontKerning: 'auto', fontStretch: 'normal', fontVariantCaps: 'normal', textRendering: 'auto',
+  };
+  class CanvasRenderingContext2D {
+    #canvas;
+    #stack = [];
+    constructor(key, canvas) {
+      illegal(key);
+      this.#canvas = canvas;
+      Object.assign(this, CONTEXT_STATE);
+    }
+    get canvas() { return this.#canvas; }
+    save() { this.#stack.push(Object.fromEntries(Object.keys(CONTEXT_STATE).map((k) => [k, this[k]]))); }
+    restore() { if (this.#stack.length) Object.assign(this, this.#stack.pop()); }
+    reset() { this.#stack = []; Object.assign(this, CONTEXT_STATE); }
+    getContextAttributes() {
+      return { alpha: true, colorSpace: 'srgb', desynchronized: false, willReadFrequently: false };
+    }
+    isContextLost() { return false; }
+    getTransform() {
+      return typeof DOMMatrix === 'function' ? new DOMMatrix() : { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    }
+    getLineDash() { return []; }
+    isPointInPath() { return false; }
+    isPointInStroke() { return false; }
+    measureText(text) {
+      const size = Number((/(\d+(?:\.\d+)?)px/.exec(String(this.font)) || [0, 10])[1]);
+      return new TextMetrics(KEY, String(text).length * size * 0.55, size);
+    }
+    createLinearGradient() { return new CanvasGradient(KEY); }
+    createRadialGradient() { return new CanvasGradient(KEY); }
+    createConicGradient() { return new CanvasGradient(KEY); }
+    createPattern() { return new CanvasPattern(KEY); }
+    createImageData(a, b) {
+      return typeof a === 'object' && a !== null ? new ImageData(a.width, a.height) : new ImageData(Math.abs(a), Math.abs(b));
+    }
+    getImageData(x, y, width, height) {
+      void x; void y;
+      return new ImageData(Math.abs(width) || 1, Math.abs(height) || 1);
+    }
+  }
+  for (const name of ['scale', 'rotate', 'translate', 'transform', 'setTransform', 'resetTransform',
+    'clearRect', 'fillRect', 'strokeRect', 'beginPath', 'closePath', 'moveTo', 'lineTo',
+    'bezierCurveTo', 'quadraticCurveTo', 'arc', 'arcTo', 'ellipse', 'rect', 'roundRect', 'fill',
+    'stroke', 'clip', 'fillText', 'strokeText', 'drawImage', 'putImageData', 'setLineDash',
+    'drawFocusIfNeeded']) {
+    method(CanvasRenderingContext2D.prototype, name, noop);
+  }
+  tag(CanvasRenderingContext2D, 'CanvasRenderingContext2D');
+  const contexts = new WeakMap();
+  // HTMLCanvasElement's getContext (in dom.js, which runs later) asks here.
+  internals.canvasContext = function canvasContext(canvas, type) {
+    if (String(type) !== '2d') return null;
+    let context = contexts.get(canvas);
+    if (context === undefined) {
+      context = new CanvasRenderingContext2D(KEY, canvas);
+      contexts.set(canvas, context);
+    }
+    return context;
+  };
+
   // CSS namespace. escape() is real; supports() always says yes.
   // https://drafts.csswg.org/cssom/#the-css.escape()-method
 
@@ -621,7 +811,8 @@
 
   internals.expose({
     Notification, ResizeObserver, ResizeObserverEntry, PerformanceObserver, BroadcastChannel,
-    CloseEvent, WebSocket, EventSource, CSS, SubtleCrypto, PermissionStatus, MediaDevices,
+    CloseEvent, WebSocket, EventSource, Worker, SharedWorker, CanvasRenderingContext2D,
+    CanvasGradient, CanvasPattern, ImageData, TextMetrics, Path2D, CSS, SubtleCrypto, PermissionStatus, MediaDevices,
     NetworkInformation, Plugin, PluginArray, MimeType, MimeTypeArray,
   });
 })

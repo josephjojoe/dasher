@@ -390,6 +390,7 @@ mod window;
 pub use budget::{Budget, WorkLimits, thread_cpu_time};
 pub use clock::ClockMode;
 pub use console::{ConsoleLevel, ConsoleMessage};
+pub use data_url::decode_data_url;
 pub use dom::{DomActivity, HeldNode};
 pub use error::{ErrorKind, ScriptError};
 pub use evaluate::{Evaluation, PendingEvaluation};

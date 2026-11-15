@@ -119,11 +119,60 @@ fn css_crypto_subtle_and_blob_urls() {
         ({ escape: [CSS.escape('a b'), CSS.escape('1x'), CSS.escape('-'), CSS.escape('-2'), CSS.escape('é#')],
            supports: CSS.supports('display', 'grid'), rejected,
            blob: /^blob:https:\/\/example\.com\/[0-9a-f-]{36}$/.test(URL.createObjectURL({})),
-           absent: ['Worker', 'SharedWorker', 'indexedDB', 'caches'].filter((n) => n in globalThis) })
+           absent: ['indexedDB', 'caches'].filter((n) => n in globalThis) })
         "#,
     );
     assert_eq!(
         out,
         r#"{"escape":["a\\ b","\\31 x","\\-","-\\32 ","é\\#"],"supports":true,"rejected":"NotSupportedError","blob":true,"absent":[]}"#
+    );
+}
+
+#[test]
+fn workers_construct_but_never_load() {
+    let js = page();
+    js.run_script(
+        "var log = [];
+         const w = new Worker('/w.js');
+         w.onerror = (e) => log.push(['worker error', e.type, e instanceof ErrorEvent]);
+         w.postMessage({ x: 1 });
+         const t = new Worker('/t.js', { type: 'module' });
+         t.onerror = () => log.push('terminated worker error');
+         t.terminate();
+         const s = new SharedWorker('/s.js');
+         s.addEventListener('error', () => log.push('shared error'));
+         log.push(String(w), typeof s.port.postMessage);
+         try { new Worker('http://[bad'); } catch (e) { log.push(e.name); }",
+        "a.js",
+    )
+    .unwrap();
+    js.run_ready().unwrap();
+    assert_eq!(
+        eval(&js, "log"),
+        r#"["[object Worker]","function","SyntaxError",["worker error","error",false],"shared error"]"#
+    );
+}
+
+#[test]
+fn canvas_2d_contexts_keep_state_and_draw_nothing() {
+    let js = page();
+    let out = eval(
+        &js,
+        r#"
+        const c = document.createElement('canvas');
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#f00'; ctx.font = '20px Arial'; ctx.textBaseline = 'top';
+        ctx.save(); ctx.fillStyle = 'blue'; ctx.restore();
+        ctx.fillRect(0, 0, 10, 10); ctx.fillText('hello', 0, 0); ctx.beginPath(); ctx.arc(1, 1, 1, 0, 6); ctx.fill();
+        const g = ctx.createLinearGradient(0, 0, 1, 1); g.addColorStop(0, 'red');
+        const px = ctx.getImageData(0, 0, 2, 2);
+        [ctx === c.getContext('2d'), ctx.canvas === c, String(ctx), ctx.fillStyle, ctx.textBaseline,
+         ctx.measureText('hello').width, px.width, px.data.length, px.data[0],
+         c.getContext('webgl'), c.toDataURL(), new ImageData(2, 3).data.length, typeof Path2D]
+        "#,
+    );
+    assert_eq!(
+        out,
+        r##"[true,true,"[object CanvasRenderingContext2D]","#f00","top",55.00000000000001,2,16,0,null,"data:,",24,"function"]"##
     );
 }

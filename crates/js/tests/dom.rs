@@ -1358,3 +1358,25 @@ fn file_inputs_have_an_empty_file_list() {
         r#"["function",true,0,null,true,true,true,false,0,"[object FileList]",null,false,"TypeError"]"#
     );
 }
+
+#[test]
+fn xml_serializer_declares_the_namespace() {
+    let js =
+        page("<div id=d class=a>x &amp; <b>y</b><!--c--></div><svg id=s><path d=M0></path></svg>");
+    assert_eq!(
+        eval(
+            &js,
+            "const x = new XMLSerializer();
+             JSON.stringify([x.serializeToString(document.getElementById('d')),
+              x.serializeToString(document.getElementById('s')),
+              x.serializeToString(document.createTextNode('a<b')),
+              x.serializeToString(new DOMParser().parseFromString('<r><i/></r>', 'text/xml')),
+              String(x), (() => { try { x.serializeToString({}); } catch (e) { return e.name; } })()])"
+        ),
+        json(concat!(
+            r#"["<div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"d\" class=\"a\">x &amp; <b>y</b><!--c--></div>","#,
+            r#""<svg xmlns=\"http://www.w3.org/2000/svg\" id=\"s\"><path d=\"M0\"></path></svg>","a&lt;b","#,
+            r#""<r><i></i></r>","[object XMLSerializer]","TypeError"]"#
+        ))
+    );
+}

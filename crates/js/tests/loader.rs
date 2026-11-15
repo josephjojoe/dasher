@@ -144,6 +144,50 @@ fn performance_timing_follows_the_lifecycle() {
 }
 
 #[test]
+fn the_performance_timeline_has_the_navigation_and_user_timing() {
+    use std::time::Duration;
+    let js = page("");
+    js.set_ready_state(ReadyState::Loading);
+    js.advance(Duration::from_millis(30)).unwrap();
+    js.set_ready_state(ReadyState::Interactive);
+    js.fire_event(EventTarget::Document, "DOMContentLoaded", true, false);
+    js.advance(Duration::from_millis(20)).unwrap();
+    js.set_ready_state(ReadyState::Complete);
+    js.fire_event(EventTarget::Window, "load", false, false);
+    assert_eq!(
+        json(
+            &js,
+            "const [nav] = performance.getEntriesByType('navigation');
+             [nav.entryType, nav.name === location.href, nav.startTime, nav.domInteractive,
+              nav.domContentLoadedEventStart, nav.loadEventEnd, nav.duration, nav.type,
+              nav instanceof PerformanceNavigationTiming, nav instanceof PerformanceResourceTiming,
+              nav instanceof PerformanceEntry, String(nav), nav.toJSON().domComplete,
+              performance.getEntriesByType('resource').length]"
+        ),
+        r#"["navigation",true,0,30,30,50,50,"navigate",true,true,true,"[object PerformanceNavigationTiming]",50,0]"#
+    );
+    js.advance(Duration::from_millis(10)).unwrap();
+    assert_eq!(
+        json(
+            &js,
+            "const a = performance.mark('a');
+             const b = performance.mark('b', { startTime: 75, detail: { x: 1 } });
+             const m = performance.measure('a to b', 'a', 'b');
+             const n = performance.measure('since dcl', { start: 'domContentLoadedEventStart', duration: 5 });
+             const o = performance.measure('all');
+             let missing; try { performance.measure('x', 'nope'); } catch (e) { missing = e.name; }
+             const before = performance.getEntries().map(e => e.entryType + ':' + e.name);
+             performance.clearMarks('a');
+             [a.startTime, a.duration, a instanceof PerformanceMark, b.detail.x, m.startTime, m.duration,
+              n.startTime, n.duration, o.duration, missing, before,
+              performance.getEntriesByType('mark').map(e => e.name),
+              performance.getEntriesByName('a to b', 'measure').length]"
+        ),
+        r#"[60,0,true,1,60,15,30,5,60,"SyntaxError",["navigation:https://example.com/page","measure:all","measure:since dcl","mark:a","measure:a to b","mark:b"],["b"],1]"#
+    );
+}
+
+#[test]
 fn lifecycle_events_reach_the_right_targets() {
     let js = page("<p id=p>");
     js.run_script(
@@ -178,12 +222,13 @@ fn script_elements_run_with_current_script_set() {
     js.run_script_element(
         a,
         "globalThis.seen = [document.currentScript.id];
-         Promise.resolve().then(() => seen.push('micro:' + document.currentScript));",
+         Promise.resolve().then(() => seen.push('micro:' + document.currentScript.id));",
         "https://example.com/page",
     )
     .unwrap();
-    // The microtask checkpoint ran after the script, with no current script.
-    assert_eq!(json(&js, "seen"), r#"["a","micro:null"]"#);
+    // The microtask checkpoint ran after the script but before currentScript
+    // was restored, as in HTML ("clean up after running script") and Chrome.
+    assert_eq!(json(&js, "seen"), r#"["a","micro:a"]"#);
     assert_eq!(json(&js, "document.currentScript"), "null");
 
     let error = js
@@ -202,7 +247,7 @@ fn script_elements_run_with_current_script_set() {
             .contains("https://cdn.example.com/b.js")
     );
     assert_eq!(js.take_errors().len(), 1);
-    assert_eq!(json(&js, "seen"), r#"["a","micro:null","b"]"#);
+    assert_eq!(json(&js, "seen"), r#"["a","micro:a","b"]"#);
     assert_eq!(json(&js, "document.currentScript"), "null");
 }
 

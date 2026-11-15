@@ -116,12 +116,22 @@ impl Store {
     }
 
     /// The recorded response for a request, if there is one.
+    ///
+    /// The fragment is never sent, so it plays no part in the match, and the
+    /// response URL keeps the request's fragment as a live response does.
     pub(crate) fn find(&self, method: &Method, url: &Url) -> Option<Recorded> {
+        let mut sent = url.clone();
+        sent.set_fragment(None);
         let meta = self
             .exact
-            .get(&exact_key(method, url))
-            .or_else(|| self.by_path.get(&path_key(method, url)));
-        let found = meta.and_then(|meta| read(meta));
+            .get(&exact_key(method, &sent))
+            .or_else(|| self.by_path.get(&path_key(method, &sent)));
+        let found = meta.and_then(|meta| read(meta)).map(|mut found| {
+            if found.url.fragment().is_none() {
+                found.url.set_fragment(url.fragment());
+            }
+            found
+        });
         if std::env::var_os("DASHER_REPLAY_LOG").is_some() {
             let what = if found.is_some() { "hit" } else { "miss" };
             eprintln!("replay: {what} {method} {url}");
@@ -168,6 +178,9 @@ fn read(meta: &Path) -> Option<Recorded> {
 
 /// Writes one response to the recording directory.
 pub(crate) fn write(dir: &Path, method: &Method, request_url: &Url, recorded: &Recorded) {
+    let mut request_url = request_url.clone();
+    request_url.set_fragment(None);
+    let request_url = &request_url;
     let stem = file_stem(&exact_key(method, request_url));
     let mut meta = format!(
         "{method}\n{request_url}\n{}\n{}\n{}\n",
@@ -191,4 +204,37 @@ pub(crate) fn write(dir: &Path, method: &Method, request_url: &Url, recorded: &R
     }
     let _ = fs::write(dir.join(format!("{stem}.body")), &recorded.body);
     let _ = fs::write(dir.join(format!("{stem}.meta")), meta);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fragment_is_not_matched_and_stays_on_the_response_url() {
+        let dir = std::env::temp_dir().join(format!("dasher-replay-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let page = Url::parse("https://example.com/a?x=1").unwrap();
+        let recorded = Recorded {
+            status: StatusCode::OK,
+            url: page.clone(),
+            redirected: false,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"<p>hi"),
+        };
+        // Recorded while the page's URL had a fragment.
+        let with_fragment = Url::parse("https://example.com/a?x=1#old").unwrap();
+        write(&dir, &Method::GET, &with_fragment, &recorded);
+        let store = Store::load(&dir);
+
+        let reload = Url::parse("https://example.com/a?x=1#sv1rc1").unwrap();
+        let found = store
+            .find(&Method::GET, &reload)
+            .expect("found despite the fragment");
+        assert_eq!(found.url.as_str(), "https://example.com/a?x=1#sv1rc1");
+        let found = store.find(&Method::GET, &page).unwrap();
+        assert_eq!(found.url.as_str(), "https://example.com/a?x=1");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

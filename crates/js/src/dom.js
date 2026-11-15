@@ -2053,6 +2053,17 @@
 
   define(I.HTMLAnchorElement, HYPERLINK);
   define(I.HTMLAreaElement, HYPERLINK);
+  // The rel keywords of a, area and form that change what a browser does
+  // (HTML, "Link types"): what `relList.supports()` answers true for.
+  const ANCHOR_REL = ['noopener', 'noreferrer', 'opener'];
+  // The sandbox keywords Chrome supports, for `iframe.sandbox.supports()`.
+  const IFRAME_SANDBOX = [
+    'allow-downloads', 'allow-forms', 'allow-modals', 'allow-orientation-lock',
+    'allow-pointer-lock', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-presentation',
+    'allow-same-origin', 'allow-scripts', 'allow-storage-access-by-user-activation',
+    'allow-top-navigation', 'allow-top-navigation-by-user-activation',
+    'allow-top-navigation-to-custom-protocols',
+  ];
   const LINK_ATTRS = {
     target: 'string', download: 'string', ping: 'string', rel: 'string', hreflang: 'string',
     type: 'string', referrerPolicy: ['string', 'referrerpolicy'],
@@ -2061,7 +2072,7 @@
   reflect(I.HTMLAreaElement, { ...LINK_ATTRS, alt: 'string', coords: 'string', shape: 'string', noHref: ['bool', 'nohref'] });
   for (const C of [I.HTMLAnchorElement, I.HTMLAreaElement]) {
     define(C, {
-      get relList() { return cached(this, 'relList', () => tokenList(this, 'rel')); },
+      get relList() { return cached(this, 'relList', () => tokenList(this, 'rel', ANCHOR_REL)); },
     });
   }
   define(I.HTMLAnchorElement, {
@@ -2106,7 +2117,7 @@
   define(I.HTMLIFrameElement, {
     get contentWindow() { return null; },
     get contentDocument() { return null; },
-    get sandbox() { return cached(this, 'sandbox', () => tokenList(this, 'sandbox')); },
+    get sandbox() { return cached(this, 'sandbox', () => tokenList(this, 'sandbox', IFRAME_SANDBOX)); },
   });
   reflect(I.HTMLEmbedElement, { src: 'url', type: 'string', width: 'string', height: 'string', name: 'string', align: 'string' });
   reflect(I.HTMLObjectElement, { data: 'url', type: 'string', name: 'string', useMap: ['string', 'usemap'], width: 'string', height: 'string' });
@@ -2161,7 +2172,13 @@
   });
   reflect(I.HTMLCanvasElement, { width: ['ulong', 'width', 300], height: ['ulong', 'height', 150] });
   define(I.HTMLCanvasElement, {
-    getContext() { return null; },
+    getContext(type) {
+      if (arguments.length === 0) {
+        throw new TypeError("Failed to execute 'getContext' on 'HTMLCanvasElement': 1 argument required, but only 0 present.");
+      }
+      // A 2D context that draws nothing (stubs.js); no other kind.
+      return internals.canvasContext(this, type);
+    },
     toDataURL() { return 'data:,'; },
     toBlob(callback) { queueTask(() => callback(null)); },
     captureStream() { throw domException('NotSupportedError', 'Canvas capture is not supported.'); },
@@ -2376,7 +2393,7 @@
       return cached(this, 'elements', () => htmlCollection(this, KIND.selector, LISTED, null, HTMLFormControlsCollection.prototype));
     },
     get length() { return this.elements.length; },
-    get relList() { return cached(this, 'relList', () => tokenList(this, 'rel')); },
+    get relList() { return cached(this, 'relList', () => tokenList(this, 'rel', ANCHOR_REL)); },
     get action() {
       const v = N.getAttr(this, 'action');
       return v === null || v === '' ? internals.documentURL() : resolveURL(v);
@@ -4395,6 +4412,45 @@
   }
   tag(DOMParser, 'DOMParser');
 
+  // XMLSerializer, close to the XML serialization: the HTML serializer's
+  // markup, with the namespace declared on the outermost element. Void
+  // elements are not self-closed.
+  // https://w3c.github.io/DOM-Parsing/#the-xmlserializer-interface
+  const escapeXmlText = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  function serializeXml(node) {
+    switch (node.nodeType) {
+      case 1: {
+        const html = node.outerHTML;
+        const ns = node.namespaceURI;
+        if (ns === null || node.hasAttribute('xmlns')) return html;
+        const end = html.search(/[\s/>]/);
+        return html.slice(0, end) + ' xmlns="' + ns + '"' + html.slice(end);
+      }
+      case 3: return escapeXmlText(node.data);
+      case 4: return '<![CDATA[' + node.data + ']]>';
+      case 7: return '<?' + node.target + ' ' + node.data + '?>';
+      case 8: return '<!--' + node.data + '-->';
+      case 9: case 11: {
+        let out = '';
+        for (let c = node.firstChild; c !== null; c = c.nextSibling) out += serializeXml(c);
+        return out;
+      }
+      case 10: return '<!DOCTYPE ' + node.name + (node.publicId ? ' PUBLIC "' + node.publicId + '"' : '') +
+        (node.systemId ? (node.publicId ? '' : ' SYSTEM') + ' "' + node.systemId + '"' : '') + '>';
+      default: return '';
+    }
+  }
+  class XMLSerializer {
+    serializeToString(node) {
+      requireArgs(arguments, 1, "'serializeToString' on 'XMLSerializer'");
+      if (!(node instanceof Node)) {
+        throw new TypeError("Failed to execute 'serializeToString' on 'XMLSerializer': parameter 1 is not of type 'Node'.");
+      }
+      return serializeXml(node);
+    }
+  }
+  tag(XMLSerializer, 'XMLSerializer');
+
   // document.fonts: every font counts as loaded.
   class FontFaceSet extends EventTarget {
     constructor(key) {
@@ -4569,7 +4625,7 @@
     DocumentFragment, ShadowRoot, Attr, NamedNodeMap, DOMTokenList, DOMStringMap,
     CSSStyleDeclaration, CSSStyleSheet, CSSRule, StyleSheetList, Element, HTMLElement, SVGElement,
     SVGGraphicsElement, SVGSVGElement, MathMLElement, Document, HTMLDocument, XMLDocument,
-    DOMImplementation, DOMParser, FontFaceSet, DOMRect, DOMRectReadOnly, DOMRectList, TreeWalker,
+    DOMImplementation, DOMParser, XMLSerializer, FontFaceSet, DOMRect, DOMRectReadOnly, DOMRectList, TreeWalker,
     NodeIterator, NodeFilter, Range, Image, Audio, Option, getComputedStyle, ...I, ...uiEvents,
   });
   defineProperty(globalThis, 'document', { get: () => documentNode, enumerable: true, configurable: false });

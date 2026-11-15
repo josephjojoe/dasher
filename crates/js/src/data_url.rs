@@ -11,6 +11,12 @@ pub(crate) struct DataUrl {
     pub(crate) body: Vec<u8>,
 }
 
+/// Decodes the `data:` URL `url` into its MIME type and body, for hosts
+/// that load classic scripts from one. `None` if it is not a valid one.
+pub fn decode_data_url(url: &str) -> Option<(String, Vec<u8>)> {
+    parse(url).map(|data| (data.mime_type, data.body))
+}
+
 /// Decodes `url`, the full serialized URL including the `data:` scheme.
 /// Returns `None` if it is not a valid `data:` URL.
 pub(crate) fn parse(url: &str) -> Option<DataUrl> {

@@ -392,12 +392,20 @@ impl Scripts {
 }
 
 /// Fetches and decodes a classic script. Responses that are not `ok` fail,
-/// as in browsers, rather than running an error page as script.
+/// as in browsers, rather than running an error page as script. A `data:`
+/// URL is decoded on the spot, as browsers do (Instagram loads its
+/// bootstrap scripts that way).
 async fn fetch(
     session: &Session,
     request: Request,
     fallback: &'static Encoding,
 ) -> Result<String, String> {
+    if request.url.scheme() == "data" {
+        let (mime, body) = dasher_js::decode_data_url(request.url.as_str())
+            .ok_or_else(|| String::from("invalid data: URL"))?;
+        let encoding = charset::from_content_type(&mime).unwrap_or(fallback);
+        return Ok(charset::decode_script(&body, encoding));
+    }
     let response = session.send(request).await.map_err(|e| e.to_string())?;
     let status = response.status();
     if !status.is_success() {

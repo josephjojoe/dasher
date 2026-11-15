@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use dasher_dom::NodeId;
-use rquickjs::{Ctx, Function, JsLifetime, Object, Value};
+use rquickjs::{Ctx, Function, JsLifetime, Object, Persistent, Value};
 
 use crate::dom::{self, HeldNode};
 use crate::error::ScriptError;
@@ -384,7 +384,7 @@ impl JsRuntime {
 
     /// Runs the classic script `source` for the script element `element`,
     /// as a task followed by a microtask checkpoint, with
-    /// `document.currentScript` set to the element while it runs.
+    /// `document.currentScript` set to the element while both run.
     ///
     /// `url` is the script's URL (the document's, for an inline script),
     /// used as the file name in stack traces and error events. Errors are
@@ -395,10 +395,12 @@ impl JsRuntime {
         source: &str,
         url: &str,
     ) -> Result<(), ScriptError> {
+        let mut previous = None;
         let result = self.run_task(|ctx| {
             let hooks = LoaderHooks::get(ctx)?;
             let script = dom::wrap(ctx, &self.shared().dom, element)?;
-            let previous: Value<'_> = hooks.set_current_script.call((script,))?;
+            let old: Value<'_> = hooks.set_current_script.call((script,))?;
+            previous = Some(Persistent::save(ctx, old));
             let origin = if self.shared().dom.doc().has_attribute(element, "src") {
                 Origin::External
             } else {
@@ -406,14 +408,23 @@ impl JsRuntime {
             };
             let result = self.eval_classic(ctx, source, url, origin);
             // Take the exception off the context before calling back into JS.
-            let thrown = result.is_err().then(|| ctx.catch());
-            hooks.set_current_script.call::<_, ()>((previous,))?;
-            match thrown {
+            match result.is_err().then(|| ctx.catch()) {
                 Some(exception) => Err(ctx.throw(exception)),
                 None => Ok(()),
             }
         });
+        // HTML's "clean up after running script" performs the microtask
+        // checkpoint before "execute the script element" restores
+        // currentScript, so promise jobs the script queued still see it.
+        // Turbopack's chunk loader (Next.js) reads it after an `await`.
         self.perform_microtask_checkpoint();
+        if let Some(previous) = previous {
+            self.with(|ctx| {
+                if let (Ok(hooks), Ok(old)) = (LoaderHooks::get(&ctx), previous.restore(&ctx)) {
+                    let _ = hooks.set_current_script.call::<_, ()>((old,));
+                }
+            });
+        }
         result
     }
 

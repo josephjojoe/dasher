@@ -262,6 +262,31 @@ fn token_list_api() {
 }
 
 #[test]
+fn rel_lists_and_sandbox_answer_supports() {
+    // Chrome answers `supports` on the relList of a, area and form (with
+    // the rel keywords that change what it does) and on iframe.sandbox
+    // instead of throwing; reCAPTCHA asks the sandbox on many pages.
+    let js = page("<a id=a rel='noopener nofollow'></a><form id=f></form>");
+    let out = eval(
+        &js,
+        r#"
+        const a = document.getElementById('a').relList;
+        const f = document.getElementById('f').relList;
+        const area = document.createElement('area').relList;
+        [a.supports('noopener'), a.supports('NoReferrer'), a.supports('nofollow'), a.contains('nofollow'),
+         f.supports('opener'), f.supports('stylesheet'), area.supports('noreferrer'),
+         document.createElement('link').relList.supports('preload'),
+         document.createElement('iframe').sandbox.supports('allow-scripts'),
+         document.createElement('iframe').sandbox.supports('allow-everything')]
+        "#,
+    );
+    assert_eq!(
+        out,
+        "[true,true,false,true,true,false,true,true,true,false]"
+    );
+}
+
+#[test]
 fn dataset_api() {
     // The parser lower-cases `data-Upper`; `d['user-id']` reads
     // `data-user-id` as the JS version did.

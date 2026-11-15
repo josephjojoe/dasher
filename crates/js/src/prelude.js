@@ -255,7 +255,6 @@
 
   const timeOrigin = native.timeOrigin;
   const pageNow = native.now;
-  const empty = () => [];
   const noop = () => undefined;
 
   // Navigation Timing Level 1, which pages still read for their own load
@@ -330,6 +329,116 @@
     { TYPE_NAVIGATE: 0, TYPE_RELOAD: 1, TYPE_BACK_FORWARD: 2, TYPE_RESERVED: 255 },
   );
 
+  // The performance timeline: one navigation entry, and the marks and
+  // measures the page makes. No resource, paint or other entries.
+  // https://w3c.github.io/user-timing/ and https://w3c.github.io/navigation-timing/
+  const relative = (index) => {
+    const at = native.loader.milestones()[index];
+    return at < 0 ? 0 : at;
+  };
+  const entryInterface = (name, parent) => {
+    const ctor = {
+      [name]: function (key) {
+        if (key !== TIMING_KEY) throw new TypeError('Illegal constructor');
+      },
+    }[name];
+    if (parent) Object.setPrototypeOf(ctor.prototype, parent.prototype);
+    Object.defineProperty(ctor.prototype, Symbol.toStringTag, { value: name, configurable: true });
+    Object.defineProperty(globalThis, name, { value: ctor, writable: true, configurable: true });
+    return ctor;
+  };
+  const PerformanceEntry = entryInterface('PerformanceEntry');
+  const PerformanceResourceTiming = entryInterface('PerformanceResourceTiming', PerformanceEntry);
+  const PerformanceNavigationTiming = entryInterface('PerformanceNavigationTiming', PerformanceResourceTiming);
+  const PerformanceMark = entryInterface('PerformanceMark', PerformanceEntry);
+  const PerformanceMeasure = entryInterface('PerformanceMeasure', PerformanceEntry);
+  Object.defineProperty(PerformanceEntry.prototype, 'toJSON', {
+    value: function toJSON() {
+      const json = {};
+      for (const key in this) if (typeof this[key] !== 'function') json[key] = this[key];
+      return json;
+    },
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  const NAVIGATION_ENTRY = {
+    name: () => String(globalThis.location?.href ?? ''),
+    entryType: () => 'navigation',
+    startTime: () => 0,
+    duration: () => relative(5),
+    initiatorType: () => 'navigation',
+    nextHopProtocol: () => 'h2',
+    renderBlockingStatus: () => 'non-blocking',
+    workerStart: () => 0,
+    redirectStart: () => 0,
+    redirectEnd: () => 0,
+    fetchStart: () => 0,
+    domainLookupStart: () => 0,
+    domainLookupEnd: () => 0,
+    connectStart: () => 0,
+    connectEnd: () => 0,
+    secureConnectionStart: () => 0,
+    requestStart: () => 0,
+    responseStart: () => 0,
+    responseEnd: () => 0,
+    transferSize: () => 0,
+    encodedBodySize: () => 0,
+    decodedBodySize: () => 0,
+    responseStatus: () => 200,
+    unloadEventStart: () => 0,
+    unloadEventEnd: () => 0,
+    domInteractive: () => relative(0),
+    domContentLoadedEventStart: () => relative(1),
+    domContentLoadedEventEnd: () => relative(2),
+    domComplete: () => relative(3),
+    loadEventStart: () => relative(4),
+    loadEventEnd: () => relative(5),
+    type: () => 'navigate',
+    redirectCount: () => 0,
+    serverTiming: () => [],
+  };
+  for (const key of Object.keys(NAVIGATION_ENTRY)) {
+    Object.defineProperty(PerformanceNavigationTiming.prototype, key, {
+      get: NAVIGATION_ENTRY[key],
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  const navigationEntry = new PerformanceNavigationTiming(TIMING_KEY);
+  // Marks and measures, in the order made (the spec's buffer is unbounded).
+  const userTiming = [];
+  const userEntry = (ctor, type, name, startTime, duration, detail) => {
+    const entry = new ctor(TIMING_KEY);
+    for (const [key, value] of [['name', name], ['entryType', type], ['startTime', startTime],
+      ['duration', duration], ['detail', detail === undefined ? null : detail]]) {
+      Object.defineProperty(entry, key, { value, enumerable: true });
+    }
+    return entry;
+  };
+  const markTime = (value, what) => {
+    if (typeof value === 'number') return value;
+    for (let i = userTiming.length - 1; i >= 0; i--) {
+      if (userTiming[i].entryType === 'mark' && userTiming[i].name === value) return userTiming[i].startTime;
+    }
+    if (Object.prototype.hasOwnProperty.call(TIMING, value) && value !== 'navigationStart') {
+      return Math.max(0, timing[value] - navigationStart);
+    }
+    if (value === 'navigationStart') return 0;
+    throw new SyntaxError("Failed to execute '" + what + "' on 'Performance': The mark '" + value + "' does not exist.");
+  };
+  const entries = (type, name) => {
+    const all = [navigationEntry, ...userTiming].filter((e) =>
+      (type === undefined || e.entryType === type) && (name === undefined || e.name === name));
+    return all.sort((a, b) => a.startTime - b.startTime);
+  };
+  const clear = (type) => function (name) {
+    for (let i = userTiming.length - 1; i >= 0; i--) {
+      const e = userTiming[i];
+      if (e.entryType === type && (name === undefined || e.name === String(name))) userTiming.splice(i, 1);
+    }
+  };
+
   globalThis.performance = {
     now() {
       return pageNow();
@@ -346,14 +455,45 @@
     toJSON() {
       return { timeOrigin, timing: timing.toJSON(), navigation: navigation.toJSON() };
     },
-    mark: noop,
-    measure: noop,
-    clearMarks: noop,
-    clearMeasures: noop,
+    mark(name, options) {
+      if (arguments.length === 0) {
+        throw new TypeError("Failed to execute 'mark' on 'Performance': 1 argument required, but only 0 present.");
+      }
+      const start = options && options.startTime !== undefined ? Number(options.startTime) : pageNow();
+      const entry = userEntry(PerformanceMark, 'mark', String(name), start, 0, options && options.detail);
+      userTiming.push(entry);
+      return entry;
+    },
+    measure(name, start, end) {
+      if (arguments.length === 0) {
+        throw new TypeError("Failed to execute 'measure' on 'Performance': 1 argument required, but only 0 present.");
+      }
+      let detail;
+      let from = 0;
+      let to = pageNow();
+      if (start !== null && typeof start === 'object') {
+        detail = start.detail;
+        if (start.start !== undefined) from = markTime(start.start, 'measure');
+        if (start.end !== undefined) to = markTime(start.end, 'measure');
+        if (start.duration !== undefined) {
+          if (start.start !== undefined) to = from + Number(start.duration);
+          else from = to - Number(start.duration);
+        }
+      } else {
+        if (start !== undefined) from = markTime(String(start), 'measure');
+        if (end !== undefined) to = markTime(String(end), 'measure');
+      }
+      const entry = userEntry(PerformanceMeasure, 'measure', String(name), from, to - from, detail);
+      userTiming.push(entry);
+      return entry;
+    },
+    clearMarks: clear('mark'),
+    clearMeasures: clear('measure'),
     clearResourceTimings: noop,
-    getEntries: empty,
-    getEntriesByName: empty,
-    getEntriesByType: empty,
+    setResourceTimingBufferSize: noop,
+    getEntries: () => entries(),
+    getEntriesByName: (name, type) => entries(type === undefined ? undefined : String(type), String(name)),
+    getEntriesByType: (type) => entries(String(type)),
   };
 
   const NativeDate = Date;
