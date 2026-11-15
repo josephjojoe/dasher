@@ -75,7 +75,23 @@ fn main_stack_top() -> Option<usize> {
     usize::from_str_radix(end, 16).ok()
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The lowest address of the current thread's stack.
+#[cfg(target_os = "macos")]
+fn stack_low() -> Option<usize> {
+    // SAFETY: these read the calling thread's own record and the page
+    // size, and cannot fail.
+    unsafe {
+        let thread = libc::pthread_self();
+        // The address is the high end of the stack, and the size may
+        // count the guard page at the low end.
+        let top = libc::pthread_get_stackaddr_np(thread) as usize;
+        let page = usize::try_from(libc::sysconf(libc::_SC_PAGESIZE)).ok()?;
+        top.checked_sub(libc::pthread_get_stacksize_np(thread))?
+            .checked_add(page)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn stack_low() -> Option<usize> {
     None
 }
@@ -95,6 +111,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn a_spawned_thread_reports_its_stack() {
         let room = std::thread::Builder::new()
             .stack_size(4 * 1024 * 1024)
@@ -102,7 +119,7 @@ mod tests {
             .unwrap()
             .join()
             .unwrap()
-            .expect("known on Linux");
+            .expect("known on Linux and macOS");
         assert!((3 * 1024 * 1024..4 * 1024 * 1024).contains(&room), "{room}");
         let small = std::thread::Builder::new()
             .stack_size(512 * 1024)
