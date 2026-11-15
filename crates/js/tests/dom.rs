@@ -93,6 +93,23 @@ fn svg_scripts_and_styles_have_their_interfaces() {
     );
 }
 
+/// Nothing animates, so there are no animations to list, but components
+/// ask their shadow root for them after every update (number-flow does).
+#[test]
+fn documents_and_shadow_roots_list_no_animations() {
+    let js = page("<div id=host></div>");
+    let out = eval(
+        &js,
+        r#"
+        const root = document.getElementById('host').attachShadow({ mode: 'open' });
+        root.innerHTML = '<span>1</span>';
+        [root.getAnimations(), document.getAnimations(), root.firstChild.getAnimations(),
+         root.getAnimations().map((a) => a.finished).length]
+        "#,
+    );
+    assert_eq!(out, "[[],[],[],0]");
+}
+
 #[test]
 fn wrappers_keep_their_identity_and_expandos() {
     let js = page("<ul><li>1</li><li>2</li></ul>");

@@ -694,6 +694,9 @@
     set adoptedStyleSheets(v) {
       state(this).adoptedStyleSheets = Array.from(v);
     }
+    getAnimations() {
+      return [];
+    }
     elementFromPoint() {
       return null;
     }
@@ -4247,6 +4250,9 @@
     }
     set adoptedStyleSheets(v) {
       state(this).adoptedStyleSheets = Array.from(v);
+    }
+    getAnimations() {
+      return [];
     }
     get fonts() {
       return fonts;
