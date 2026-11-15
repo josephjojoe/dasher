@@ -194,12 +194,19 @@ where
         Encoding::Deflate if zlib => Box::pin(ZlibDecoder::new(reader)),
         Encoding::Deflate => Box::pin(DeflateDecoder::new(reader)),
         Encoding::Brotli => Box::pin(BrotliDecoder::new(reader)),
-        Encoding::Zstd => Box::pin(ZstdDecoder::with_params(
-            reader,
-            &[async_compression::zstd::DParameter::window_log_max(
-                ZSTD_WINDOW_LOG_MAX,
-            )],
-        )),
+        Encoding::Zstd => {
+            let mut decoder = ZstdDecoder::with_params(
+                reader,
+                &[async_compression::zstd::DParameter::window_log_max(
+                    ZSTD_WINDOW_LOG_MAX,
+                )],
+            );
+            // A zstd body may be several frames back to back (RFC 8878,
+            // section 3.1), which servers that flush early do send; without
+            // this the body would end at the first frame.
+            decoder.multiple_members(true);
+            Box::pin(decoder)
+        }
     }
 }
 

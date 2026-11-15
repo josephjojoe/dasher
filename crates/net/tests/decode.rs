@@ -119,6 +119,41 @@ async fn decodes_stacked_encodings() {
     assert!(response.bytes().await.unwrap() == original);
 }
 
+/// A zstd body may be several frames back to back (RFC 8878 section 3.1):
+/// servers that flush early send the head of the page as its own frame, and
+/// some start with an empty one.
+#[tokio::test]
+async fn decodes_concatenated_zstd_frames() {
+    let original = sample(120_000);
+    let (head, tail) = original.split_at(500);
+    let mut encoded = encode(Codec::Zstd, b"").await;
+    encoded.extend(encode(Codec::Zstd, head).await);
+    encoded.extend(encode(Codec::Zstd, tail).await);
+    let server = serve("/page", "zstd", encoded);
+    let session = Client::new().unwrap().session();
+    let response = session
+        .get(url(&server, "/page"), ResourceType::Document)
+        .await
+        .unwrap();
+    assert!(response.bytes().await.unwrap() == original);
+    assert_eq!(session.activity().in_flight(), 0);
+}
+
+/// The window limit holds for every frame, not only the first.
+#[tokio::test]
+async fn refuses_oversized_zstd_windows_in_later_frames() {
+    let mut encoded = encode(Codec::Zstd, b"<p>ok</p>").await;
+    encoded.extend(encode(Codec::ZstdHugeWindow, &sample(10_000)).await);
+    let server = serve("/page", "zstd", encoded);
+    let session = Client::new().unwrap().session();
+    let response = session
+        .get(url(&server, "/page"), ResourceType::Document)
+        .await
+        .unwrap();
+    let error = response.bytes().await.unwrap_err();
+    assert_eq!(error.kind(), &ErrorKind::Decode);
+}
+
 #[tokio::test]
 async fn limits_the_decoded_size() {
     // About 10 KB of gzip that inflates to 10 MB.
