@@ -33,7 +33,8 @@
 //                                   close, as if the server were unreachable.
 //   Worker, SharedWorker            Constructed, but the script never loads:
 //                                   an error event; messages go nowhere.
-//   canvas.getContext('2d'),        A CanvasRenderingContext2D that keeps its
+//   canvas.getContext('2d') on a    A CanvasRenderingContext2D that keeps its
+//   canvas in the document,
 //   OffscreenCanvas
 //                                   state and draws nothing; reads give
 //                                   transparent pixels.
@@ -730,8 +731,15 @@
   tag(CanvasRenderingContext2D, 'CanvasRenderingContext2D');
   const contexts = new WeakMap();
   // HTMLCanvasElement's getContext (in dom.js, which runs later) asks here.
+  //
+  // Only a canvas in the document, or an OffscreenCanvas, gets one. Pages
+  // draw on those; a canvas made and never inserted is a probe:
+  // fingerprinting and bot-detection scripts (Castle, PerimeterX) and
+  // feature checks (Lottie's image preloader) take their expensive paths
+  // when it works, and cost several CPU seconds a page for no content.
   internals.canvasContext = function canvasContext(canvas, type) {
     if (String(type) !== '2d') return null;
+    if (!(canvas instanceof OffscreenCanvas) && !canvas.isConnected) return null;
     let context = contexts.get(canvas);
     if (context === undefined) {
       context = new CanvasRenderingContext2D(KEY, canvas);

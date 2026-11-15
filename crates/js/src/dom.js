@@ -1310,6 +1310,10 @@
     get part() {
       return cached(this, 'part', () => tokenList(this, 'part'));
     }
+    // [PutForwards=value], as for the other token lists below.
+    set part(value) {
+      N.setAttr(this, 'part', str(value));
+    }
     get attributes() {
       return nativeMember();
     }
@@ -1978,7 +1982,9 @@
   });
   define(I.HTMLLinkElement, {
     get relList() { return cached(this, 'relList', () => tokenList(this, 'rel', ['alternate', 'dns-prefetch', 'icon', 'manifest', 'modulepreload', 'next', 'preconnect', 'prefetch', 'preload', 'prerender', 'search', 'stylesheet'])); },
+    set relList(value) { N.setAttr(this, 'rel', str(value)); },
     get sizes() { return cached(this, 'sizes', () => tokenList(this, 'sizes')); },
+    set sizes(value) { N.setAttr(this, 'sizes', str(value)); },
     get sheet() { return styleSheetFor(this); },
   });
   reflect(I.HTMLMetaElement, { name: 'string', content: 'string', httpEquiv: ['string', 'http-equiv'], media: 'string', scheme: 'string' });
@@ -2073,6 +2079,7 @@
   for (const C of [I.HTMLAnchorElement, I.HTMLAreaElement]) {
     define(C, {
       get relList() { return cached(this, 'relList', () => tokenList(this, 'rel', ANCHOR_REL)); },
+      set relList(value) { N.setAttr(this, 'rel', str(value)); },
     });
   }
   define(I.HTMLAnchorElement, {
@@ -2118,6 +2125,7 @@
     get contentWindow() { return null; },
     get contentDocument() { return null; },
     get sandbox() { return cached(this, 'sandbox', () => tokenList(this, 'sandbox', IFRAME_SANDBOX)); },
+    set sandbox(value) { N.setAttr(this, 'sandbox', str(value)); },
   });
   reflect(I.HTMLEmbedElement, { src: 'url', type: 'string', width: 'string', height: 'string', name: 'string', align: 'string' });
   reflect(I.HTMLObjectElement, { data: 'url', type: 'string', name: 'string', useMap: ['string', 'usemap'], width: 'string', height: 'string' });
@@ -2132,6 +2140,27 @@
     src: 'url', crossOrigin: ['nullable', 'crossorigin'], preload: 'string', autoplay: 'bool', loop: 'bool',
     controls: 'bool', defaultMuted: ['bool', 'muted'],
   });
+  // The track lists of a media element: always empty, but event targets
+  // as in browsers (media players listen for `change` on them).
+  const trackList = (name) => {
+    const C = {
+      [name]: class extends EventTarget {
+        constructor(key) {
+          illegal(key);
+          super();
+        }
+        get length() { return 0; }
+        getTrackById() { return null; }
+        [Symbol.iterator]() { return [][Symbol.iterator](); }
+      },
+    }[name];
+    tag(C, name);
+    internals.defineEventHandlers(C.prototype, ['onchange', 'onaddtrack', 'onremovetrack']);
+    return C;
+  };
+  const TextTrackList = trackList('TextTrackList');
+  const AudioTrackList = trackList('AudioTrackList');
+  const VideoTrackList = trackList('VideoTrackList');
   define(I.HTMLMediaElement, {
     get currentSrc() { return this.src; },
     get networkState() { return 0; },
@@ -2153,7 +2182,9 @@
     get played() { return { length: 0, start() { return 0; }, end() { return 0; } }; },
     get seekable() { return { length: 0, start() { return 0; }, end() { return 0; } }; },
     get error() { return null; },
-    get textTracks() { return []; },
+    get textTracks() { return cached(this, 'textTracks', () => new TextTrackList(KEY)); },
+    get audioTracks() { return cached(this, 'audioTracks', () => new AudioTrackList(KEY)); },
+    get videoTracks() { return cached(this, 'videoTracks', () => new VideoTrackList(KEY)); },
     load() {},
     play() {
       state(this).paused = false;
@@ -2394,6 +2425,7 @@
     },
     get length() { return this.elements.length; },
     get relList() { return cached(this, 'relList', () => tokenList(this, 'rel', ANCHOR_REL)); },
+    set relList(value) { N.setAttr(this, 'rel', str(value)); },
     get action() {
       const v = N.getAttr(this, 'action');
       return v === null || v === '' ? internals.documentURL() : resolveURL(v);
@@ -2771,6 +2803,7 @@
     get defaultValue() { const s = state(this); return s.defaultValue !== undefined ? s.defaultValue : N.textContent(this); },
     set defaultValue(v) { state(this).defaultValue = str(v); },
     get htmlFor() { return cached(this, 'htmlFor', () => tokenList(this, 'for')); },
+    set htmlFor(value) { N.setAttr(this, 'for', str(value)); },
   });
   reflect(I.HTMLOutputElement, { name: 'string' });
   define(I.HTMLFieldSetElement, FORM_CONTROL);
@@ -4695,7 +4728,8 @@
     DocumentFragment, ShadowRoot, Attr, NamedNodeMap, DOMTokenList, DOMStringMap,
     CSSStyleDeclaration, CSSStyleSheet, CSSRule, StyleSheetList, Element, HTMLElement, SVGElement,
     SVGGraphicsElement, SVGSVGElement, MathMLElement, Document, HTMLDocument, XMLDocument,
-    DOMImplementation, DOMParser, XMLSerializer, FontFaceSet, DOMRect, DOMRectReadOnly, DOMRectList, TreeWalker,
+    DOMImplementation, DOMParser, XMLSerializer, FontFaceSet, TextTrackList, AudioTrackList,
+    VideoTrackList, DOMRect, DOMRectReadOnly, DOMRectList, TreeWalker,
     NodeIterator, NodeFilter, Range, Image, Audio, Option, getComputedStyle, ...I, ...uiEvents,
   });
   defineProperty(globalThis, 'document', { get: () => documentNode, enumerable: true, configurable: false });

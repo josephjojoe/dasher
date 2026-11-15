@@ -510,3 +510,27 @@ fn inserted_css_rules_have_a_style() {
         r#"[":host","1px","important",2,"display",":host { --X-y: 1px !important; display: inline-flex; }",true,true,"inline-flex","--X-y: 1px !important;",":host { margin: 0; }"]"#
     );
 }
+
+#[test]
+fn token_list_properties_forward_assignments_to_their_attribute() {
+    // [PutForwards=value]: `el.part = 'a b'` sets the attribute (a
+    // number-flow component builds its spans with Object.assign).
+    let js = page("<a id=a></a><iframe id=f></iframe>");
+    let out = eval(
+        &js,
+        r#"
+        'use strict';
+        const s = Object.assign(document.createElement('span'), { part: 'digit x', className: 'c' });
+        const a = document.getElementById('a'), f = document.getElementById('f');
+        a.relList = 'noopener nofollow';
+        f.sandbox = 'allow-scripts';
+        const l = document.createElement('link'); l.relList = 'preload'; l.sizes = '16x16';
+        [s.getAttribute('part'), s.part.length, a.getAttribute('rel'), a.relList.length,
+         f.getAttribute('sandbox'), l.rel, l.getAttribute('sizes')]
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"["digit x",2,"noopener nofollow",2,"allow-scripts","preload","16x16"]"#
+    );
+}

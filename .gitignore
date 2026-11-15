@@ -1,3 +1,5 @@
 /target
 **/*.rs.bk
 .DS_Store
+/crates/bench/compare/rus
+__pycache__/

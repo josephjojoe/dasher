@@ -1380,3 +1380,21 @@ fn xml_serializer_declares_the_namespace() {
         ))
     );
 }
+
+#[test]
+fn media_track_lists_are_empty_event_targets() {
+    let js = page("<video id=v></video>");
+    assert_eq!(
+        eval(
+            &js,
+            "const v = document.getElementById('v');
+             let changed = 0;
+             v.textTracks.addEventListener('change', () => changed++);
+             v.textTracks.dispatchEvent(new Event('change'));
+             JSON.stringify([v.textTracks === v.textTracks, v.textTracks.length, [...v.textTracks].length,
+               String(v.textTracks), v.audioTracks.length, v.videoTracks.getTrackById('x'),
+               v.textTracks instanceof EventTarget, changed, Array.from(v.textTracks).length])"
+        ),
+        json(r#"[true,0,0,"[object TextTrackList]",0,null,true,1,0]"#)
+    );
+}

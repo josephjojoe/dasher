@@ -42,5 +42,5 @@ view, where `querySelector` and `innerHTML` stop at shadow roots.
 | iframes | Not loaded |
 | Workers | `Worker` and `SharedWorker` can be constructed, but the worker's script never loads: an `error` event follows and messages go nowhere |
 | Service workers, `indexedDB`, `caches`, WebAssembly | Absent, so feature detection takes its fallback path. Sites that refuse to run without them show their fallback: duolingo.com redirects to its "browser not supported" page for lack of WebAssembly |
-| Canvas drawing | `getContext('2d')` (on `<canvas>` and `OffscreenCanvas`) returns a context that keeps its state and draws nothing; `getImageData` reads transparent pixels and `measureText` estimates widths from the font size. WebGL contexts are `null` |
+| Canvas drawing | `getContext('2d')` on a `<canvas>` in the document, or on an `OffscreenCanvas`, returns a context that keeps its state and draws nothing; `getImageData` reads transparent pixels and `measureText` estimates widths from the font size. A canvas never inserted gets `null`, as WebGL contexts always do: fingerprinting and bot-detection scripts probe with those and spend seconds of CPU when the probe works. Lottie probes that way too, so a page that needs Lottie to start (mongodb.com) renders nothing |
 | WebSocket, EventSource | Present but always fail to connect |
