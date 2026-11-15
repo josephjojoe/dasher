@@ -262,10 +262,10 @@ fn token_list_api() {
 }
 
 #[test]
-fn rel_lists_and_sandbox_answer_supports() {
+fn rel_lists_answer_supports() {
     // Chrome answers `supports` on the relList of a, area and form (with
-    // the rel keywords that change what it does) and on iframe.sandbox
-    // instead of throwing; reCAPTCHA asks the sandbox on many pages.
+    // the rel keywords that change what it does) instead of throwing.
+    // iframe.sandbox deliberately still throws (see dom.js).
     let js = page("<a id=a rel='noopener nofollow'></a><form id=f></form>");
     let out = eval(
         &js,
@@ -276,13 +276,13 @@ fn rel_lists_and_sandbox_answer_supports() {
         [a.supports('noopener'), a.supports('NoReferrer'), a.supports('nofollow'), a.contains('nofollow'),
          f.supports('opener'), f.supports('stylesheet'), area.supports('noreferrer'),
          document.createElement('link').relList.supports('preload'),
-         document.createElement('iframe').sandbox.supports('allow-scripts'),
-         document.createElement('iframe').sandbox.supports('allow-everything')]
+         (() => { try { return document.createElement('iframe').sandbox.supports('allow-scripts'); }
+                  catch (e) { return e.name; } })()]
         "#,
     );
     assert_eq!(
         out,
-        "[true,true,false,true,true,false,true,true,true,false]"
+        r#"[true,true,false,true,true,false,true,true,"TypeError"]"#
     );
 }
 

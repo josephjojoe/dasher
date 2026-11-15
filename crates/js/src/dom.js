@@ -2062,14 +2062,6 @@
   // The rel keywords of a, area and form that change what a browser does
   // (HTML, "Link types"): what `relList.supports()` answers true for.
   const ANCHOR_REL = ['noopener', 'noreferrer', 'opener'];
-  // The sandbox keywords Chrome supports, for `iframe.sandbox.supports()`.
-  const IFRAME_SANDBOX = [
-    'allow-downloads', 'allow-forms', 'allow-modals', 'allow-orientation-lock',
-    'allow-pointer-lock', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-presentation',
-    'allow-same-origin', 'allow-scripts', 'allow-storage-access-by-user-activation',
-    'allow-top-navigation', 'allow-top-navigation-by-user-activation',
-    'allow-top-navigation-to-custom-protocols',
-  ];
   const LINK_ATTRS = {
     target: 'string', download: 'string', ping: 'string', rel: 'string', hreflang: 'string',
     type: 'string', referrerPolicy: ['string', 'referrerpolicy'],
@@ -2124,7 +2116,11 @@
   define(I.HTMLIFrameElement, {
     get contentWindow() { return null; },
     get contentDocument() { return null; },
-    get sandbox() { return cached(this, 'sandbox', () => tokenList(this, 'sandbox', IFRAME_SANDBOX)); },
+    // No supported tokens, so `sandbox.supports()` throws, unlike Chrome's:
+    // answering it lets Google Publisher Tag render ads in SafeFrames,
+    // which cost timesofindia.com 3.2 CPU s and 70 MiB of peak memory for
+    // the same text. See COMPATIBILITY.md.
+    get sandbox() { return cached(this, 'sandbox', () => tokenList(this, 'sandbox')); },
     set sandbox(value) { N.setAttr(this, 'sandbox', str(value)); },
   });
   reflect(I.HTMLEmbedElement, { src: 'url', type: 'string', width: 'string', height: 'string', name: 'string', align: 'string' });

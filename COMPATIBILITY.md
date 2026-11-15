@@ -38,6 +38,7 @@ view, where `querySelector` and `innerHTML` stop at shadow roots.
 | `crypto.subtle` beyond `digest()` | Every other method rejects with `NotSupportedError` |
 | `Intl.Segmenter`, `Intl.DisplayNames`; locales other than en-US | Both are undefined; every locale formats as en-US. `Intl.Locale` has no `getWeekInfo()`, `getTextInfo()` or the other `get…()` methods, and `maximize()` and `minimize()` leave all but about fifty languages as they are |
 | Performance timeline beyond navigation and user timing | `getEntries…()` list one `navigation` entry and the page's marks and measures; there are no `resource`, `paint` or other entries, and `PerformanceObserver` never calls back. `performance.timing` and the navigation entry time the document's stages (`domInteractive` to `loadEventEnd`), but every network stage reports the navigation start |
+| `iframe.sandbox.supports()` | Throws a `TypeError` (no supported tokens), where Chrome answers. On purpose: answering lets Google Publisher Tag render ads in SafeFrames, which on timesofindia.com cost 3.2 CPU s and 70 MiB more for the same text; reCAPTCHA logs an error and carries on |
 | Very deep recursion | A `RangeError` after about 6,400 nested JS calls when the page runs on a thread with 8 MiB of stack (the CLI's and the service's), fewer on smaller threads; Chrome allows about 10,000 |
 | iframes | Not loaded |
 | Workers | `Worker` and `SharedWorker` can be constructed, but the worker's script never loads: an `error` event follows and messages go nowhere |
