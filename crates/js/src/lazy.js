@@ -12,7 +12,14 @@
   // Streams (streams.js). Reading one of the stream globals, or a body as
   // a stream (fetch.js, through `internals.streams`), loads them.
   let streams;
-  const loadStreams = () => streams ??= native.loadGlue('dasher:streams')(native, internals);
+  const loadStreams = () => {
+    if (streams === undefined) {
+      streams = native.loadGlue('dasher:streams')(native, internals);
+      // What `internals.expose` does for the interfaces of the other files.
+      for (const ctor of Object.values(streams.globals)) internals.interfaceMembers(ctor);
+    }
+    return streams;
+  };
   internals.streams = loadStreams;
   // Nothing is a stream until streams are loaded.
   internals.isReadableStream = (value) => streams !== undefined && streams.isReadable(value);

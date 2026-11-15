@@ -808,12 +808,11 @@
 
   // Attributes are not tree nodes in the arena; Attr objects are views of
   // an element's attribute, made on demand (so not identity-stable).
-  class Attr extends Node {
-    static create(owner, name, ns, value) {
-      const attr = internals.createTarget(Attr.prototype);
-      new AttrState(attr, owner, name, ns, value);
-      return attr;
-    }
+  class Attr extends Node {}
+  function createAttr(owner, name, ns, value) {
+    const attr = internals.createTarget(Attr.prototype);
+    new AttrState(attr, owner, name, ns, value);
+    return attr;
   }
 
   // Attr state, stamped on (Attr objects are made without a constructor).
@@ -871,14 +870,14 @@
     get isConnected() { const o = attrState(this).owner; return o !== null && N.isConnected(o); },
     get childNodes() { return staticNodeList([]); },
     hasChildNodes() { return false; },
-    cloneNode() { const a = attrState(this); return Attr.create(null, a.name, a.ns, this.value); },
+    cloneNode() { const a = attrState(this); return createAttr(null, a.name, a.ns, this.value); },
   };
   mixin(Attr, attrMembers);
   tag(Attr, 'Attr');
 
   function attrAt(el, i) {
     const a = N.attr(el, i);
-    return a === null ? null : Attr.create(el, a[0], a[1], a[4]);
+    return a === null ? null : createAttr(el, a[0], a[1], a[4]);
   }
 
   function attrNamed(el, name) {
@@ -888,7 +887,7 @@
     const n = N.attrCount(el);
     for (let i = 0; i < n; i++) {
       const a = N.attr(el, i);
-      if (a[0] === lower) return Attr.create(el, a[0], a[1], a[4]);
+      if (a[0] === lower) return createAttr(el, a[0], a[1], a[4]);
     }
     return null;
   }
@@ -1379,7 +1378,7 @@
       const n = N.attrCount(this);
       for (let i = 0; i < n; i++) {
         const a = N.attr(this, i);
-        if (a[1] === namespace && a[3] === localName) return Attr.create(this, a[0], a[1], a[4]);
+        if (a[1] === namespace && a[3] === localName) return createAttr(this, a[0], a[1], a[4]);
       }
       return null;
     }
@@ -4325,10 +4324,10 @@
       if (!/^[^\s/>="']+$/.test(name)) {
         throw domException('InvalidCharacterError', "The localName provided ('" + localName + "') contains an invalid character.");
       }
-      return Attr.create(null, name, null, '');
+      return createAttr(null, name, null, '');
     }
     createAttributeNS(namespace, qualifiedName) {
-      return Attr.create(null, str(qualifiedName), nullableStr(namespace) || null, '');
+      return createAttr(null, str(qualifiedName), nullableStr(namespace) || null, '');
     }
     createEvent(interfaceName) {
       requireArgs(arguments, 1, "'createEvent' on 'Document'");
@@ -4350,7 +4349,7 @@
     }
     importNode(node, deep = false) {
       if (node instanceof Document) throw domException('NotSupportedError', 'A document cannot be imported.');
-      if (node instanceof Attr) return Attr.create(null, node.name, node.namespaceURI, node.value);
+      if (node instanceof Attr) return createAttr(null, node.name, node.namespaceURI, node.value);
       return cloneWithState(node, !!deep, this);
     }
     adoptNode(node) {

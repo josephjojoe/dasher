@@ -80,8 +80,9 @@
 //! 1. In `dom.js`, keep (or write) the member where it belongs, a class
 //!    getter or method or a mixin member, with `return nativeMember();` as
 //!    its body. The stand-in gives the property its place on the prototype
-//!    and its attributes (class members are not enumerable, mixin members
-//!    are), which the native keeps. An accessor's setter stays in JS
+//!    and its attributes, which the native keeps (and which exposing the
+//!    interface then makes enumerable, like every member; see
+//!    `interfaceMembers` in `prelude.js`). An accessor's setter stays in JS
 //!    unless a `setter` entry replaces it (its stand-in body is then
 //!    `nativeMember();`).
 //! 2. In `members.rs`, write the body: a plain `fn(&Call, NodeId, &[JSValue])

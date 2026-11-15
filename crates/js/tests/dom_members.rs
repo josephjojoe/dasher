@@ -35,32 +35,32 @@ fn differences(js: &JsRuntime, setup: &str, actual: &str, expected: &str) -> Str
     )
 }
 
-/// Every native member, by the prototypes that have it, with whether it is
-/// enumerable there (mixin members are), and whether it has a setter.
+/// Every native accessor, by the prototypes that have it, and whether it
+/// has a setter. All are enumerable, as the members of an interface are.
 const ACCESSORS: &str = r#"[
-  ['Node', false, ['nodeType', 'nodeName', 'isConnected', 'ownerDocument', 'parentNode',
+  ['Node', ['nodeType', 'nodeName', 'isConnected', 'ownerDocument', 'parentNode',
     'parentElement', 'firstChild', 'lastChild', 'previousSibling', 'nextSibling']],
-  ['Node', false, ['nodeValue'], true],
-  ['Element', true, ['firstElementChild', 'lastElementChild', 'childElementCount',
+  ['Node', ['nodeValue'], true],
+  ['Element', ['firstElementChild', 'lastElementChild', 'childElementCount',
     'previousElementSibling', 'nextElementSibling']],
-  ['Document', true, ['firstElementChild', 'lastElementChild', 'childElementCount']],
-  ['DocumentFragment', true, ['firstElementChild', 'lastElementChild', 'childElementCount']],
-  ['CharacterData', true, ['previousElementSibling', 'nextElementSibling']],
-  ['Element', false, ['namespaceURI', 'localName', 'tagName', 'shadowRoot']],
-  ['Element', false, ['id', 'className'], true],
-  ['CharacterData', false, ['data'], true],
-  ['CharacterData', false, ['length']],
-  ['Element', false, ['classList'], true],
-  ['Element', false, ['clientWidth', 'clientHeight', 'scrollWidth', 'scrollHeight']],
-  ['HTMLElement', false, ['style'], true],
-  ['HTMLElement', false, ['dataset', 'offsetTop', 'offsetLeft', 'offsetWidth', 'offsetHeight']],
-  ['SVGElement', false, ['style'], true],
-  ['SVGElement', false, ['dataset']],
-  ['MathMLElement', false, ['style', 'dataset']],
-  ['CSSStyleDeclaration', false, ['cssText', 'cssFloat'], true],
-  ['CSSStyleDeclaration', false, ['length']],
-  ['DOMTokenList', false, ['length']],
-  ['DOMTokenList', false, ['value'], true],
+  ['Document', ['firstElementChild', 'lastElementChild', 'childElementCount']],
+  ['DocumentFragment', ['firstElementChild', 'lastElementChild', 'childElementCount']],
+  ['CharacterData', ['previousElementSibling', 'nextElementSibling']],
+  ['Element', ['namespaceURI', 'localName', 'tagName', 'shadowRoot']],
+  ['Element', ['id', 'className'], true],
+  ['CharacterData', ['data'], true],
+  ['CharacterData', ['length']],
+  ['Element', ['classList'], true],
+  ['Element', ['clientWidth', 'clientHeight', 'scrollWidth', 'scrollHeight']],
+  ['HTMLElement', ['style'], true],
+  ['HTMLElement', ['dataset', 'offsetTop', 'offsetLeft', 'offsetWidth', 'offsetHeight']],
+  ['SVGElement', ['style'], true],
+  ['SVGElement', ['dataset']],
+  ['MathMLElement', ['style', 'dataset']],
+  ['CSSStyleDeclaration', ['cssText', 'cssFloat'], true],
+  ['CSSStyleDeclaration', ['length']],
+  ['DOMTokenList', ['length']],
+  ['DOMTokenList', ['value'], true],
 ]"#;
 
 #[test]
@@ -70,12 +70,12 @@ fn accessors_keep_their_descriptors_and_look_native() {
         &js,
         &r#"
             const bad = [];
-            for (const [iface, enumerable, names, setter] of ACCESSORS) {
+            for (const [iface, names, setter] of ACCESSORS) {
               for (const name of names) {
                 const d = Object.getOwnPropertyDescriptor(globalThis[iface].prototype, name);
                 const where = iface + '.' + name;
                 if (!d || typeof d.get !== 'function') { bad.push(where + ' has no getter'); continue; }
-                if (d.enumerable !== enumerable) bad.push(where + ' enumerable');
+                if (d.enumerable !== true) bad.push(where + ' enumerable');
                 if (d.configurable !== true) bad.push(where + ' configurable');
                 if ((typeof d.set === 'function') !== !!setter) bad.push(where + ' setter');
                 if (d.get.name !== 'get ' + name) bad.push(where + ' name ' + d.get.name);
@@ -106,7 +106,7 @@ fn accessors_keep_their_descriptors_and_look_native() {
                 ['DOMTokenList', 'toggle', 1], ['DOMTokenList', 'replace', 2], ['DOMTokenList', 'supports', 1],
                 ['DOMTokenList', 'toString', 0]]) {
               const d = Object.getOwnPropertyDescriptor(globalThis[iface].prototype, name);
-              if (d.enumerable || !d.writable || !d.configurable) bad.push(name + ' attributes');
+              if (!d.enumerable || !d.writable || !d.configurable) bad.push(name + ' attributes');
               if (d.value.name !== name || d.value.length !== length) bad.push(name + ' name/length');
               if (!String(d.value).includes('[native code]')) bad.push(name + ' source');
             }

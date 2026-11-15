@@ -587,12 +587,40 @@
     return String(value).toWellFormed();
   }
 
+  // Makes the members of an interface enumerable, as WebIDL has them: its
+  // operations, attributes and constants, on the prototype and (the static
+  // ones) on the interface object. The glue writes interfaces as classes,
+  // whose methods and accessors are not, and scripts tell the difference: a
+  // wrapper built by forwarding each member a `for…in` over a prototype
+  // finds (Dynatrace's, of XMLHttpRequest) misses the rest. `constructor`
+  // and the symbol-keyed members (@@toStringTag, @@iterator) stay hidden,
+  // as do the function's own `length`, `name` and `prototype`.
+  const NOT_MEMBERS = new Set(['length', 'name', 'prototype']);
+  const describe = Object.getOwnPropertyDescriptor;
+  function enumerable(object, key) {
+    if (!describe(object, key).enumerable) Object.defineProperty(object, key, { enumerable: true });
+  }
+  function interfaceMembers(ctor) {
+    for (const key of Object.getOwnPropertyNames(ctor)) {
+      if (!NOT_MEMBERS.has(key)) enumerable(ctor, key);
+    }
+    const proto = ctor.prototype;
+    if (proto === null || typeof proto !== 'object') return;
+    for (const key of Object.getOwnPropertyNames(proto)) {
+      if (key !== 'constructor') enumerable(proto, key);
+    }
+  }
+
   // Installs interfaces and functions on the global object the way WebIDL
-  // does: writable and configurable, but not enumerable.
+  // does: writable and configurable, but not enumerable. An interface's
+  // members are as they stand when it is exposed, so a file exposes its
+  // interfaces last.
   function expose(members) {
     for (const name of Object.keys(members)) {
+      const value = members[name];
+      if (typeof value === 'function') interfaceMembers(value);
       Object.defineProperty(globalThis, name, {
-        value: members[name],
+        value,
         writable: true,
         configurable: true,
         enumerable: false,
@@ -609,5 +637,6 @@
     runFrame,
     usv,
     expose,
+    interfaceMembers,
   };
 })

@@ -367,6 +367,9 @@
       }
     }
     tag(NavigatorUAData, 'NavigatorUAData');
+    // Not a global here, so not exposed, which is what makes an interface's
+    // members enumerable.
+    internals.interfaceMembers(NavigatorUAData);
     userAgentData = new NavigatorUAData(KEY);
   }
 
@@ -732,6 +735,9 @@
     MessageChannel, IdleDeadline, postMessage, requestIdleCallback, cancelIdleCallback,
     scrollTo, scrollBy, scroll: scrollTo,
   });
+  // Location's members are [LegacyUnforgeable], and the `valueOf` that
+  // comes with that is the one member of an interface a `for…in` skips.
+  defineProperty(Location.prototype, 'valueOf', { enumerable: false });
 
   readonly('history', () => history);
   readonly('navigator', () => navigator);
