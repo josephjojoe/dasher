@@ -491,16 +491,6 @@
     defineProperty(XMLHttpRequest, name, { value, enumerable: true });
     defineProperty(XMLHttpRequest.prototype, name, { value, enumerable: true });
   }
-  // An interface's members are enumerable, where a class's are not, and
-  // wrappers of XMLHttpRequest count on it: Dynatrace's agent builds its
-  // replacement by forwarding each member a `for…in` over the prototype
-  // finds, and the ones it misses are then called on the wrapper.
-  for (const ctor of [XMLHttpRequestEventTarget, XMLHttpRequestUpload, XMLHttpRequest]) {
-    const proto = ctor.prototype;
-    for (const key of Object.getOwnPropertyNames(proto)) {
-      if (key !== 'constructor') defineProperty(proto, key, { enumerable: true });
-    }
-  }
 
   internals.expose({
     ProgressEvent,
