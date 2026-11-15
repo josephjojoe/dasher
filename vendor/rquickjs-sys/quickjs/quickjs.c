@@ -45340,6 +45340,148 @@ exception:
     return 0;
 }
 
+/* dasher: Array.prototype.sort is a natural merge sort, where upstream
+   calls rqsort(). A comparison is a call into the script, which is what a
+   sort costs, and pages mostly sort what is already in order or nearly
+   (jQuery puts every set of elements it builds into document order): the
+   quicksort makes about n log2(n) calls whatever it is given, this n - 1
+   for a sorted array and about n log2(runs) for sorted runs. Runs shorter
+   than js_array_sort_min_run() are grown by binary insertion.
+
+   Every comparison asks whether the later of two elements goes before
+   the earlier, and only "yes" (a negative answer) moves anything, as in
+   V8: a comparator that answers true or false, a common mistake, leaves
+   the array as it is in both.
+
+   Each loop ends whatever the comparisons answer, so a comparator that
+   contradicts itself, or throws (after which they all answer 0), leaves
+   the slots in some order with none lost. Returns -1 if out of memory. */
+
+static size_t js_array_sort_min_run(size_t n)
+{
+    size_t r = 0;
+
+    while (n >= 32) {
+        r |= n & 1;
+        n >>= 1;
+    }
+    return n + r;
+}
+
+/* merge the sorted a[0..mid) and a[mid..n), with room for mid slots in tmp */
+static void js_array_sort_merge(ValueSlot *a, size_t mid, size_t n,
+                                ValueSlot *tmp,
+                                struct array_sort_context *psc)
+{
+    size_t i, j, k;
+
+    /* already in order: what a sorted array cut into runs comes to */
+    if (js_array_cmp_generic(&a[mid], &a[mid - 1], psc) >= 0)
+        return;
+    memcpy(tmp, a, mid * sizeof(*a));
+    i = 0;
+    j = mid;
+    k = 0;
+    while (i < mid && j < n) {
+        if (js_array_cmp_generic(&a[j], &tmp[i], psc) < 0)
+            a[k++] = a[j++];
+        else
+            a[k++] = tmp[i++];
+    }
+    /* what is left of the second run is in place already */
+    memcpy(&a[k], &tmp[i], (mid - i) * sizeof(*a));
+}
+
+static int js_array_sort_slots(JSContext *ctx, ValueSlot *a, size_t n,
+                               struct array_sort_context *psc)
+{
+    size_t min_run, i, lo, hi, run_count, run_size, *runs, *new_runs;
+    ValueSlot *tmp, v;
+
+    if (n < 2)
+        return 0;
+    min_run = js_array_sort_min_run(n);
+    runs = NULL;
+    run_count = 0;
+    run_size = 0;
+    lo = 0;
+    while (lo < n) {
+        /* the run that starts at lo: ascending, or strictly descending
+           (so that reversing it keeps equal elements in order) */
+        hi = lo + 1;
+        if (hi < n) {
+            if (js_array_cmp_generic(&a[hi], &a[lo], psc) >= 0) {
+                while (hi + 1 < n &&
+                       js_array_cmp_generic(&a[hi + 1], &a[hi], psc) >= 0)
+                    hi++;
+                hi++;
+            } else {
+                while (hi + 1 < n &&
+                       js_array_cmp_generic(&a[hi + 1], &a[hi], psc) < 0)
+                    hi++;
+                hi++;
+                for (i = 0; i < (hi - lo) / 2; i++) {
+                    v = a[lo + i];
+                    a[lo + i] = a[hi - 1 - i];
+                    a[hi - 1 - i] = v;
+                }
+            }
+        }
+        /* too short: take in what follows by binary insertion */
+        if (hi - lo < min_run) {
+            size_t end = lo + min_run < n ? lo + min_run : n;
+            for (; hi < end; hi++) {
+                size_t left = lo, right = hi;
+                v = a[hi];
+                while (left < right) {
+                    size_t middle = left + (right - left) / 2;
+                    if (js_array_cmp_generic(&v, &a[middle], psc) < 0)
+                        right = middle;
+                    else
+                        left = middle + 1;
+                }
+                memmove(&a[left + 1], &a[left], (hi - left) * sizeof(*a));
+                a[left] = v;
+            }
+        }
+        if (lo == 0 && hi == n)
+            return 0; /* one run: nothing to merge, nothing to allocate */
+        if (run_count + 2 > run_size) {
+            run_size = run_size * 2 + 16;
+            new_runs = js_realloc(ctx, runs, run_size * sizeof(*runs));
+            if (!new_runs) {
+                js_free(ctx, runs);
+                return -1;
+            }
+            runs = new_runs;
+        }
+        runs[run_count++] = lo;
+        lo = hi;
+    }
+    runs[run_count] = n;
+    tmp = js_malloc(ctx, n * sizeof(*tmp));
+    if (!tmp) {
+        js_free(ctx, runs);
+        return -1;
+    }
+    /* merge neighbouring runs, pair by pair, until one is left */
+    while (run_count > 1) {
+        size_t merged = 0;
+        for (i = 0; i + 1 < run_count; i += 2) {
+            js_array_sort_merge(&a[runs[i]], runs[i + 1] - runs[i],
+                                runs[i + 2] - runs[i], tmp, psc);
+            runs[merged++] = runs[i];
+        }
+        if (i < run_count)
+            runs[merged++] = runs[i];
+        runs[merged] = n;
+        run_count = merged;
+    }
+    js_free(ctx, tmp);
+    js_free(ctx, runs);
+    return 0;
+}
+
 static JSValue js_array_sort(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
@@ -45385,8 +45527,8 @@ static JSValue js_array_sort(JSContext *ctx, JSValueConst this_val,
         array[pos].pos = i;
         pos++;
     }
-    rqsort(array, pos, sizeof(*array), js_array_cmp_generic, &asc);
-    if (asc.exception)
+    /* dasher: see js_array_sort_slots() */
+    if (js_array_sort_slots(ctx, array, pos, &asc) || asc.exception)
         goto exception;
 
     /* XXX: should special case fast arrays */

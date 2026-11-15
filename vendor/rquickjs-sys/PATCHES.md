@@ -1126,3 +1126,43 @@ inside a surrogate pair, how often `replace` and `match` call the flag
 getters, `test` looking `exec` up before converting its argument, and an
 exec result's keys listing `groups` before `index` and `input`).
 
+
+## `quickjs/quickjs.c`: `Array.prototype.sort` is a natural merge sort
+
+Upstream sorts with `rqsort()`, a quicksort that makes about n log2(n)
+comparisons whatever it is given: 8,227 calls of the comparator to sort
+1,000 numbers that are already in order, where V8 makes 999. A comparison
+is a call into the script, and pages mostly sort what is in order or
+nearly so. jQuery puts every set of elements it builds into document
+order, and on two recorded pages that was 660,000 and 960,000 calls of a
+comparator that asks the DOM for `compareDocumentPosition`, over sorts of
+1,800 to 12,150 nodes made of 15 to 18 sorted runs.
+
+`js_array_sort_slots()` finds the runs that are there (reversing the
+strictly descending ones), grows runs shorter than
+`js_array_sort_min_run()` by binary insertion, and merges neighbours
+pairwise, skipping a merge whose halves are already in order. That is
+n - 1 comparisons for a sorted or reversed array and about n log2(runs)
+for sorted runs. It needs room for half the array while it merges, and
+fails with an out-of-memory error if there is none.
+
+Every comparison asks whether the later of two elements goes before the
+earlier, and only a negative answer moves anything, as in V8. So a
+comparator that answers `true` or `false` (`(a, b) => a > b`, a common
+mistake) leaves the array as it is, as it does in V8, and the sort is
+stable. Each loop ends whatever the comparisons answer: a comparator that
+contradicts itself, or throws, leaves every element in the array.
+
+Measured on an M2 Mac, `profiling` build, replaying the two recordings,
+medians of five rounds interleaved with the build before: 0.81 to 0.60 s
+and 1.07 to 0.74 s of user CPU, with the same output. (Those are on top
+of `crates/js/src/dom/order.rs`, which makes each of the comparisons
+cheap; the two together take the pages from 1.45 and 1.90 s.)
+
+`crates/js/tests/fixtures/sort.js` sorts 256 arrays of every shape
+against a stable insertion sort, counts comparator calls, and covers
+comparators that throw, contradict themselves, answer booleans or change
+the array, holes, array-likes and `toSorted`. Node 22 gives the same
+output except for two of the counts: 1,025 calls for two sorted runs of
+500 where this makes 1,500 (V8 gallops through a merge), and 999 for
+1,000 equal numbers where QuickJS, before and after, makes none.

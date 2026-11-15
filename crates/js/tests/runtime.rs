@@ -702,6 +702,26 @@ fn strings_are_the_same_however_they_are_built() {
     assert!(js.errors().is_empty());
 }
 
+/// `Array.prototype.sort` is a natural merge sort (see `PATCHES.md`): the
+/// fixture sorts 256 arrays of every shape and compares each with a stable
+/// insertion sort, counts the comparator's calls on sorted, reversed and
+/// run-wise sorted arrays, and covers comparators that throw, contradict
+/// themselves or change the array, holes, array-likes, the default order
+/// and odd comparator answers. V8 gives the same values, apart from two
+/// of the call counts (it makes fewer calls for two runs out of order,
+/// and calls the comparator for identical values, which QuickJS skips).
+#[test]
+fn sorts_are_stable_and_cheap_on_sorted_runs() {
+    let js = runtime();
+    assert_eq!(
+        js.eval_json(include_str!("fixtures/sort.js"))
+            .unwrap()
+            .as_deref(),
+        Some(include_str!("fixtures/sort.expected.json"))
+    );
+    assert!(js.errors().is_empty());
+}
+
 /// JSON.parse reads strings with its own scanner and builds repeated
 /// objects from a remembered shape, and JSON.stringify writes plain
 /// objects and arrays straight from their shapes (see `PATCHES.md`). The
