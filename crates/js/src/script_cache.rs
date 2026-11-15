@@ -9,8 +9,8 @@
 //!
 //! # What an entry holds
 //!
-//! Functions are compiled on their first call (see
-//! `vendor/rquickjs-sys/PATCHES.md`), so compiling a script compiles only
+//! Functions are compiled on their first call, so compiling a script
+//! compiles only
 //! its top level and the functions it is likely to call at once. The rest
 //! are kept as records of where they are in the text. An entry is the
 //! script's text and its compiled code in QuickJS's bytecode format
@@ -66,7 +66,6 @@
 //! With [`ScriptCacheOptions::dir`] set, entries are also written there, so
 //! that a new process starts warm. Files carry the engine build they were
 //! written by and a checksum, and one that does not match is ignored.
-//! Measurements are in `crates/bench/README.md` ("The script cache").
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

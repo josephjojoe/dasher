@@ -301,8 +301,6 @@ impl BrowserBuilder {
     ///   visibility after each batch loads until the timeout.
     /// - [`Visibility::Viewport`]: a real viewport; only what is scrolled
     ///   to is in view. The least work, and the least lazy content.
-    ///
-    /// The README's "Visibility" section has what each cost on real pages.
     pub fn visibility(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
         self

@@ -2121,7 +2121,7 @@
     // No supported tokens, so `sandbox.supports()` throws, unlike Chrome's:
     // answering it lets Google Publisher Tag render ads in SafeFrames,
     // which cost timesofindia.com 3.2 CPU s and 70 MiB of peak memory for
-    // the same text. See COMPATIBILITY.md.
+    // the same text.
     get sandbox() { return cached(this, 'sandbox', () => tokenList(this, 'sandbox')); },
     set sandbox(value) { N.setAttr(this, 'sandbox', str(value)); },
   });

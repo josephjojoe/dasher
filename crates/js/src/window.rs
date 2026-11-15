@@ -58,8 +58,7 @@ impl Default for Viewport {
 /// decides where boxes sit, and so what `getBoundingClientRect`,
 /// `IntersectionObserver` and scroll checks see as visible, which decides
 /// how much lazily loaded content a page fetches. It trades CPU time and
-/// requests for content: see the README's "Visibility" section for what
-/// each policy cost on real pages.
+/// requests for content.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Visibility {
     /// Everything is in view, always. Every rendered element is a 20px-tall

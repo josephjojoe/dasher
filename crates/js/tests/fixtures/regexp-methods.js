@@ -1,7 +1,7 @@
 // The RegExp methods on regexps a script has left alone and on regexps it
 // has changed. dasher runs the methods straight on the matcher while
 // nothing they would look at has been changed (js_regexp_pristine() in
-// quickjs.c, see vendor/rquickjs-sys/PATCHES.md); tests/regexp.rs runs
+// quickjs.c); tests/regexp.rs runs
 // this file that way and the engine's own way and expects the same
 // answers. Each case is a function whose result, or what it throws, goes
 // into `out`.

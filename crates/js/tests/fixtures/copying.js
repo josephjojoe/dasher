@@ -1,7 +1,7 @@
 // Object spread, object rest and Object.assign (tests/runtime.rs,
 // property_copies_behave_the_same_on_every_path). An ordinary source is
 // copied without a list of its keys, and an empty target can take the
-// source's shape whole (see PATCHES.md). Getters, setters, symbols,
+// source's shape whole. Getters, setters, symbols,
 // index keys, non-enumerable properties, Proxies and sources changed in
 // the middle of a copy take the general path or step down to it. The
 // answers are the same with and without the change. V8 differs in two

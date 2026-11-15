@@ -1025,8 +1025,7 @@ fn install<'js>(
 
 /// For benchmarks (`DASHER_EAGER_JS`, with the `replay` feature): compile
 /// every function with its script, as the engine did before it learned to
-/// leave functions to their first call (see
-/// `vendor/rquickjs-sys/PATCHES.md`), so that one build can be measured
+/// leave functions to their first call, so that one build can be measured
 /// both ways.
 #[cfg(feature = "replay")]
 fn eager_functions(ctx: &Ctx<'_>) {

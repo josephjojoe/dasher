@@ -19,7 +19,7 @@
     m.get(1.5), m.size, s.size, [...s].map((o) => o.i).join(','),
     objs.every((o, i) => w.get(o) === i), s.has(objs[1]), s.has(objs[0]), s.has({}),
     // Ints and the same numbers as doubles, and symbols (see the
-    // same-value-zero shortcut in map_find_record, PATCHES.md).
+    // same-value-zero shortcut in map_find_record).
     ...(() => {
       const mixed = new Map([[2, 'int two'], [Math.sqrt(16) / 2 + 0.5 - 0.5, 'double two?'], [0.1 + 0.2, 'f']]);
       const sym = Symbol('k'), sym2 = Symbol('k');

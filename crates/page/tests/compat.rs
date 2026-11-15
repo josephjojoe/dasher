@@ -3,7 +3,7 @@
 //! would, with the content they render checked in the final HTML.
 //!
 //! The apps are in `fixtures/compat`, built from the sources in `compat/`
-//! with production builds of the real libraries (see `compat/README.md`).
+//! with production builds of the real libraries.
 //! Each test also checks that the page threw nothing and logged no errors,
 //! and drives the interactions a scrape might need (clicks, form input,
 //! client-side navigation).

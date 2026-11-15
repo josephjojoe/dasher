@@ -13,8 +13,6 @@
 //!
 //! `dasher-bench micro` instead times small loops of language operations
 //! and DOM calls (see `micro.rs`).
-//!
-//! See `crates/bench/README.md` for what each number means.
 
 mod fixtures;
 mod micro;

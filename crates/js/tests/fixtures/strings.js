@@ -1,5 +1,5 @@
 // Concatenation, search and case mapping on strings, compared with what
-// the engine gives without dasher's string patches (see PATCHES.md).
+// the engine gives without dasher's string patches.
 // See tests/runtime.rs, strings_are_the_same_however_they_are_built.
 (function () {
   const out = [];

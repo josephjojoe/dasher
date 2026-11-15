@@ -197,7 +197,7 @@ fn every_document_of_the_page_gets_the_limit() {
 #[test]
 fn a_catastrophic_regexp_is_stopped_by_the_deadline() {
     // Each takes far longer than a second to fail; the matcher's own loops
-    // and dasher's (see vendor/rquickjs-sys/PATCHES.md) must still let the
+    // and dasher's must still let the
     // deadline through.
     let patterns = [
         // nested repeats, through the one-character loop and the back-off

@@ -1,6 +1,6 @@
 // Constructs the parser can only tell apart by reading ahead to the
 // matching bracket. Every bracket here is long enough for the engine to
-// remember what it found (see vendor/rquickjs-sys/PATCHES.md), and the
+// remember what it found, and the
 // whole file is inside one, so the inner ones are answered from memory.
 var lookahead = (function () {
   var r = {};

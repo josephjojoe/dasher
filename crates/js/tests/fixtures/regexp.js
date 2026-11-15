@@ -1,7 +1,7 @@
 // Every pattern below is run over every subject through each way a script
 // can reach the regexp matcher. tests/regexp.rs runs this file with
 // dasher's regexp paths (the search loop in src/regexp.rs and the engine
-// patch's, see vendor/rquickjs-sys/PATCHES.md) and without, and expects
+// patch's) and without, and expects
 // the same answers. V8 gives the same answers too (checked through
 // Lightpanda 1.0.3 for the first 51 patterns, and Node 22 for all), apart
 // from three patterns with the `u` flag that QuickJS starts matching

@@ -10,7 +10,7 @@
 //! that start with a literal or a small class, and most of the time went
 //! there.
 //!
-//! The engine patch in `vendor/rquickjs-sys` (see `PATCHES.md`) lets this
+//! The engine patch in `vendor/rquickjs-sys` lets this
 //! module run the loop instead. [`search`] reads the compiled pattern once
 //! to find how a match can start ([`Start`]), then calls back into the
 //! engine's matcher only at the positions that qualify. What matches, and
@@ -65,7 +65,7 @@ unsafe extern "C" {
 }
 
 /// Hands regexp searches in this process to [`search`] and turns on the
-/// engine patch's other regexp fast paths (see `PATCHES.md`). Safe to
+/// engine patch's other regexp fast paths. Safe to
 /// call more than once and from any thread: it stores the same values
 /// each time.
 pub(crate) fn install() {

@@ -10,8 +10,6 @@
 //! [`MIN_LOOP`] is first given more iterations, in proportion. CPU time is the calling
 //! thread's, which is where dasher runs the page, so the in-process fixture
 //! server does not count.
-//!
-//! See `crates/bench/README.md`, "Micro-benchmarks".
 
 use std::fmt::Write as _;
 use std::path::PathBuf;

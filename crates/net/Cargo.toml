@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 # Recording responses to disk and replaying them, for benchmarks on real
-# pages; see crates/bench/README.md. Not for builds that ship.
+# pages. Not for builds that ship.
 replay = []
 
 [dependencies]

@@ -1,5 +1,5 @@
 // JSON.parse and JSON.stringify, compared with what the engine gives
-// without dasher's JSON patches (see PATCHES.md): key order, __proto__,
+// without dasher's JSON patches: key order, __proto__,
 // repeated keys, numbers, lone surrogates, error messages and their
 // positions, revivers, toJSON, replacers, gaps, and objects that change
 // while they are serialized. See tests/runtime.rs,

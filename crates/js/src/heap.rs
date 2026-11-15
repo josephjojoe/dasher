@@ -299,7 +299,7 @@ mod imp {
     };
 
     unsafe extern "C" {
-        // dasher's addition to QuickJS (vendor/rquickjs-sys/PATCHES.md).
+        // dasher's addition to QuickJS.
         fn JS_SetMallocFunctions(
             rt: *mut qjs::JSRuntime,
             mf: *const qjs::JSMallocFunctions,

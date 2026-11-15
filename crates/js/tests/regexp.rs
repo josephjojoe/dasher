@@ -1,7 +1,7 @@
 //! dasher runs the loop of a regular expression search itself and leaves
 //! the matching to the engine (`src/regexp.rs`), and the engine patch runs
 //! the RegExp methods and some patterns its own faster way while a script
-//! has not changed what they would look at (`vendor/rquickjs-sys/PATCHES.md`).
+//! has not changed what they would look at.
 //! These check that scripts cannot tell: every answer, and every call a
 //! script sees, is the same as with all of that turned off.
 //!

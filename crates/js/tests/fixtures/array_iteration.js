@@ -3,7 +3,7 @@
 // engine's own iterator gets it without the gets and the call, a spread
 // of one is copied at once, apply copies a short array to the C stack,
 // and concat and species creation take a plain array's elements and
-// constructor directly (see PATCHES.md). Each case is also run with the
+// constructor directly. Each case is also run with the
 // iterator, `next`, `constructor` or Symbol.species replaced, so the
 // general path is seen too. The answers are the same with and without
 // the change. V8 differs in one way, before and after the change alike:

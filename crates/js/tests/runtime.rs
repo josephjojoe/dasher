@@ -451,7 +451,7 @@ fn bracket_lookahead_answers_are_the_same_when_remembered() {
     );
 }
 
-/// The parser's fast paths (see `vendor/rquickjs-sys/PATCHES.md`): the
+/// The parser's fast paths: the
 /// bracket lookahead stops once a bracket cannot be an arrow function's
 /// parameters or a destructuring pattern, numbers, strings and names are
 /// read without the general routines when they are plain, and binary
@@ -473,7 +473,7 @@ fn parser_fast_paths_read_scripts_as_before() {
 }
 
 /// Closures are made from a cached shape with `length`, `name` and
-/// `prototype` stored in place (see `PATCHES.md`). Scripts see the same
+/// `prototype` stored in place. Scripts see the same
 /// properties, in the same order, as when each was defined in turn, and a
 /// function that later gains or loses a property does not affect the next.
 #[test]
@@ -491,8 +491,8 @@ fn closures_have_the_properties_scripts_expect() {
 }
 
 /// A sloppy function's `arguments` is kept as an array when no argument
-/// has a named parameter to stay in step with, and mapped otherwise (see
-/// `PATCHES.md`). Either way scripts see the same object.
+/// has a named parameter to stay in step with, and mapped otherwise.
+/// Either way scripts see the same object.
 #[test]
 fn arguments_objects_behave_the_same_however_they_are_stored() {
     let js = runtime();
@@ -507,8 +507,8 @@ fn arguments_objects_behave_the_same_however_they_are_stored() {
     assert!(js.errors().is_empty());
 }
 
-/// The hash a `Map` or `Set` files a key under is mixed before use (see
-/// `PATCHES.md`). Order and lookups do not depend on it.
+/// The hash a `Map` or `Set` files a key under is mixed before use.
+/// Order and lookups do not depend on it.
 #[test]
 fn map_and_set_keys_keep_their_order_and_identity() {
     let js = runtime();
@@ -524,7 +524,7 @@ fn map_and_set_keys_keep_their_order_and_identity() {
 }
 
 /// Postfix `++` and `--` have an int fast path, and the compiler rewrites
-/// `i++;` and `x = e;` on a `let` (see `PATCHES.md`). Every value gives
+/// `i++;` and `x = e;` on a `let`. Every value gives
 /// what it gave before.
 #[test]
 fn increments_give_the_same_values_on_every_path() {
@@ -542,7 +542,7 @@ fn increments_give_the_same_values_on_every_path() {
 
 /// An object literal with fixed keys is made, after its first run, from the
 /// shape it ended with, and `define_field` stores into a property already
-/// there (see `PATCHES.md`). Scripts see the same properties, order and
+/// there. Scripts see the same properties, order and
 /// attributes, and class fields behave as before.
 #[test]
 fn object_literals_have_the_properties_scripts_expect() {
@@ -559,7 +559,7 @@ fn object_literals_have_the_properties_scripts_expect() {
 }
 
 /// Spread, object rest and `Object.assign` copy an ordinary source without a
-/// list of its keys (see `PATCHES.md`). Getters, setters, symbols, index keys,
+/// list of its keys. Getters, setters, symbols, index keys,
 /// Proxies and sources changed during the copy give what they gave before.
 #[test]
 fn property_copies_behave_the_same_on_every_path() {
@@ -576,7 +576,7 @@ fn property_copies_behave_the_same_on_every_path() {
 }
 
 /// Destructuring, spread, for-of, `apply` and `concat` skip the iterator
-/// protocol and species lookups for plain arrays (see `PATCHES.md`). With the
+/// protocol and species lookups for plain arrays. With the
 /// iterator, `next`, `constructor` or `Symbol.species` replaced they behave as before.
 #[test]
 fn array_iteration_behaves_the_same_on_every_path() {
@@ -594,7 +594,7 @@ fn array_iteration_behaves_the_same_on_every_path() {
 
 /// A capability for the realm's own `Promise` is made without an executor,
 /// functions made in C take `length` and `name` from a remembered shape,
-/// and naming a new function stores its `name` in place (see `PATCHES.md`).
+/// and naming a new function stores its `name` in place.
 /// Reactions run in the same order and functions look the same.
 #[test]
 fn promises_and_functions_behave_the_same_on_every_path() {
@@ -611,8 +611,8 @@ fn promises_and_functions_behave_the_same_on_every_path() {
 }
 
 /// for-in takes an ordinary object's shape for its key list, and
-/// `Object.keys` and `Object.values` read keys and values from the shape (see
-/// `PATCHES.md`). Keys, order and values are the same however objects change.
+/// `Object.keys` and `Object.values` read keys and values from the shape.
+/// Keys, order and values are the same however objects change.
 #[test]
 fn enumeration_gives_the_same_keys_on_every_path() {
     let js = runtime();
@@ -628,7 +628,7 @@ fn enumeration_gives_the_same_keys_on_every_path() {
 }
 
 /// Most functions are compiled on their first call rather than with their
-/// script (see `PATCHES.md`). Closures, `with`, direct eval, `arguments`,
+/// script. Closures, `with`, direct eval, `arguments`,
 /// default parameters, classes and private names, `super`, `new.target`,
 /// strict mode, generators, async functions, function properties and text
 /// and stack positions must all come out as when every function is
@@ -705,7 +705,7 @@ fn late_compiled_functions_share_variables_with_the_functions_around_them() {
 
 /// `s += x` appends to the string in place when nothing else can see it,
 /// and the string search and case functions have fast paths for 8-bit
-/// strings (see `PATCHES.md`). Aliases, closures, property keys and wide
+/// strings. Aliases, closures, property keys and wide
 /// strings see the same strings as before; the expected values are what
 /// the engine gives without the patches, and V8 gives the same. The
 /// fixture also runs 3,000 random searches, splits and replacements and
@@ -722,7 +722,7 @@ fn strings_are_the_same_however_they_are_built() {
     assert!(js.errors().is_empty());
 }
 
-/// `Array.prototype.sort` is a natural merge sort (see `PATCHES.md`): the
+/// `Array.prototype.sort` is a natural merge sort: the
 /// fixture sorts 256 arrays of every shape and compares each with a stable
 /// insertion sort, counts the comparator's calls on sorted, reversed and
 /// run-wise sorted arrays, and covers comparators that throw, contradict
@@ -744,7 +744,7 @@ fn sorts_are_stable_and_cheap_on_sorted_runs() {
 
 /// JSON.parse reads strings with its own scanner and builds repeated
 /// objects from a remembered shape, and JSON.stringify writes plain
-/// objects and arrays straight from their shapes (see `PATCHES.md`). The
+/// objects and arrays straight from their shapes. The
 /// fixture covers key order, `__proto__` and repeated keys, numbers, lone
 /// surrogates, error messages and their positions, revivers, `toJSON`,
 /// replacers, gaps and objects changed while they are written, plus 3,000

@@ -1,4 +1,4 @@
-// What the parser's fast paths (see vendor/rquickjs-sys/PATCHES.md) must
+// What the parser's fast paths must
 // leave as it was: which bracket is an arrow function's parameters or a
 // destructuring pattern when the lookahead stops early, the values of
 // numbers, strings and names read the short way, and the order of binary

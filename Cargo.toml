@@ -34,7 +34,7 @@ serde = "1"
 serde_json = "1"
 tokio = "1"
 
-# QuickJS with dasher's engine patches (see vendor/rquickjs-sys/PATCHES.md).
+# QuickJS with dasher's engine patches.
 [patch.crates-io]
 rquickjs-sys = { path = "vendor/rquickjs-sys" }
 

@@ -11,8 +11,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-# Lets benchmarks turn lazy compilation off with DASHER_EAGER_JS (see
-# crates/bench/README.md).
+# Lets benchmarks turn lazy compilation off with DASHER_EAGER_JS.
 replay = []
 
 [dependencies]

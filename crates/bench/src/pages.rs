@@ -1,5 +1,5 @@
 //! `dasher-bench pages`: real pages, one after another in one process,
-//! for what the script cache saves (see the README's "Real pages").
+//! for what the script cache saves.
 //!
 //! Build with the `replay` feature and set `DASHER_REPLAY` to a directory
 //! holding every page's recording (the recordings of several pages can be

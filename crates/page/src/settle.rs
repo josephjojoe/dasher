@@ -99,9 +99,8 @@ impl Default for SettleOptions {
     /// DOM quiet is not waited for by default. On 142 recorded real sites,
     /// network idle alone kept the text of as many pages as network idle
     /// and DOM quiet together, for less CPU time: pages that change their
-    /// document on a timer forever never go DOM-quiet (see
-    /// `crates/bench/README.md`). Set [`dom_quiet`](Self::dom_quiet) to
-    /// wait for both.
+    /// document on a timer forever never go DOM-quiet. Set
+    /// [`dom_quiet`](Self::dom_quiet) to wait for both.
     fn default() -> Self {
         Self {
             network_idle: Some(NetworkIdle::default()),

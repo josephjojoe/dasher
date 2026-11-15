@@ -2,7 +2,7 @@
 // (tests/runtime.rs, promises_and_functions_behave_the_same_on_every_path).
 // A capability for the realm's own Promise is made without its executor,
 // functions made in C take `length` and `name` from a remembered shape,
-// and naming a new function stores its `name` in place (see PATCHES.md).
+// and naming a new function stores its `name` in place.
 // The script records the order in which reactions run and what can be
 // seen of each function into `promiseLog`, which is complete once all
 // jobs have run. The answers are the same with and without the change

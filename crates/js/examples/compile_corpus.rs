@@ -1,6 +1,6 @@
 //! Compiles a corpus of scripts without running them and reports how fast
 //! the engine got through them: the parse-only half of the real-page
-//! benchmark (see `crates/bench/README.md`).
+//! benchmark.
 //!
 //! ```sh
 //! cargo run --profile profiling -p dasher-js --example compile_corpus -- DIR...

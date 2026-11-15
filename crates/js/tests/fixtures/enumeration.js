@@ -3,8 +3,8 @@
 // enumeration_gives_the_same_keys_on_every_path). An ordinary object of
 // plain string-keyed data properties lends its shape to the for-in
 // iterator, and its keys and values go straight into an array; ordinary
-// prototypes are checked for enumerable keys from their shapes (see
-// PATCHES.md). Objects changed during the loop, index keys, symbols,
+// prototypes are checked for enumerable keys from their shapes.
+// Objects changed during the loop, index keys, symbols,
 // accessors, enumerable keys on prototypes, Proxies and exotic objects
 // take the general path. The answers are the same with and without the
 // change and under V8.

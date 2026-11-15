@@ -2,7 +2,7 @@
 // fields (tests/runtime.rs, object_literals_have_the_properties_scripts_expect).
 // A literal whose keys are all fixed names is made, after its first run,
 // from the shape that run ended with, and define_field stores into a
-// property that is already there (see PATCHES.md). Each literal here runs
+// property that is already there. Each literal here runs
 // several times so that both paths are seen, and the answers are the same
 // with and without the change and under V8.
 (function () {

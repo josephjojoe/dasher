@@ -1,5 +1,5 @@
-// Functions here are compiled on their first call (see
-// vendor/rquickjs-sys/PATCHES.md), most of them only after the script has
+// Functions here are compiled on their first call, most of them only
+// after the script has
 // set up what they capture. Each answer must be the one the engine gives
 // when it compiles every function with its script.
 var out = {};
