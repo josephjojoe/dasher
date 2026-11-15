@@ -716,42 +716,6 @@ pub(super) fn remove_attr_ns(
 // -------------------------------------------------------------------------
 // Queries.
 
-/// `compareDocumentPosition` bits.
-const DISCONNECTED: u32 = 0x01;
-const PRECEDING: u32 = 0x02;
-const FOLLOWING: u32 = 0x04;
-const CONTAINS: u32 = 0x08;
-const CONTAINED_BY: u32 = 0x10;
-const IMPLEMENTATION_SPECIFIC: u32 = 0x20;
-
-fn compare_position(doc: &Document, a: NodeId, b: NodeId) -> u32 {
-    if a == b {
-        return 0;
-    }
-    let chain = |n: NodeId| {
-        let mut v: Vec<NodeId> = std::iter::once(n).chain(doc.ancestors(n)).collect();
-        v.reverse();
-        v
-    };
-    let (ca, cb) = (chain(a), chain(b));
-    if ca[0] != cb[0] {
-        let order = if a < b { FOLLOWING } else { PRECEDING };
-        return DISCONNECTED | IMPLEMENTATION_SPECIFIC | order;
-    }
-    let common = ca.iter().zip(&cb).take_while(|(x, y)| x == y).count();
-    if common == ca.len() {
-        return CONTAINED_BY | FOLLOWING;
-    }
-    if common == cb.len() {
-        return CONTAINS | PRECEDING;
-    }
-    // Siblings under the deepest common ancestor: which comes first?
-    let (sa, sb) = (ca[common], cb[common]);
-    let b_after_a =
-        std::iter::successors(doc.next_sibling(sa), |&n| doc.next_sibling(n)).any(|n| n == sb);
-    if b_after_a { FOLLOWING } else { PRECEDING }
-}
-
 fn is_equal_node(doc: &Document, a: NodeId, b: NodeId) -> bool {
     if doc.kind(a) != doc.kind(b) {
         return false;
@@ -1001,7 +965,7 @@ fn install_tree<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "compare",
         move |ctx: Ctx<'js>, a: Node<'js>, b: Node<'js>| -> Result<u32> {
-            Ok(compare_position(&d.doc(), id(&ctx, &a)?, id(&ctx, &b)?))
+            Ok(d.compare_position(&d.doc(), id(&ctx, &a)?, id(&ctx, &b)?))
         },
     )?;
     let d = Rc::clone(dom);

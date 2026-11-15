@@ -171,6 +171,7 @@ mod lists;
 mod members;
 mod mutation;
 mod natives;
+mod order;
 mod queries;
 mod shadow;
 mod style;
@@ -309,6 +310,8 @@ pub(crate) struct DomState {
     /// document node belongs to it, and any other tree to the page. Empty
     /// unless script uses extra documents.
     owners: RefCell<HashMap<NodeId, NodeId>>,
+    /// The page's document in tree order, once enough is asked about it.
+    order: RefCell<order::Order>,
 }
 
 impl DomState {
@@ -345,6 +348,7 @@ impl DomState {
             body_seen: Cell::new(false),
             extra_documents: Cell::new(false),
             owners: RefCell::default(),
+            order: RefCell::default(),
         }
     }
 
@@ -431,7 +435,15 @@ impl DomState {
         if !self.extra_documents.get() {
             return doc.root();
         }
-        let root = group_root(doc, id);
+        if self.known_in_page_document(id) {
+            return doc.root();
+        }
+        let (mut root, mut steps) = (id, 0);
+        while let Some(up) = doc.parent(root).or_else(|| owner(doc, root)) {
+            root = up;
+            steps += 1;
+        }
+        self.walked(doc, id, steps);
         if doc.kind(root) == NodeKind::Document {
             return root;
         }
