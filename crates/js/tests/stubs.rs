@@ -168,11 +168,12 @@ fn canvas_2d_contexts_keep_state_and_draw_nothing() {
         const px = ctx.getImageData(0, 0, 2, 2);
         [ctx === c.getContext('2d'), ctx.canvas === c, String(ctx), ctx.fillStyle, ctx.textBaseline,
          ctx.measureText('hello').width, px.width, px.data.length, px.data[0],
-         c.getContext('webgl'), c.toDataURL(), new ImageData(2, 3).data.length, typeof Path2D]
+         c.getContext('webgl'), c.toDataURL(), new ImageData(2, 3).data.length, typeof Path2D,
+         new OffscreenCanvas(4, 2).getContext('2d').canvas.width]
         "#,
     );
     assert_eq!(
         out,
-        r##"[true,true,"[object CanvasRenderingContext2D]","#f00","top",55.00000000000001,2,16,0,null,"data:,",24,"function"]"##
+        r##"[true,true,"[object CanvasRenderingContext2D]","#f00","top",55.00000000000001,2,16,0,null,"data:,",24,"function",4]"##
     );
 }

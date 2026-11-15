@@ -382,6 +382,7 @@ mod runtime;
 mod script_cache;
 #[cfg(unix)]
 mod slab;
+mod stack;
 mod storage;
 mod timers;
 mod urls;

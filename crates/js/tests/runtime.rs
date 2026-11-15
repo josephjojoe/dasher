@@ -244,6 +244,38 @@ fn stack_limit_turns_deep_recursion_into_an_error() {
 }
 
 #[test]
+fn the_stack_limit_uses_what_the_thread_has() {
+    // On a thread with 8 MiB of stack (as the CLI's main thread and the
+    // service's job threads have), JS recurses about as deep as a
+    // browser's, which deep React trees need; on a small thread the limit
+    // shrinks with it instead of overflowing the native stack.
+    let depth = |stack: usize| {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(|| {
+                let js = JsRuntime::new(RuntimeOptions::default()).unwrap();
+                js.eval_json(
+                    "let max = 0; function f(n) { max = n; return f(n + 1) + 1; }
+                     try { f(0); } catch (e) {} max",
+                )
+                .unwrap()
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    };
+    let deep = depth(8 * 1024 * 1024);
+    assert!(deep > 5_000, "{deep}");
+    // glibc may hand the thread a cached stack of up to four times the
+    // size asked for; the limit follows what the thread really has.
+    let shallow = depth(512 * 1024);
+    assert!((50..deep / 2).contains(&shallow), "{shallow}");
+}
+
+#[test]
 fn error_log_is_bounded() {
     let js = JsRuntime::new(RuntimeOptions {
         error_capacity: 3,

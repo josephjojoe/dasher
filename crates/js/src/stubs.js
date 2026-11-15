@@ -33,7 +33,8 @@
 //                                   close, as if the server were unreachable.
 //   Worker, SharedWorker            Constructed, but the script never loads:
 //                                   an error event; messages go nowhere.
-//   canvas.getContext('2d')         A CanvasRenderingContext2D that keeps its
+//   canvas.getContext('2d'),        A CanvasRenderingContext2D that keeps its
+//   OffscreenCanvas
 //                                   state and draws nothing; reads give
 //                                   transparent pixels.
 //   CSS.supports                    Answers true for everything.
@@ -739,6 +740,27 @@
     return context;
   };
 
+  class OffscreenCanvas extends EventTarget {
+    constructor(width, height) {
+      if (arguments.length < 2) {
+        throw new TypeError("Failed to construct 'OffscreenCanvas': 2 arguments required, but only " + arguments.length + ' present.');
+      }
+      super();
+      this.width = Math.trunc(Number(width)) || 0;
+      this.height = Math.trunc(Number(height)) || 0;
+    }
+    getContext(type) {
+      return internals.canvasContext(this, type);
+    }
+    convertToBlob(options) {
+      return resolved(new Blob([], { type: (options && options.type) || 'image/png' }));
+    }
+    transferToImageBitmap() {
+      return { width: this.width, height: this.height, close: noop };
+    }
+  }
+  tag(OffscreenCanvas, 'OffscreenCanvas');
+
   // CSS namespace. escape() is real; supports() always says yes.
   // https://drafts.csswg.org/cssom/#the-css.escape()-method
 
@@ -812,7 +834,7 @@
   internals.expose({
     Notification, ResizeObserver, ResizeObserverEntry, PerformanceObserver, BroadcastChannel,
     CloseEvent, WebSocket, EventSource, Worker, SharedWorker, CanvasRenderingContext2D,
-    CanvasGradient, CanvasPattern, ImageData, TextMetrics, Path2D, CSS, SubtleCrypto, PermissionStatus, MediaDevices,
+    CanvasGradient, CanvasPattern, ImageData, TextMetrics, Path2D, OffscreenCanvas, CSS, SubtleCrypto, PermissionStatus, MediaDevices,
     NetworkInformation, Plugin, PluginArray, MimeType, MimeTypeArray,
   });
 })

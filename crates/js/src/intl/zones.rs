@@ -541,7 +541,9 @@ pub(super) fn host_offset(t: f64) -> f64 {
 fn timezone_offset_minutes(t: f64) -> f64 {
     // As QuickJS's getTimezoneOffset: whole seconds, rounded toward zero,
     // given to localtime_r.
-    let time = (t.trunc() as i64 / 1000) as libc::time_t;
+    // The type is inferred from localtime_r: naming `libc::time_t` warns on
+    // musl, where the crate is changing it.
+    let time = (t.trunc() as i64 / 1000).try_into().unwrap_or_default();
     let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
     // SAFETY: both pointers are valid for the call; `tm` is zeroed, so it
     // is initialized whether or not localtime_r fills it in.

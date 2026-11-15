@@ -38,8 +38,10 @@ use crate::window::{self, WindowOptions, WindowState};
 
 /// Default cap on the JS heap of one page.
 pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
-/// Default cap on the native stack JS execution may use.
-pub const DEFAULT_MAX_STACK_SIZE: usize = 1024 * 1024;
+/// Default cap on the native stack JS execution may use. The limit set is
+/// at most what the thread creating the runtime has left, less a margin
+/// (see `stack.rs`): 8 MiB is about 7,000 nested JS calls.
+pub const DEFAULT_MAX_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// How a [`JsRuntime`] is set up.
 #[derive(Clone, Debug)]
@@ -55,8 +57,9 @@ pub struct RuntimeOptions {
     pub max_dom_nodes: Option<usize>,
     /// Upper bound on native stack used by JS execution, in bytes. Deep
     /// recursion past it throws a `RangeError` instead of overflowing the host
-    /// thread's stack, so keep it well below the stack of the thread that
-    /// drives the runtime.
+    /// thread's stack. On Linux it is lowered to what the thread creating
+    /// the runtime has left, less a margin, so drive the runtime from that
+    /// thread at about the same depth.
     pub max_stack_size: usize,
     /// Heap size, in bytes, at which the cycle collector first runs. `None`
     /// keeps the QuickJS default.
@@ -577,7 +580,7 @@ impl JsRuntime {
 
         let (runtime, heap) = heap::new_runtime(options.memory_limit).map_err(internal)?;
         crate::regexp::install();
-        runtime.set_max_stack_size(options.max_stack_size);
+        runtime.set_max_stack_size(crate::stack::limit(options.max_stack_size));
         if let Some(threshold) = options.gc_threshold {
             runtime.set_gc_threshold(threshold);
         }
