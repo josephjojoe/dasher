@@ -1166,3 +1166,17 @@ the array, holes, array-likes and `toSorted`. Node 22 gives the same
 output except for two of the counts: 1,025 calls for two sorted runs of
 500 where this makes 1,500 (V8 gallops through a merge), and 999 for
 1,000 equal numbers where QuickJS, before and after, makes none.
+
+## `quickjs/quickjs.c`: a bound function without its record can be freed
+
+`js_function_bind()` makes the function object and then allocates the
+record of what it binds. When that allocation fails it frees the object,
+whose finalizer (and, in a collection that runs first, whose mark
+function) read through the record that is not there: a segmentation
+fault, which a page reached by binding functions while its heap was at
+the limit. Both now return when there is no record.
+
+Found replaying a recorded page with `--memory-limit 100`: one run in
+four or five crashed, and none of 40 since. `crates/js/tests/limits.rs`
+binds 4,096 arguments at a time until an 8 MiB heap is full, so that the
+record is the allocation that is refused; it crashes without the change.

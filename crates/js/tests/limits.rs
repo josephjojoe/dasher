@@ -37,6 +37,27 @@ fn nodes(js: &JsRuntime) -> usize {
 }
 
 #[test]
+fn a_bind_the_heap_has_no_room_for_fails_cleanly() {
+    // A bound function is an object and then a record of what it binds.
+    // With thousands of bound arguments the record is the allocation the
+    // full heap refuses, and the engine used to read through the missing
+    // record when it freed the object.
+    let js = with_heap(8 * MIB);
+    let err = js
+        .run_script(
+            "const args = new Array(4096).fill(0), keep = [];
+             for (;;) keep.push(function () {}.bind(null, ...args));",
+            "bind.js",
+        )
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::OutOfMemory, "{err:?}");
+    assert_eq!(
+        js.limit_exceeded(),
+        Some(ResourceLimit::JsHeap { limit: 8 * MIB })
+    );
+}
+
+#[test]
 fn filling_the_heap_stops_the_page_even_if_it_catches_the_error() {
     let js = with_heap(16 * MIB);
     // The page swallows the out-of-memory error and carries on.
