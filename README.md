@@ -177,16 +177,11 @@ What that means in practice:
   more as the user scrolls (archive.org's collections, airbnb.com's
   listings) return what was there at load unless asked to `--scroll`
   ([Visibility](#visibility)). 32 sites served both browsers a bot wall.
-- **A known crash**: dropping a page that ran salesforce.com's tag
-  manager for its full CPU budget aborts the process on a QuickJS
-  reference-count assertion. The CLI is only affected with
-  `--script-cache-dir` (otherwise it exits without freeing the page);
-  `dasher serve` loses its in-flight jobs and restarts. See the bench
-  README.
 - **Not compared**: correctness beyond visible text, and live latency.
   Live, 24 of the sites through `dasher serve` (four at a time) settled
-  in 0.1 to 9 s each, apart from the crash above; the CLI and the Rust
-  API example loaded the ones tried.
+  in 0.1 to 9 s each, apart from salesforce.com, whose page aborted the
+  service when it was freed (fixed since: see the bench README); the CLI
+  and the Rust API example loaded the ones tried.
 
 ## Workspace layout
 

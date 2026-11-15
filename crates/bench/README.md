@@ -841,22 +841,26 @@ run as they do in a browser: Next.js apps that prefetch their links
 (time.com, tailwindcss.com), the Guardian's ad auction, weather.com's
 widgets. Median peak RSS went from 37 to 41 MiB.
 
-**Found and not fixed.**
+**Found here and fixed since.**
 
 - **A crash at page teardown.** Through `dasher serve`, salesforce.com
-  (live or replayed) aborts the whole process when its page is dropped:
-  `Assertion failed: p->ref_count > 0 (quickjs.c: gc_decref_child)`.
-  The build before this round does the same, and so does the CLI given
-  `--script-cache-dir` (which frees the page; otherwise the CLI exits
-  without freeing it, which is why the benchmark never showed it).
-  Instrumenting the engine showed that every engine-side holder of the
-  page's context (functions' realms, lazy `prototype` slots, C
-  functions) is counted, but in the runtime's final collection the Rust
-  class objects (node wrappers, event targets, events) mark the context
-  about 21,700 times while the Rust side holds about 16,400 references
-  to it, so the count goes below zero. It needs the page to run for a
-  while (a 3 s CPU budget does not crash, the default 10 s does). A
-  ticket was proposed for it.
+  (live or replayed) aborted the whole process when its page was dropped:
+  `Assertion failed: p->ref_count > 0 (quickjs.c: gc_decref_child)`. So
+  did the CLI given `--script-cache-dir` (which frees the page; otherwise
+  the CLI exits without freeing it, which is why the benchmark never
+  showed it). The context was one reference short, and the page had
+  nothing to do with it: the engine lends the context a failed promise
+  job ran in, and rquickjs 0.11 frees it as if it owned it. A job only
+  fails when an interrupt lands in it, which is what a page that spends
+  its whole CPU budget in promise callbacks gets (one job on
+  salesforce.com). `run_jobs` now takes the reference that is given back, and
+  `crates/js/tests/runtime.rs` interrupts a job and drops the runtime.
+  Replaying salesforce.com, the build without the change aborted three
+  times of three in the CLI and on the first job through `dasher serve`;
+  with it, neither does.
+
+**Found and not fixed.**
+
 - salesforce.com's Google Tag Manager loop (above) and the canvas probe
   trade-off (mongodb.com, google.com/maps).
 
