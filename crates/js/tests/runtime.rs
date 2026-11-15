@@ -285,8 +285,10 @@ fn the_stack_limit_uses_what_the_thread_has() {
             .join()
             .unwrap()
     };
+    // Frames differ by target and build: an unoptimized x86-64 build fits
+    // just under 5,000 calls, where the fixed 1 MiB limit allowed 870.
     let deep = depth(8 * 1024 * 1024);
-    assert!(deep > 5_000, "{deep}");
+    assert!(deep > 3_000, "{deep}");
     // glibc may hand the thread a cached stack of up to four times the
     // size asked for; the limit follows what the thread really has.
     let shallow = depth(512 * 1024);
