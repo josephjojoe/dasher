@@ -67,6 +67,32 @@ fn node_types_and_interfaces() {
     );
 }
 
+/// Pages test nodes against interfaces they look up by name, and a name
+/// that is missing throws: `x instanceof window['SVGScriptElement']`.
+#[test]
+fn svg_scripts_and_styles_have_their_interfaces() {
+    let js = page("<svg><script>1</script><style>a{}</style><g></g></svg>");
+    let out = eval(
+        &js,
+        r#"
+        const [script, style, g] = document.querySelector('svg').children;
+        const made = document.createElementNS('http://www.w3.org/2000/svg', 'script');
+        [
+          script instanceof window['SVGScriptElement'], script instanceof SVGElement,
+          script instanceof SVGGraphicsElement, script instanceof HTMLScriptElement, String(script),
+          style instanceof SVGStyleElement, style instanceof SVGGraphicsElement, String(style),
+          made instanceof SVGScriptElement, g instanceof SVGScriptElement,
+          document.createElement('script') instanceof SVGScriptElement,
+          (() => { try { new SVGScriptElement(); } catch (e) { return e.name; } })(),
+        ]
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"[true,true,false,false,"[object SVGScriptElement]",true,false,"[object SVGStyleElement]",true,false,false,"TypeError"]"#
+    );
+}
+
 #[test]
 fn wrappers_keep_their_identity_and_expandos() {
     let js = page("<ul><li>1</li><li>2</li></ul>");

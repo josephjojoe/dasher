@@ -3083,8 +3083,18 @@
   }
   tag(SVGSVGElement, 'SVGSVGElement');
 
+  // Scripts and styles in SVG are not graphics. Pages test nodes against
+  // these by name (`node instanceof window[name]`), which throws when the
+  // name is missing.
+  class SVGScriptElement extends SVGElement {}
+  tag(SVGScriptElement, 'SVGScriptElement');
+  class SVGStyleElement extends SVGElement {}
+  tag(SVGStyleElement, 'SVGStyleElement');
+
   const SVG_TAGS = {
     svg: SVGSVGElement,
+    script: SVGScriptElement,
+    style: SVGStyleElement,
   };
   for (const name of ['g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon',
     'text', 'tspan', 'use', 'image', 'foreignObject', 'a', 'switch', 'textPath']) {
@@ -4723,7 +4733,8 @@
     CharacterData, Text, CDATASection, Comment, ProcessingInstruction, DocumentType,
     DocumentFragment, ShadowRoot, Attr, NamedNodeMap, DOMTokenList, DOMStringMap,
     CSSStyleDeclaration, CSSStyleSheet, CSSRule, StyleSheetList, Element, HTMLElement, SVGElement,
-    SVGGraphicsElement, SVGSVGElement, MathMLElement, Document, HTMLDocument, XMLDocument,
+    SVGGraphicsElement, SVGSVGElement, SVGScriptElement, SVGStyleElement, MathMLElement,
+    Document, HTMLDocument, XMLDocument,
     DOMImplementation, DOMParser, XMLSerializer, FontFaceSet, TextTrackList, AudioTrackList,
     VideoTrackList, DOMRect, DOMRectReadOnly, DOMRectList, TreeWalker,
     NodeIterator, NodeFilter, Range, Image, Audio, Option, getComputedStyle, ...I, ...uiEvents,
