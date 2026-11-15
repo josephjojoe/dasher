@@ -456,3 +456,67 @@ async fn documents_parsed_from_responses() {
         r#"{"broken":null,"feed":[true,true,"application/rss+xml",true,"rss",["One","Two"]],"feedDocument":2,"html":[true,"Fetched","hiwindow.ran = true",true,true,true],"htmlXml":null,"json":null}"#
     );
 }
+
+/// A wrapper built the way Dynatrace's agent builds its own: a prototype
+/// made from XMLHttpRequest's, with every member a `for…in` finds there
+/// replaced by one that forwards to a real request.
+#[tokio::test]
+async fn a_wrapper_can_forward_every_member() {
+    let server = server();
+    let js = page(Some(session()));
+    js.run_script(
+        &format!("window.target = {:?};", server.url("/api/items")),
+        "target.js",
+    )
+    .unwrap();
+    run(
+        &js,
+        r#"
+        const Real = XMLHttpRequest;
+        function Wrapper() { this.real = new Real(); }
+        Wrapper.prototype = Object.create(Real.prototype, Object.getOwnPropertyDescriptors(Real.prototype));
+        window.forwarded = [];
+        for (const key in Real.prototype) {
+          if (typeof Real[key] === 'number') continue;
+          window.forwarded.push(key);
+          Object.defineProperty(Wrapper.prototype, key, {
+            get() {
+              const value = this.real[key];
+              return typeof value === 'function' ? value.bind(this.real) : value;
+            },
+            set(value) { this.real[key] = value; },
+          });
+        }
+        const x = new Wrapper();
+        x.withCredentials = true;
+        x.onload = () => { window.result = [x.status, x.responseText, x.withCredentials, x.readyState]; };
+        x.open('GET', window.target);
+        x.setRequestHeader('x-test', '1');
+        x.send();
+        "#,
+    )
+    .await;
+    assert_eq!(
+        json(&js, "window.result"),
+        r#"[200,"{\"items\":[\"a\",\"b\"]}",true,4]"#
+    );
+    // Everything the interfaces define is enumerable, as in a browser.
+    assert_eq!(
+        json(
+            &js,
+            r#"[XMLHttpRequestEventTarget, XMLHttpRequestUpload, XMLHttpRequest].map(({ prototype }) =>
+                 Object.getOwnPropertyNames(prototype).filter((key) =>
+                   key !== 'constructor' && !Object.getOwnPropertyDescriptor(prototype, key).enumerable))"#
+        ),
+        "[[],[],[]]"
+    );
+    assert_eq!(
+        json(
+            &js,
+            r#"['open', 'send', 'abort', 'setRequestHeader', 'getResponseHeader', 'overrideMimeType',
+                'withCredentials', 'responseType', 'timeout', 'status', 'response', 'upload',
+                'onreadystatechange', 'onload', 'onerror'].filter((key) => !forwarded.includes(key))"#
+        ),
+        "[]"
+    );
+}
