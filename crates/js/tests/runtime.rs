@@ -191,6 +191,24 @@ fn deadline_interrupts_runaway_scripts() {
 }
 
 #[test]
+fn a_runtime_interrupted_in_a_promise_job_can_be_dropped() {
+    // The engine lends its context with a job that failed, and a job only
+    // fails on an interrupt. Giving back a reference that was never taken
+    // left the context one short, which the collector aborted on when the
+    // runtime was dropped.
+    for _ in 0..3 {
+        let js = runtime();
+        js.set_deadline(Some(Instant::now() + Duration::from_millis(30)));
+        // The script ends at once; its microtask is what gets interrupted.
+        let _ = js.run_script("Promise.resolve().then(() => { for (;;) {} });", "job.js");
+        let errors = js.take_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].kind, ErrorKind::Interrupted);
+        drop(js);
+    }
+}
+
+#[test]
 fn interrupt_handle_stops_scripts_from_another_thread() {
     let js = runtime();
     let handle = js.interrupt_handle();

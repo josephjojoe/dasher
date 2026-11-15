@@ -759,10 +759,19 @@ impl JsRuntime {
             match self.runtime.execute_pending_job() {
                 Ok(true) => {}
                 Ok(false) => break,
-                Err(job) => job.0.with(|ctx| {
-                    self.shared
-                        .report_uncaught(&ctx, rquickjs::Error::Exception);
-                }),
+                Err(job) => {
+                    // The engine lends the context a failed job ran in, and
+                    // rquickjs 0.11 hands it over as one it owns, to be
+                    // freed with `job` (0.14 takes the reference itself).
+                    // Take the reference that will be given back: one short,
+                    // the context is collected while the page still uses it.
+                    // SAFETY: the context is this runtime's, alive in `self`.
+                    unsafe { qjs::JS_DupContext(job.0.as_raw().as_ptr()) };
+                    job.0.with(|ctx| {
+                        self.shared
+                            .report_uncaught(&ctx, rquickjs::Error::Exception);
+                    });
+                }
             }
         }
     }
