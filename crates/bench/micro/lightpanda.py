@@ -123,7 +123,8 @@ def main(argv):
     def cpu(url):
         before = resource.getrusage(resource.RUSAGE_CHILDREN)
         out = subprocess.run(
-            [lightpanda, "fetch", "--wait-script", "benchDone", "--dump", "html", *flags, url],
+            [lightpanda, "fetch", "--wait-until", "load", "--wait-script", "window.benchDone === true",
+             "--dump", "html", *flags, url],
             env=env, capture_output=True, text=True,
         )
         after = resource.getrusage(resource.RUSAGE_CHILDREN)

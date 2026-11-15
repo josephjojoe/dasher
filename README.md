@@ -14,10 +14,15 @@ its priorities are, in order:
 2. **Cold-start time**
 3. **Binary size**
 
-Raw JavaScript speed matters less.
+CPU per page comes right after them: serverless platforms bill it, and
+most of a page's CPU is its JavaScript. The yardstick is
+[Lightpanda](https://github.com/lightpanda-io/browser), a headless browser
+built on V8: dasher aims at its CPU per page with half its memory.
 
-> Status: early development. The workspace is scaffolded; page loading is not
-> implemented yet.
+> Status: working, for scraping real sites, through the CLI, the HTTP
+> service, the Lambda runtime and the Rust API. On 224 recorded sites it
+> uses 1.12 times Lightpanda's CPU and less than half its memory; see
+> [How it compares](#how-it-compares) for what works and what does not.
 
 ## Non-goals
 
@@ -125,6 +130,63 @@ for `all` and 34 for `viewport`. `viewport` kept the same text as well,
 except on engadget.com (1,615 words, against 4,128 under `loaded`). The
 difference is all on pages with self-triggering loaders: elsewhere the three
 policies cost the same.
+
+## How it compares
+
+dasher and Lightpanda's nightly (1.1.0, 2026-11-14) were run on the same
+recordings of 224 sites (home pages and article pages: news, shopping,
+SaaS, documentation, government and education, static sites and web
+apps), each with its default settings (Lightpanda waiting for network
+idle), on one aarch64 Linux machine, 2026-11-15. Full tables and method:
+[crates/bench/README.md](crates/bench/README.md#against-lightpanda).
+
+| | dasher | Lightpanda |
+| --- | ---: | ---: |
+| CPU, 180 sites where both returned the same page | 221 s | 197 s (dasher 1.12×; median page 1.16×) |
+| CPU, 52 heavy pages running the same scripts | 128 s | 121 s (dasher 1.05×) |
+| Median peak memory | 41 MiB | 90 MiB |
+| Sites it failed where the other did not | 3 | 5 |
+| Sites where it kept much less text than the other | 3 | 1 |
+| Pages cut short | 4 by a budget, none by the wall clock | 13 by its 5 s wait cap |
+
+What that means in practice:
+
+- **Memory is where dasher wins**: under half of Lightpanda's peak on the
+  median page and on heavy ones, from a 6 MiB static binary that idles at
+  4 MiB.
+- **CPU is close, not ahead.** On the same work dasher's engine is
+  slower: QuickJS has no inline caches and no compiled built-ins, so
+  running JavaScript costs it about 1.8 times what it costs V8's
+  interpreter, which the faster DOM and compiler make up for in part
+  (5% on heavy pages; the profile breakdown is in the bench README).
+  Where pages do different work the two trade places: salesforce.com
+  (Google Tag Manager re-running its tags until the CPU budget),
+  aws.amazon.com and shopify.com (three to four times the script
+  Lightpanda runs) cost dasher several seconds more; nytimes.com,
+  datadoghq.com and timesofindia.com cost Lightpanda as much more.
+  Answering a few APIs as Chrome does would let ad renderers and
+  bot-detection scripts run, at seconds of CPU and tens of MiB a page
+  for no content; dasher leaves those answers out on purpose (see
+  [COMPATIBILITY.md](COMPATIBILITY.md)).
+- **Every load is bounded.** No page runs to the wall-clock limit; four
+  end on a budget and still return their content (see
+  [Bounded page loads](#bounded-page-loads)).
+- **What fails.** duolingo.com refuses browsers without WebAssembly.
+  mongodb.com and google.com/maps need a canvas a page probes without
+  inserting it (see [COMPATIBILITY.md](COMPATIBILITY.md)). Pages that load
+  more as the user scrolls (archive.org's collections, airbnb.com's
+  listings) return what was there at load unless asked to `--scroll`
+  ([Visibility](#visibility)). 32 sites served both browsers a bot wall.
+- **A known crash**: dropping a page that ran salesforce.com's tag
+  manager for its full CPU budget aborts the process on a QuickJS
+  reference-count assertion. The CLI is only affected with
+  `--script-cache-dir` (otherwise it exits without freeing the page);
+  `dasher serve` loses its in-flight jobs and restarts. See the bench
+  README.
+- **Not compared**: correctness beyond visible text, and live latency.
+  Live, 24 of the sites through `dasher serve` (four at a time) settled
+  in 0.1 to 9 s each, apart from the crash above; the CLI and the Rust
+  API example loaded the ones tried.
 
 ## Workspace layout
 

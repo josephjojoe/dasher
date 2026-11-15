@@ -140,6 +140,15 @@ fixture needs a 5 MiB JS heap and about 11 MiB of RSS in all, which leaves room
 for several times its script and state within 80 MB. Pages that go far
 beyond that are what the per-page limits below guard against.
 
+On 2026-11-15, after the end-to-end comparison with Lightpanda and its
+fixes ([Against Lightpanda](#against-lightpanda)), the static musl build
+(aarch64, AWS Graviton) measured: idle RSS 4.4 MiB; peak RSS 7.5, 17.8,
+11.5 and 9.4 MiB on the four pages; 7.0 MiB between jobs over 100
+sequential jobs, with no growth; cold start 41 ms; binary 6.13 MiB. The
+build before the fixes gave 4.2 MiB idle, 7.4, 17.8, 11.3 and 9.2 MiB,
+40 ms and the same size: the added glue (workers, canvas, the
+performance timeline) costs about 0.2 MiB of JS heap per page.
+
 ## Allocator
 
 Rust code in dasher uses the **system allocator**: in the static musl
@@ -199,7 +208,12 @@ DASHER_REPLAY=rec/verge /usr/bin/time -l target/profiling/dasher -t 60 https://w
 
 Set `DASHER_REPLAY_LOG` as well to have every request the replay answers
 (or refuses) printed to stderr as `replay: hit|miss <method> <url>`, to
-count a page's requests.
+count a page's requests. Set `DASHER_REPLAY_FILL` with `DASHER_REPLAY` to
+fetch what the recording lacks from the network and add it (nothing
+recorded is rewritten): a page whose scripts start working asks for
+things its recording never saw, and a replay that refuses them can make
+it retry in a loop. The fragment of a URL plays no part in matching, and
+a replayed response keeps the request's, as a live one does.
 
 With `DASHER_EAGER_JS` set, a `replay` build compiles every function with
 its script instead of on its first call (see
@@ -705,6 +719,194 @@ replaying at once, contention more than doubled it on heavy pages. Run
 one at a time, wall times matched `babeb38` or beat it (bloomberg.com
 9.5 s against 10.8 s, dell.com 4.2 against 5.4).
 
+### Against Lightpanda
+
+An audit of `babeb38` (2026-11-12) compared dasher with Lightpanda 1.0.3
+on macOS and found dasher at 1.31 times Lightpanda's CPU over 146 sites,
+most of it on three pages that ran to the time limit. The tickets that
+followed (bounded loads, the visibility policy, lazy compilation, the
+script cache, the parser, engine and regexp work, the native DOM and
+events) each measured themselves alone; this is the comparison run again
+end to end on the result, with fixes for what it turned up.
+
+**Method.** 224 sites ([`compare/sites.txt`](compare/sites.txt)) were
+recorded on 2026-11-14, first by dasher (`DASHER_RECORD`), then through a
+recording proxy by Lightpanda, which added what it asked for beyond that;
+after a first round of runs both completed the recordings once more,
+each fetching only what the recording lacked. Both browsers then read the
+same bytes: dasher from the recording in-process (`DASHER_REPLAY`),
+Lightpanda through [`compare/proxy.py`](compare/proxy.py). Each ran every
+site three times, alternating which went first, with its defaults:
+`dasher --json URL` (the static musl build with the `replay` feature),
+and `lightpanda fetch --dump html --wait-until networkidle URL`
+(1.1.0-nightly.12159, JIT on, its 5 s wait cap). CPU is user plus system
+time of the whole process, peak memory its high-water RSS, both the
+median of three; four sites ran at a time on 8 cores of an AWS Graviton
+(aarch64 Linux). Pages are classed by their visible text as the audit
+did (see [`compare/README.md`](compare/README.md)).
+
+| | audit of `babeb38` (Lightpanda 1.0.3, macOS) | now (Lightpanda nightly, Linux) | goal |
+| --- | ---: | ---: | ---: |
+| comparable sites | 146 | 180 | |
+| CPU, total | 272 s against 208 s: **1.31×** | 220.9 s against 196.7 s: **1.12×** | under 1.0× |
+| CPU, median page | 1.27× | 1.16× | |
+| cheaper by over 10%: dasher / Lightpanda | 43 / 84 | 40 / 103 | |
+| matched heavy pages (same JavaScript, over 1 CPU s) | 17: 42.5 s against 28.2 s, **1.51×** | 52: 127.7 s against 121.2 s, **1.05×** | 1.15× |
+| pages ended by the wall-clock limit | 3 (176 s of the 272) | **0** | 0 |
+| pages ended by a budget | | 4 | |
+| median peak RSS | 30 MiB against 63 | **41 MiB against 90** (heavy pages: 99 against 178) | about half |
+| text kept (words, comparable sites) | | 335,982 against 336,153 | |
+| dasher failed where Lightpanda was fine | 19 | **3** | fewer |
+| dasher thin where Lightpanda was fine | 12 | 3 | |
+| Lightpanda failed / thin where dasher was fine | 1 / 4 | 5 / 1 | |
+| neither usable (bot walls) | 27 | 32 | |
+
+The two samples differ (the audit's 209 sites and recordings are not
+available here; this one has 224, a Linux machine and Lightpanda's later
+nightly), so compare the ratios, not the seconds. Three of the five sites
+"Lightpanda failed" returned the same text as dasher and only exited 1.
+
+**Goals.** Heavy pages (1.05×), the wall clock (none), memory (0.46 of
+Lightpanda's) and failing sites (3) are met. Total CPU is not: 1.12×,
+12% over. What remains, from the per-page figures and the profiles below:
+
+- **The engine on the same work**: 6.5 s of the 24.2 s difference is the
+  52 matched heavy pages, where dasher runs the same scripts 5% slower
+  (median page 1.10×). The profile below says where.
+- **Pages that do different work**: the other 128 comparable pages
+  account for the remaining 17.7 s, most of it on a few: salesforce.com (8.2 s more:
+  Google Tag Manager's containers keep re-running their tag machinery in
+  one task until the 10 s CPU budget, though the page's text is all
+  there), aws.amazon.com (3.2 s: dasher runs 26 MB of scripts against
+  Lightpanda's 9), shopify.com (2.1 s: 4 MB against 1), samsung.com.
+  Others go the other way: datadoghq.com and nytimes.com cost Lightpanda
+  5 s more each.
+
+| page | dasher CPU s | Lightpanda | difference | scripts run (MB), dasher / Lightpanda |
+| --- | ---: | ---: | ---: | --- |
+| salesforce.com | 10.03 (CPU budget) | 1.82 | +8.21 | 16.0 / 14.4 |
+| hubspot.com | 10.64 (CPU budget) | 7.30 | +3.34 | 2.7 / 5.1 |
+| aws.amazon.com | 3.64 | 0.51 | +3.13 | 26.2 / 8.7 |
+| newrelic.com | 5.63 | 3.09 | +2.54 | 1.9 / 2.4 |
+| dell.com | 4.72 | 2.60 | +2.13 | 12.0 / 11.8 |
+| shopify.com | 2.18 | 0.10 | +2.09 | 4.1 / 1.0 |
+| techcrunch.com | 3.84 | 1.90 | +1.94 | 6.0 / 6.1 |
+| bbc.co.uk | 3.52 | 1.58 | +1.94 | 6.5 / 5.3 |
+| azure.microsoft.com | 4.85 | 2.94 | +1.91 | 11.8 / 14.4 |
+| … | | | | |
+| timesofindia.indiatimes.com | 0.84 | 3.28 | −2.44 | 4.8 / 11.1 |
+| nytimes.com | 1.72 | 6.22 | −4.51 | 11.1 / 12.9 |
+| datadoghq.com | 1.06 | 5.97 | −4.91 | 5.4 / 5.9 |
+
+**Budgets.** Four pages end on one and keep their text: salesforce.com
+(CPU, above), hubspot.com (CPU, a MutationObserver copying large
+NodeLists; it lands either side of the budget from run to run), theguardian.com (page time: its ad
+auction keeps scheduling work) and tailwindcss.com (requests: Next.js
+prefetches every link on the page, 1,003 requests, as Lightpanda's 1,003
+do too).
+
+**What failed or came back thin.** duolingo.com sends browsers without
+WebAssembly to "not supported"; mongodb.com and google.com/maps stop when
+Lottie or another script finds no 2D context on a canvas it never
+inserted (see COMPATIBILITY.md); archive.org, airbnb.com and costco.com
+load more listings as they are scrolled, which Lightpanda does by itself
+and dasher's `loaded` visibility leaves for `--scroll`.
+
+**Fixed along the way.** The first run on `main` (`dcf222c`) showed pages
+failing or coming back thin for reasons a browser does not have. Fixed
+here, each with a test:
+
+| fix | what it did on the recorded pages |
+| --- | --- |
+| classic scripts load from `data:` URLs | instagram.com: 0 words, now 22 (Lightpanda 22) |
+| `document.currentScript` stays set through the microtask checkpoint after a script, as HTML and Chrome have it | Next.js apps built with Turbopack threw an invariant error and stopped (nodejs.org, anthropic.com, airtable.com, tailwindcss.com, time.com, stanford.edu) |
+| `Worker` and `SharedWorker` exist; the worker's script never loads | docs.npmjs.com: 0 words, now 800 |
+| the JS stack limit uses what the thread has, up to 8 MiB (about 6,400 nested calls, from 870) | open.spotify.com: React's commit phase overflowed; 1,250 words, now 1,621 in most runs |
+| a drawing-free 2D context for canvases in the document and `OffscreenCanvas` | stripe.com: 38 words, now 3,204 |
+| `CSSRule.style`, `part` and the other `[PutForwards]` token lists, media track lists as event targets | stanford.edu's media-chrome components (1,584 words, now 1,627) |
+| a navigation entry and real `performance.mark()` / `measure()`; `XMLSerializer`; `relList.supports()` on links, anchors and forms | page errors on 5 to 12 sites each |
+| replay keeps the request's fragment on the response URL, as a live response does, and can fill what a recording lacks (`DASHER_REPLAY_FILL`) | shopify.com reloaded itself until the CPU budget under replay (10 s, now 2.2 s); live it never did |
+
+Two were tried and left out because they cost much more CPU and memory
+for no more text: a 2D context for every canvas (canvases that are
+never inserted are probes: Castle and PerimeterX bot detection then ran
+for 7 to 10 CPU s on atlassian.com and walmart.com, and Lottie animated
+nytimes.com out of its JS heap), and answering `iframe.sandbox.supports()`
+as Chrome does (it lets Google Publisher Tag render its ads).
+
+On the same recordings, the build before these fixes used 199.6 CPU s
+on the 180 comparable sites (1.01 times Lightpanda) and kept 326,284
+words; with them, 220.9 s and 335,982 words. The 21 s are pages that now
+run as they do in a browser: Next.js apps that prefetch their links
+(time.com, tailwindcss.com), the Guardian's ad auction, weather.com's
+widgets. Median peak RSS went from 37 to 41 MiB.
+
+**Found and not fixed.**
+
+- **A crash at page teardown.** Through `dasher serve`, salesforce.com
+  (live or replayed) aborts the whole process when its page is dropped:
+  `Assertion failed: p->ref_count > 0 (quickjs.c: gc_decref_child)`.
+  The build before this round does the same, and so does the CLI given
+  `--script-cache-dir` (which frees the page; otherwise the CLI exits
+  without freeing it, which is why the benchmark never showed it).
+  Instrumenting the engine showed that every engine-side holder of the
+  page's context (functions' realms, lazy `prototype` slots, C
+  functions) is counted, but in the runtime's final collection the Rust
+  class objects (node wrappers, event targets, events) mark the context
+  about 21,700 times while the Rust side holds about 16,400 references
+  to it, so the count goes below zero. It needs the page to run for a
+  while (a 3 s CPU budget does not crash, the default 10 s does). A
+  ticket was proposed for it.
+- salesforce.com's Google Tag Manager loop (above) and the canvas probe
+  trade-off (mongodb.com, google.com/maps).
+
+**Where the CPU goes on the 52 matched heavy pages.** Profiled on the
+build just before `iframe.sandbox.supports()` was made to throw again
+(below), which spent 6.8 s more on these pages, nearly all of it running
+Google's ad scripts, so the final build's JavaScript row is up to that
+much lower.
+Each page was
+profiled once in each browser with `perf` (user-space cycles at 999 Hz;
+DWARF call graphs for dasher, the sampled function alone for Lightpanda,
+whose V8 frames do not unwind), every sample put to a kind of work by its
+innermost recognizable frame ([`compare/classify.py`](compare/classify.py);
+copies take their caller's kind), and each page's shares scaled to its
+measured user CPU. Kernel time is the measured system CPU. CPU seconds:
+
+| kind of work | dasher | Lightpanda | difference | audit (17 pages): dasher / Lightpanda |
+| --- | ---: | ---: | ---: | --- |
+| Running JavaScript | 81.23 | 45.02 | +36.21 | 21.0 / 9.1 |
+| Parsing and compiling scripts | 20.75 | 27.58 | −6.83 | 8.1 / 5.7 |
+| Garbage collection and allocation | 15.16 | 6.72 | +8.44 | 4.8 / 4.5 |
+| DOM and its JS bindings | 5.82 | 9.01 | −3.19 | 6.1 / 2.4 |
+| Kernel (system CPU) | 5.40 | 9.37 | −3.96 | 0.2 / 1.5 |
+| Regular expressions | 2.38 | 1.31 | +1.07 | 1.04 / 0.05 |
+| Start-up, libc and unresolved | 2.13 | 14.81 | −12.68 | |
+| Page loop and other | 0.78 | 3.98 | −3.20 | 0.8 / 0.6 |
+| Network and TLS | 0.55 | 1.92 | −1.37 | 0.35 / 0.33 |
+| JIT compilers | 0.00 | 0.85 | −0.85 | 0.00 / 4.03 |
+| HTML parsing | 0.30 | 0.60 | −0.30 | 0.03 / 0.00 |
+| **total** | **134.51** | **121.17** | **+13.34** | 42.5 / 28.2 |
+
+- **Running JavaScript is the whole gap and more**: 1.8 times
+  Lightpanda's (it was 2.3 in the audit). V8 runs page code in its
+  interpreter with inline caches and compiled built-ins; QuickJS has
+  neither. The micro-benchmarks below put the same split on single
+  operations: QuickJS is 1.1 to 1.5 times V8's interpreter on calls and
+  property access, 2 to 2.7 times on object literals, spread,
+  destructuring, classes, promises and `for-in`.
+- **Allocation and garbage collection** cost dasher 8.4 s more. The split
+  is approximate: V8 allocates inline in generated code (counted as
+  running JavaScript) and Lightpanda's libc memory functions are among
+  its unresolved samples, while dasher's count includes every
+  `js_malloc` and free.
+- **Parsing and compiling** is now cheaper in dasher (lazy compilation
+  and the parser work), and so is **DOM** work (native bindings,
+  indexes, native events): 0.65 times Lightpanda's, from 2.5 times.
+- Lightpanda's own overheads (its JIT, extra threads, the dynamic
+  loader, TLS to the replay proxy, page loop) add up to about 22 s that
+  dasher does not spend.
+
 ## Micro-benchmarks
 
 `dasher-bench micro` times small fixed loops of one language operation or
@@ -1153,6 +1355,93 @@ run-to-run noise (−0.08 to +0.21 MiB for either build).
 40,000 calls sampled from those pages and replayed through `exec` (the
 pattern, the subject and lastIndex of every 16th call) took 1.64 times as
 long as in Node before and 0.96 times after.
+
+### Lightpanda and Node, 2026-11-15
+
+The same machine and build as [Against Lightpanda](#against-lightpanda),
+median of 5 runs. dasher's loops as `dasher-bench micro` sized them;
+Lightpanda's ran three times as many iterations through
+[`micro/lightpanda.py`](micro/lightpanda.py) (`--from`, `--scale 3`), once
+as shipped and once with `--jitless`; Node 22 with `--jitless
+--single-threaded`. Lightpanda's figures include its JIT where it has
+one: on a hot loop the JIT is everything, on a page it was worth nothing
+in the audit, so compare with the no-JIT column.
+
+| benchmark | dasher ns/op | Node `--jitless` | Lightpanda, no JIT | Lightpanda as shipped | dasher ÷ Lightpanda no JIT |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| function call | 38.8 | 30.6 | 32.0 | 4.0 | 1.2× |
+| method call | 59.3 | 37.6 | 39.0 | 1.0 | 1.5× |
+| create+call closure | 129 | 96.3 | 102 | 8.0 | 1.3× |
+| integer loop | 20.7 | 15.6 | 19.0 | 4.0 | 1.1× |
+| property read/write, one shape | 40.0 | 26.5 | 36.0 | 1.0 | 1.1× |
+| property read/write, four shapes | 48.4 | 33.4 | 39.0 | 3.0 | 1.2× |
+| property read/write, 64 shapes | 49.5 | 35.3 | 39.0 | 9.0 | 1.3× |
+| object literal | 88.9 | 32.9 | 37.0 | 12.0 | 2.4× |
+| spread and Object.assign | 408 | 148 | 150 | 96.0 | 2.7× |
+| destructuring and rest/spread | 749 | 345 | 353 | 98.0 | 2.1× |
+| apply and arguments | 230 | 131 | 148 | 17.0 | 1.6× |
+| map/filter/reduce | 1,419 | 652 | 638 | 364 | 2.2× |
+| concat.apply | 441 | 197 | 207 | 170 | 2.1× |
+| string concat | 49.9 | 44.7 | 48.0 | 12.0 | 1.0× |
+| string methods | 702 | 559 | 675 | 474 | 1.0× |
+| regexps | 865 | 509 | 520 | 276 | 1.7× |
+| regexps, page patterns | 3,493 | 2,512 | 2,227 | 924 | 1.6× |
+| regexps over page text | 307,264 | 610,550 | 321,494 | 84,300 | 1.0× |
+| JSON | 1,388 | 1,211 | 824 | 798 | 1.7× |
+| Map/Set | 175 | 104 | 112 | 36.0 | 1.6× |
+| class instantiation | 216 | 92.9 | 90.0 | 15.0 | 2.4× |
+| promise chain | 911 | 425 | 402 | 337 | 2.3× |
+| async/await | 262 | 140 | 133 | 34.0 | 2.0× |
+| generators | 47.1 | 84.4 | 96.0 | 18.0 | 0.5× |
+| Date and Intl formatting | 2,852 | 2,312 | 2,966 | 2,796 | 1.0× |
+| try/catch | 111 | 685 | 583 | 597 | 0.2× |
+| for-in and Object.keys | 433 | 171 | 178 | 31.0 | 2.4× |
+| URL parsing | 1,482 | 1,393 | 24,212 | 23,956 | 0.1× |
+| new Function | 2,032 | 1,046 | 8,640 | 8,861 | 0.2× |
+
+URL parsing and `new Function` in Lightpanda go through its own layers
+(a Zig URL parser on every access, a compile per call); try/catch and
+generators are cheaper in QuickJS. Regexps over page text run at V8's
+interpreter speed (DAS-38).
+
+| benchmark | dasher ns/op | Lightpanda ns/op | dasher ÷ Lightpanda |
+| --- | ---: | ---: | ---: |
+| getElementById | 161 | 288 | 0.6× |
+| getComputedStyle | 279 | 281 | 1.0× |
+| classList.contains | 149 | 135 | 1.1× |
+| style.setProperty | 764 | 389 | 2.0× |
+| add+removeEventListener | 226 | 228 | 1.0× |
+| dispatchEvent, bubbling 3 levels | 1,446 | 1,737 | 0.8× |
+| clientWidth | 86.5 | 60.0 | 1.4× |
+| append+removeChild | 499 | 211 | 2.4× |
+| dataset.x | 287 | 179 | 1.6× |
+| setAttribute | 232 | 245 | 0.9× |
+| attributes.length | 110 | 91.0 | 1.2× |
+| getAttribute | 137 | 128 | 1.1× |
+| matches(tag) | 136 | 90.0 | 1.5× |
+| querySelector(tag) | 142 | 117 | 1.2× |
+| tagName | 75.9 | 68.0 | 1.1× |
+| nextSibling | 68.3 | 53.0 | 1.3× |
+| nodeType | 66.6 | 35.0 | 1.9× |
+| shadowRoot | 68.0 | 36.0 | 1.9× |
+| children | 67.4 | 510 | 0.1× |
+| innerText | 405 | 176 | 2.3× |
+| createElement | 696 | 805 | 0.9× |
+| document.cookie | 740 | 546 | 1.4× |
+| getBoundingClientRect | 961 | 15,314 | 0.1× |
+| querySelectorAll(#id) | 479 | 1,495 | 0.3× |
+| querySelectorAll(.class) | 108,733 | 55,461 | 2.0× |
+| querySelectorAll(tag) | 127,807 | 63,695 | 2.0× |
+| children[i] | 56.1 | 78.0 | 0.7× |
+| hidden | 78.8 | 36.0 | 2.2× |
+| a.href | 1,425 | 786 | 1.8× |
+
+The DOM is at Lightpanda's speed or better on most calls; the slow
+ones left are tree edits (`append`+`removeChild`, 2.4×), `innerText`,
+`style.setProperty`, the getters that cross four prototypes (`nodeType`,
+`shadowRoot`, about 30 ns over Lightpanda's) and whole-document class and
+tag queries (2×). Lightpanda's `children` builds a new list on each call
+and its `getBoundingClientRect` runs its layout.
 
 ## Per-page limits
 

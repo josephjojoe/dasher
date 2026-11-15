@@ -542,7 +542,8 @@ fn timezone_offset_minutes(t: f64) -> f64 {
     // As QuickJS's getTimezoneOffset: whole seconds, rounded toward zero,
     // given to localtime_r.
     // The type is inferred from localtime_r: naming `libc::time_t` warns on
-    // musl, where the crate is changing it.
+    // musl, where the crate is changing it. It is i64 on glibc.
+    #[allow(clippy::useless_conversion)]
     let time = (t.trunc() as i64 / 1000).try_into().unwrap_or_default();
     let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
     // SAFETY: both pointers are valid for the call; `tm` is zeroed, so it
