@@ -482,3 +482,31 @@ fn layout_getters_agree_with_the_boxes() {
         r#"["0,0,1920,20,1920,20,1920,20","0,0,1920,20","0,0,0,0,0,0,0,0","0,0,0,0","0,0,0,0,0,0,0,0","0,0,0,0",true,true,true,true,0,0,true,false,0,true,"Illegal invocation"]"#
     );
 }
+
+#[test]
+fn inserted_css_rules_have_a_style() {
+    // media-chrome's components insert a `:host` rule into their shadow
+    // root's sheet and set properties on its style.
+    let js = page("<style id=s></style>");
+    let out = eval(
+        &js,
+        r#"
+        const sheet = document.getElementById('s').sheet;
+        const at = sheet.insertRule(':host { color: red; --X-y: 1px !important }', 0);
+        const rule = sheet.cssRules[at];
+        const style = rule.style;
+        style.setProperty('display', 'inline-flex');
+        style.setProperty('color', '');
+        const r = [rule.selectorText, style.getPropertyValue('--X-y'), style.getPropertyPriority('--X-y'),
+                   style.length, style.item(1), rule.cssText, style === rule.style, style.parentRule === rule,
+                   style.removeProperty('DISPLAY'), style.cssText];
+        style.cssText = 'margin: 0';
+        r.push(rule.cssText);
+        r
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"[":host","1px","important",2,"display",":host { --X-y: 1px !important; display: inline-flex; }",true,true,"inline-flex","--X-y: 1px !important;",":host { margin: 0; }"]"#
+    );
+}

@@ -579,8 +579,10 @@ impl Session {
             .unwrap_or(client.max_response_size);
 
         #[cfg(feature = "replay")]
+        let mut filling = None;
+        #[cfg(feature = "replay")]
         if let Some(replay::Mode::Replay(store)) = &client.replay {
-            return match store.find(&request.method, &request.url) {
+            match store.find(&request.method, &request.url) {
                 Some(recorded) => {
                     if request.credentials.allowed_for(&request.url) {
                         for value in recorded.headers.get_all(SET_COOKIE) {
@@ -589,17 +591,22 @@ impl Session {
                             }
                         }
                     }
-                    Ok(Response::recorded(recorded, limit, in_flight))
+                    return Ok(Response::recorded(recorded, limit, in_flight));
                 }
-                None => Err(Error::new(ErrorKind::Connect)
-                    .with_url(&request.url)
-                    .with_source("not in the recording")),
-            };
+                // Fill mode: fetch what the recording lacks, and add it.
+                None if store.fills() => filling = Some(store.dir()),
+                None => {
+                    return Err(Error::new(ErrorKind::Connect)
+                        .with_url(&request.url)
+                        .with_source("not in the recording"));
+                }
+            }
         }
         #[cfg(feature = "replay")]
-        let recording = match &client.replay {
-            Some(replay::Mode::Record(dir)) => {
-                Some((dir, request.method.clone(), request.url.clone()))
+        let recording = match (&client.replay, filling) {
+            (_, Some(dir)) => Some((dir, request.method.clone(), request.url.clone())),
+            (Some(replay::Mode::Record(dir)), None) => {
+                Some((dir.as_path(), request.method.clone(), request.url.clone()))
             }
             _ => None,
         };

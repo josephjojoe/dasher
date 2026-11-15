@@ -27,9 +27,9 @@ view, where `querySelector` and `innerHTML` stop at shadow roots.
 | `adoptedCallback`, scoped custom element registries | `adoptedCallback` never runs (there is one document); `new CustomElementRegistry()` throws |
 | Form-associated custom elements | `attachInternals()` works, but every control counts as valid and its value is never submitted |
 | `:defined`, `:host`, `::part()`, `::slotted()` in selectors | `:defined` matches every element; the shadow-scoped ones never match |
-| `XMLSerializer` | Undefined; use `outerHTML` |
+| `XMLSerializer` | Serializes as `outerHTML` does, with `xmlns` declared on the outermost element; empty XML elements are not self-closed (`<i></i>`, not `<i/>`) |
 | DTD entities and processing instructions in XML documents | Entities a DTD declares are an error (as in browsers without the DTD); processing instructions are dropped |
-| `document.evaluate` / XPath | Undefined |
+| `document.evaluate` / XPath | Undefined, as are `XPathResult` and `XPathEvaluator` |
 | Live ranges, `StaticRange` | A `Range` works (boundary points, contents, `createContextualFragment`) but does not follow later changes to the tree, and its rectangles are those of its closest element; `StaticRange` and `AbstractRange` are undefined |
 | Choosing files | The `files` of an `<input type=file>` is a `FileList` that is always empty |
 | `FileReader` | Undefined; use `blob.text()` / `arrayBuffer()` |
@@ -37,8 +37,10 @@ view, where `querySelector` and `innerHTML` stop at shadow roots.
 | BYOB stream readers | `getReader({ mode: 'byob' })` throws; byte streams act as default streams |
 | `crypto.subtle` beyond `digest()` | Every other method rejects with `NotSupportedError` |
 | `Intl.Segmenter`, `Intl.DisplayNames`; locales other than en-US | Both are undefined; every locale formats as en-US. `Intl.Locale` has no `getWeekInfo()`, `getTextInfo()` or the other `get…()` methods, and `maximize()` and `minimize()` leave all but about fifty languages as they are |
-| Performance timeline (entries from `mark`/`measure`, navigation and resource entries) | `mark` and `measure` record nothing and `getEntries…()` list nothing; `performance.now()` works. `performance.timing` times the document's stages (`domInteractive` to `loadEventEnd`), but every network stage reports the navigation start |
-| `<meta http-equiv="refresh">` | Not followed |
+| Performance timeline beyond navigation and user timing | `getEntries…()` list one `navigation` entry and the page's marks and measures; there are no `resource`, `paint` or other entries, and `PerformanceObserver` never calls back. `performance.timing` and the navigation entry time the document's stages (`domInteractive` to `loadEventEnd`), but every network stage reports the navigation start |
+| Very deep recursion | A `RangeError` after about 6,400 nested JS calls when the page runs on a thread with 8 MiB of stack (the CLI's and the service's), fewer on smaller threads; Chrome allows about 10,000 |
 | iframes | Not loaded |
-| Workers, service workers, `indexedDB`, `caches`, WebAssembly | Absent, so feature detection takes its fallback path |
+| Workers | `Worker` and `SharedWorker` can be constructed, but the worker's script never loads: an `error` event follows and messages go nowhere |
+| Service workers, `indexedDB`, `caches`, WebAssembly | Absent, so feature detection takes its fallback path. Sites that refuse to run without them show their fallback: duolingo.com redirects to its "browser not supported" page for lack of WebAssembly |
+| Canvas drawing | `getContext('2d')` (on `<canvas>` and `OffscreenCanvas`) returns a context that keeps its state and draws nothing; `getImageData` reads transparent pixels and `measureText` estimates widths from the font size. WebGL contexts are `null` |
 | WebSocket, EventSource | Present but always fail to connect |

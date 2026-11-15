@@ -3089,17 +3089,87 @@
   }
   tag(StyleSheetList, 'StyleSheetList');
 
+  // A style rule's declarations, for `rule.style`. Rules are kept as text
+  // (nothing is cascaded), so this only parses and rewrites that text.
+  class CSSRuleStyle {
+    #props = new Map();
+    #rule;
+    constructor(key, rule, body) {
+      illegal(key);
+      this.#rule = rule;
+      this.#parse(body);
+    }
+    #parse(body) {
+      this.#props.clear();
+      for (const part of String(body).split(';')) {
+        const colon = part.indexOf(':');
+        if (colon < 0) continue;
+        const name = cssName(part.slice(0, colon));
+        let value = part.slice(colon + 1).trim();
+        let priority = '';
+        const bang = /\s*!\s*important\s*$/i.exec(value);
+        if (bang) {
+          value = value.slice(0, bang.index);
+          priority = 'important';
+        }
+        if (name && value) this.#props.set(name, [value, priority]);
+      }
+    }
+    get cssText() {
+      return [...this.#props].map(([n, [v, p]]) => n + ': ' + v + (p ? ' !important' : '') + ';').join(' ');
+    }
+    set cssText(text) { this.#parse(text); }
+    get length() { return this.#props.size; }
+    get parentRule() { return this.#rule; }
+    item(index) { return [...this.#props.keys()][index >>> 0] ?? ''; }
+    getPropertyValue(name) { return this.#props.get(cssName(name))?.[0] ?? ''; }
+    getPropertyPriority(name) { return this.#props.get(cssName(name))?.[1] ?? ''; }
+    setProperty(name, value, priority = '') {
+      name = cssName(name);
+      if (!name) return;
+      value = value === null || value === undefined ? '' : String(value).trim();
+      if (value === '') {
+        this.#props.delete(name);
+      } else {
+        this.#props.set(name, [value, String(priority).toLowerCase() === 'important' ? 'important' : '']);
+      }
+    }
+    removeProperty(name) {
+      const old = this.getPropertyValue(name);
+      this.#props.delete(cssName(name));
+      return old;
+    }
+  }
+  tag(CSSRuleStyle, 'CSSStyleDeclaration');
+  // Custom properties keep their case; others are ASCII case-insensitive.
+  const cssName = (name) => {
+    const n = String(name).trim();
+    return n.startsWith('--') ? n : n.toLowerCase();
+  };
+
   class CSSRule {
     #text;
+    #style = null;
     constructor(key, text) {
       illegal(key);
       this.#text = text;
     }
-    get cssText() { return this.#text; }
+    get cssText() {
+      return this.#style === null ? this.#text : this.selectorText + ' { ' + this.#style.cssText + ' }';
+    }
     get type() { return 1; }
     get selectorText() {
       const i = this.#text.indexOf('{');
       return i < 0 ? '' : this.#text.slice(0, i).trim();
+    }
+    get style() {
+      if (this.#style === null) {
+        const open = this.#text.indexOf('{');
+        const close = this.#text.lastIndexOf('}');
+        const body = open < 0 ? '' : this.#text.slice(open + 1, close > open ? close : undefined);
+        this.#style = new CSSRuleStyle(KEY, this, body);
+      }
+      return this.#style;
     }
     get parentRule() { return null; }
     get parentStyleSheet() { return null; }

@@ -7,6 +7,11 @@
 //! work a real page asks for repeatable, so two builds can be compared on
 //! the same input without the network or the site changing between runs.
 //!
+//! With `DASHER_REPLAY_FILL` also set, a request the recording cannot
+//! answer goes to the network instead, and its response is added to the
+//! recording (what is there already is never rewritten), to complete a
+//! recording that a later load needs more of.
+//!
 //! With `DASHER_REPLAY_LOG` also set, every request a replay answers or
 //! refuses is printed to stderr as `replay: <hit|miss> <method> <url>`, to
 //! count the requests a page makes.
@@ -54,6 +59,9 @@ pub(crate) struct Recorded {
 
 /// The responses in a recording directory, indexed for lookup.
 pub(crate) struct Store {
+    dir: PathBuf,
+    /// Whether misses are fetched and added (`DASHER_REPLAY_FILL`).
+    fill: bool,
     exact: HashMap<String, PathBuf>,
     by_path: HashMap<String, PathBuf>,
     /// Requests that found nothing, for the end-of-run report.
@@ -109,10 +117,22 @@ impl Store {
             exact.insert(exact_key(&method, &url), meta);
         }
         Self {
+            dir: dir.to_path_buf(),
+            fill: std::env::var_os("DASHER_REPLAY_FILL").is_some(),
             exact,
             by_path,
             misses: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Whether requests it cannot answer are fetched and added.
+    pub(crate) fn fills(&self) -> bool {
+        self.fill
+    }
+
+    /// The recording directory.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// The recorded response for a request, if there is one.
