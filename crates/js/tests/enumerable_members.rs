@@ -81,7 +81,9 @@ fn walk(js: &JsRuntime, call: &str) -> String {
     "#;
     eval(
         js,
-        &source.replace("ECMASCRIPT", ECMASCRIPT).replace("CALL", call),
+        &source
+            .replace("ECMASCRIPT", ECMASCRIPT)
+            .replace("CALL", call),
     )
 }
 
@@ -205,4 +207,39 @@ fn streams_loaded_through_a_body() {
         out,
         r#"["[object ReadableStream]",["cancel","getReader","locked","pipeThrough","pipeTo","tee","values"]]"#
     );
+}
+
+#[test]
+fn the_window_s_own_members_are_enumerable_on_the_global() {
+    // In Chrome the global's own properties are enumerable when they are
+    // the Window's operations and attributes (`fetch`, `document`), and
+    // not when they are interface objects, namespaces (`console`, `CSS`,
+    // `Intl`) or ECMAScript's own: which here is every name that starts in
+    // lower case but the ones listed.
+    let js = page("");
+    let out = eval(
+        &js,
+        r#"
+        const hidden = new Set(['console', 'globalThis', 'undefined', 'eval', 'parseInt', 'parseFloat', 'isNaN',
+          'isFinite', 'decodeURI', 'decodeURIComponent', 'encodeURI', 'encodeURIComponent', 'escape',
+          'unescape']);
+        const wrong = [];
+        let enumerable = 0;
+        for (const name of Object.getOwnPropertyNames(globalThis)) {
+          const expected = /^[a-z]/.test(name) && !hidden.has(name);
+          const actual = Object.getOwnPropertyDescriptor(globalThis, name).enumerable;
+          if (actual) enumerable++;
+          if (actual !== expected) wrong.push(name);
+        }
+        const keys = Object.keys(globalThis);
+        [wrong, enumerable > 80,
+         ['fetch', 'alert', 'atob', 'btoa', 'getComputedStyle', 'getSelection', 'matchMedia', 'postMessage',
+          'structuredClone', 'queueMicrotask', 'setTimeout', 'requestAnimationFrame', 'scrollTo',
+          'customElements', 'document', 'navigator', 'location', 'performance'].filter((k) => !keys.includes(k)),
+         ['URL', 'Node', 'XMLHttpRequest', 'ReadableStream', 'Intl', 'CSS', 'console', 'Promise']
+           .filter((k) => keys.includes(k)),
+         Object.keys(console).includes('log')]
+        "#,
+    );
+    assert_eq!(out, "[[],true,[],[],true]");
 }

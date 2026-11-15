@@ -236,18 +236,25 @@
 
   // Microtasks share QuickJS's promise job queue, so they interleave with
   // promise reactions in order. Exceptions are reported, not rejected.
-  globalThis.queueMicrotask = function queueMicrotask(callback) {
-    if (typeof callback !== 'function') {
-      throw new TypeError("Failed to execute 'queueMicrotask': parameter 1 is not of type 'Function'.");
-    }
-    ReflectApply(PromiseThen, resolvedPromise, [() => {
-      try {
-        callback();
-      } catch (error) {
-        native.reportError(error);
+  // (Defined rather than assigned: QuickJS has a `queueMicrotask` of its
+  // own, which is not enumerable, and assigning would keep that.)
+  Object.defineProperty(globalThis, 'queueMicrotask', {
+    value: function queueMicrotask(callback) {
+      if (typeof callback !== 'function') {
+        throw new TypeError("Failed to execute 'queueMicrotask': parameter 1 is not of type 'Function'.");
       }
-    }]);
-  };
+      ReflectApply(PromiseThen, resolvedPromise, [() => {
+        try {
+          callback();
+        } catch (error) {
+          native.reportError(error);
+        }
+      }]);
+    },
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 
   // Page time. `performance.now()` and `Date` both follow the page clock, so
   // when the event loop fast-forwards, scripts that measure elapsed time
@@ -544,7 +551,7 @@
     groupIndent += '  ';
   }
 
-  globalThis.console = {
+  const console = {
     log(...args) { emit('log', format(args)); },
     info(...args) { emit('info', format(args)); },
     warn(...args) { emit('warn', format(args)); },
@@ -580,6 +587,8 @@
     groupEnd() { groupIndent = groupIndent.slice(2); },
     clear() {},
   };
+  // A namespace, so not enumerable on the global (its members are).
+  Object.defineProperty(globalThis, 'console', { value: console, writable: true, configurable: true });
 
   // Converts a value to a USVString: lone surrogates become U+FFFD. Strings
   // must go through this before reaching Rust, which only takes valid UTF-8.
@@ -611,10 +620,13 @@
     }
   }
 
-  // Installs interfaces and functions on the global object the way WebIDL
-  // does: writable and configurable, but not enumerable. An interface's
+  // Installs interfaces, and the Window's own operations and attributes,
+  // on the global object the way WebIDL does: writable and configurable.
+  // An interface object is not enumerable there, and the Window's members
+  // are, which the names tell apart (`URL`, `fetch`). An interface's
   // members are as they stand when it is exposed, so a file exposes its
   // interfaces last.
+  const INTERFACE_NAME = /^[A-Z]/;
   function expose(members) {
     for (const name of Object.keys(members)) {
       const value = members[name];
@@ -623,7 +635,7 @@
         value,
         writable: true,
         configurable: true,
-        enumerable: false,
+        enumerable: !INTERFACE_NAME.test(name),
       });
     }
   }
