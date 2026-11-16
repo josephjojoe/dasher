@@ -1,7 +1,7 @@
 """Lambda bench harness: runs dasher, Lightpanda and Chromium's headless shell
 on one site, back to back in the same sandbox, and uploads the raw outputs
 and measurements to S3."""
-import hashlib, io, json, os, re, socket, subprocess, tarfile, threading, time
+import hashlib, io, json, os, re, socket, subprocess, tarfile, threading, time, traceback
 from urllib.parse import urlsplit
 
 ROOT = os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.abspath(__file__)))
@@ -207,6 +207,23 @@ def startup(event, ctx):
 
 
 def handler(event, ctx):
+    try:
+        return measure(event, ctx)
+    except Exception:
+        # An asynchronous invocation has nobody to report to: leave the
+        # failure beside where the result would have been, where the driver
+        # looks. The runtime loop logs it.
+        err = traceback.format_exc()
+        phase, tag = event.get("phase"), event.get("tag", "main")
+        name = slug(event["site"]["url"]) if "site" in event else f"startup-{tag}"
+        try:
+            upload(f"{tag}/{phase}/{name}.error.txt", err.encode(), "text/plain")
+        except Exception:
+            traceback.print_exc()
+        raise
+
+
+def measure(event, ctx):
     phase = event["phase"]
     global _WARM
     if not _WARM:

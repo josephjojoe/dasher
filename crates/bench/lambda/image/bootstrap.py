@@ -23,5 +23,9 @@ while True:
         out = handler.handler(json.loads(r.read()), ctx)
         post(f"/invocation/{rid}/response", out)
     except Exception as e:
+        # The Runtime API keeps the error for the caller only, and an
+        # asynchronous invocation has none.
+        traceback.print_exc()
+        sys.stderr.flush()
         post(f"/invocation/{rid}/error", {"errorMessage": str(e), "errorType": type(e).__name__,
                                           "stackTrace": traceback.format_exc().splitlines()})

@@ -310,12 +310,13 @@ aws iam put-role-policy --role-name dasher-bench-role --policy-name s3put --poli
   '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject"],"Resource":"arn:aws:s3:::'$BENCH_BUCKET'/*"}]}'
 aws ecr create-repository --repository-name dasher-bench
 aws ecr get-login-password | docker login --username AWS --password-stdin ${REPO%/*}
-docker build --platform linux/arm64 --provenance=false -t $REPO:latest image && docker push $REPO:latest
+docker build --platform linux/arm64 --provenance=false -t ${REPO}:latest image && docker push ${REPO}:latest
 aws lambda create-function --function-name dasher-bench --package-type Image \
-  --code ImageUri=$REPO:latest --architectures arm64 --memory-size 3008 --timeout 900 \
+  --code ImageUri=${REPO}:latest --architectures arm64 --memory-size 3008 --timeout 900 \
   --environment "Variables={BENCH_BUCKET=$BENCH_BUCKET}" \
-  --role arn:aws:iam::$ACCOUNT:role/dasher-bench-role
-# An asynchronous invocation that fails must not run again.
+  --role arn:aws:iam::${ACCOUNT}:role/dasher-bench-role
+# Lambda must not run a failed asynchronous invocation again by itself:
+# drive.py prints the error and invokes it again, once.
 aws lambda put-function-event-invoke-config --function-name dasher-bench --maximum-retry-attempts 0
 
 # Run, fetch, report.
