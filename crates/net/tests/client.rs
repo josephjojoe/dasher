@@ -605,8 +605,13 @@ async fn enforces_the_maximum_response_size() {
 #[tokio::test]
 async fn enforces_the_maximum_size_of_undeclared_bodies() {
     let chunk = format!("{:x}\r\n{}\r\n", 600, "y".repeat(600));
-    let reply =
-        format!("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n{chunk}{chunk}0\r\n\r\n");
+    // `connection: close`, because the server answers one request on each
+    // connection. The whole body is on the wire when the limit stops the
+    // read, so without it the connection goes back to the pool, and the
+    // second request is sent on it and reset.
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{chunk}{chunk}0\r\n\r\n"
+    );
     let addr = support::raw_server(vec![reply.clone().into(), reply.into()], Duration::ZERO);
     let client = Client::builder().max_response_size(1000).build().unwrap();
     let session = client.session();
