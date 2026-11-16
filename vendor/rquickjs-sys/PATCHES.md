@@ -73,6 +73,23 @@ rquickjs-sys = { git = "https://github.com/josephjojoe/dasher" }
   through the record that is not there: a segmentation fault, which a
   page reached at its memory limit. Both now return when there is no
   record. Test: `crates/js/tests/limits.rs`.
+- **A closure keeps the suspended function it reads from.** A generator
+  or async function keeps its frame on the heap, and a closure made in
+  it reads the frame's variables in place. Upstream's collector did not
+  know of that: when the function was garbage in a cycle and the closure
+  was not, it freed what the variables held, and the function's
+  finalizer then handed the freed values to the closure. The memory was
+  reused, and a later collection stopped on `gc_decref_child`'s
+  assertion, or the closure read another object. A page reached it with
+  an abandoned async function (apnews.com). Here a reference to a
+  variable in such a frame holds a reference to the frame's owner (the
+  generator object or the async function's data) until the variable
+  leaves the frame, and is one of the collector's objects from then on,
+  so a cycle through the frame is still collected. The cost: such a
+  closure keeps the whole suspended frame, not only the variables it
+  reads, and `JSVarRef` is 8 bytes larger. Bellard's QuickJS does the
+  same, and QuickJS-NG's main branch does since 0.11.0, so this change
+  goes away with a newer rquickjs. Test: `crates/js/tests/gc.rs`.
 
 ## Compiling
 
