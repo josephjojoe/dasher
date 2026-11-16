@@ -61,7 +61,7 @@ downloaded.
 | Is this stylesheet loaded? | `<link rel=stylesheet>` gets its `load` event as if it had loaded empty. No rule of any stylesheet, `<style>` elements included, is parsed or applied: `sheet.cssRules` is empty. |
 | `getComputedStyle()` | The element's inline style and the defaults of its tag and attributes (`hidden`, for one). Nothing from stylesheets, so a class that hides an element does not hide it here. |
 | `getBoundingClientRect()`, `offsetHeight`, scroll positions | Synthetic boxes in a 1920×1080 window (`--viewport`). Elements with `display: none` inline, or `hidden`, are empty. |
-| `IntersectionObserver`, `loading=lazy` | Decided by the visibility policy (`--visibility`): by default the page as it stood at the load event is in view, and what it adds later is below the fold until dasher scrolls. |
+| `IntersectionObserver`, `loading=lazy` | Decided by the visibility policy (`--visibility`): by default the page as it stood at the load event is in view, and what it adds later is below the fold until dasher scrolls. A page that builds itself after load therefore keeps back what it loads on coming into view: digikala.com returns its header, menus and footer, and yahoo.com one story of its feed, until `--scroll` or `--visibility all`. |
 | `matchMedia()` | Evaluated against the viewport: a desktop screen, light colour scheme, no reduced motion, not print. |
 | Has this image loaded? | No. An `<img>` never fires `load` or `error`; `complete` is `true` and `naturalWidth` is `0`. |
 | `ResizeObserver` | Reports each observed element once, with its synthetic size. |
@@ -106,14 +106,28 @@ are all in one file, listed at the top of
 
 `navigator.userAgent` and the `User-Agent` header are desktop Chrome's on
 Linux (`--user-agent` changes both), `navigator.userAgentData` matches,
-and `navigator.webdriver` is `false`. dasher does nothing else to look
+and `navigator.webdriver` is `false`. Requests carry the fetch metadata
+headers a browser sends (`Sec-Fetch-Dest`, `Sec-Fetch-Mode`,
+`Sec-Fetch-Site`, `Sec-Fetch-User`), which servers read to tell a
+navigation from a script's request: instagram.com serves its error page
+to a navigation without them. Whether two hosts are the same site is
+judged without the public suffix list. dasher does nothing else to look
 like a person: it sends no client-hint headers, its TLS and HTTP/2
 handshakes are not Chrome's, and it solves no challenges. Sites behind
 bot protection (Cloudflare, Akamai, DataDome, PerimeterX) often answer
 it with a challenge page, as they answer any client that is not a full
 browser; on 492 popular sites fetched from AWS that was about one site
 in five, for Chromium's headless shell as much as for dasher (see
-[crates/bench/lambda](crates/bench/lambda/README.md)).
+[crates/bench/lambda](crates/bench/lambda/README.md)). The refusal is
+not always a challenge status: microsoft.com answered dasher from AWS
+with a block page under status 200, and with its home page from a home
+connection.
+
+Some sites serve more to a client that says it is automated. yahoo.com
+sends a page with about four times the text in its HTML when the
+`User-Agent` has `HeadlessChrome` in it, as Chromium's headless shell's
+does, or is Lightpanda's; dasher, saying it is Chrome, gets the page a
+person's browser gets, most of which arrives later from scripts.
 
 dasher does not read `robots.txt` and does not limit its own request
 rate. Which pages to fetch, and how often, is for the program that

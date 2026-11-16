@@ -142,13 +142,34 @@ with the page error behind it where there was one (see
 - target.com: `WebAssembly` is undefined.
 - azure.microsoft.com: each request took about 8 s to answer, and
   dasher fetches parser-blocking scripts one at a time.
-- microsoft.com: a `JSON.parse` error on a control character, not yet
-  explained.
+- microsoft.com: the server answered dasher with a block page ("Your
+  request has been blocked") under status 200, which the outcome rules
+  here did not take for a bot wall; the `JSON.parse` error is that
+  page's own JSON. From a home connection dasher gets the home page,
+  0.97 similar to Chromium's text here.
 - disneyplus.com and sooka.my: a `TypeError` in the page's own bundle,
   then React's hydration error. Lightpanda kept as little of
   disneyplus.com, and of word.cloud.microsoft.
-- instagram.com, digikala.com, flashscore.ro and yahoo.com: no error
-  that explains it; not diagnosed.
+- instagram.com: the server sends its error page to a navigation
+  without `Sec-Fetch-*` headers, which dasher 0.1.0 did not send. It
+  sends them since, and gets the page Chromium got.
+- flashscore.ro: the consent banner, 17,400 characters of Chromium's
+  text, was missing. Its script (OneTrust) took the result of
+  `querySelectorAll` for an array, because `Array.isArray` said so in
+  dasher 0.1.0, and failed in a promise. Fixed since: a load from a home
+  connection is 0.996 similar to Chrome's.
+- digikala.com: the page is built by scripts after load, so under the
+  default visibility policy its shelves are below the fold and never
+  load. `--visibility all` or `--scroll` returns them.
+- yahoo.com: Yahoo sends a fuller page, about four times the text in
+  the HTML, to a user agent that names `HeadlessChrome` (Chromium's
+  here) or Lightpanda, and the short one to dasher, which names Chrome.
+  Against Chrome with an ordinary user agent, from a home connection,
+  what dasher lacks is the rest of the feed, which loads on coming into
+  view (as on digikala.com), and the ad frames.
+
+These were worked out after the run, from a home connection, on
+2026-11-15; the numbers above are the run's and have not been redone.
 
 ### Limits
 
