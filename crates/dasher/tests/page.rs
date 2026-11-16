@@ -668,3 +668,42 @@ async fn the_work_budget_bounds_a_navigation_and_is_lifted_after() {
     assert!(navigation.timed_out);
     assert_eq!(navigation.budget_exhausted, None);
 }
+
+#[tokio::test]
+async fn evaluate_resolves_imports_against_the_document() {
+    let server = server();
+    let mut page = browser().new_page();
+    page.goto(&server.url("/blank.html")).await.unwrap();
+
+    for specifier in ["/lib/answer.js", "./lib/answer.js"] {
+        let script = format!("import({specifier:?}).then((m) => m.default)");
+        assert_eq!(page.evaluate(&script).await.unwrap(), 42, "{specifier}");
+    }
+}
+
+// Loading the page leaves a connection to the server in the pool, driven by
+// this thread's runtime. A request that blocks the page (synchronous XHR, a
+// module fetched on demand) runs on another thread and must not wait on it.
+#[tokio::test]
+async fn blocking_requests_do_not_wait_on_pooled_connections() {
+    let server = server();
+    let mut page = browser().new_page();
+    page.goto(&server.url("/spa.html")).await.unwrap();
+
+    let started = Instant::now();
+    let status = page
+        .evaluate(
+            "(() => { const x = new XMLHttpRequest(); x.open('GET', '/api/products', false); \
+             x.send(); return x.status; })()",
+        )
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(
+        page.evaluate("import('/lib/answer.js').then((m) => m.default)")
+            .await
+            .unwrap(),
+        42
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+}

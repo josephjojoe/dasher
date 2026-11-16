@@ -232,20 +232,26 @@ impl ClientBuilder {
         });
         let connector = Connector::new(http, tls, self.http2, self.proxy.as_ref());
 
-        let hyper = HyperClient::builder(TokioExecutor::new())
-            .timer(TokioTimer::new())
-            .pool_timer(TokioTimer::new())
-            .pool_idle_timeout(self.pool_idle_timeout)
-            .pool_max_idle_per_host(self.pool_max_idle_per_host)
-            // Bound what one connection can buffer on our behalf.
-            .http2_initial_stream_window_size(1024 * 1024)
-            .http2_initial_connection_window_size(2 * 1024 * 1024)
-            .http2_max_header_list_size(256 * 1024)
-            .build(connector);
+        let hyper = |max_idle_per_host: usize, connector: Connector| {
+            HyperClient::builder(TokioExecutor::new())
+                .timer(TokioTimer::new())
+                .pool_timer(TokioTimer::new())
+                .pool_idle_timeout(self.pool_idle_timeout)
+                .pool_max_idle_per_host(max_idle_per_host)
+                // Bound what one connection can buffer on our behalf.
+                .http2_initial_stream_window_size(1024 * 1024)
+                .http2_initial_connection_window_size(2 * 1024 * 1024)
+                .http2_max_header_list_size(256 * 1024)
+                .build(connector)
+        };
+        // No idle connections kept turns hyper's pool off altogether.
+        let unpooled = hyper(0, connector.clone());
+        let hyper = hyper(self.pool_max_idle_per_host, connector);
 
         Ok(Client {
             inner: Arc::new(ClientInner {
                 hyper,
+                unpooled,
                 proxy_authorization: self.proxy.as_ref().and_then(|p| p.authorization().cloned()),
                 user_agent: self.user_agent,
                 default_headers: Arc::new(self.default_headers),
@@ -293,6 +299,8 @@ pub struct Client {
 
 struct ClientInner {
     hyper: Hyper,
+    /// The same client without a connection pool, for [`Session::unpooled`].
+    unpooled: Hyper,
     /// Sent with plain `http` requests, which go to the proxy itself.
     proxy_authorization: Option<HeaderValue>,
     user_agent: HeaderValue,
@@ -331,6 +339,7 @@ impl Client {
     pub fn session(&self) -> Session {
         Session {
             client: self.clone(),
+            pooled: true,
             cookies: Arc::new(CookieJar::new()),
             activity: NetworkActivity::new(),
             policy: Arc::clone(&self.inner.policy),
@@ -491,6 +500,8 @@ impl Request {
 #[derive(Clone)]
 pub struct Session {
     client: Client,
+    /// Whether requests share the client's connection pool.
+    pooled: bool,
     cookies: Arc<CookieJar>,
     activity: NetworkActivity,
     policy: Arc<RequestPolicy>,
@@ -510,6 +521,21 @@ impl fmt::Debug for Session {
 }
 
 impl Session {
+    /// This session, making each request on a connection of its own.
+    ///
+    /// A pooled connection is driven by the runtime that opened it. A
+    /// request made from another runtime while that one is blocked (as
+    /// synchronous XHR does: the page waits on a thread that runs the
+    /// request) would wait forever on a connection nobody is driving, so
+    /// such requests must not reuse the pool, nor leave connections of
+    /// their short-lived runtime in it.
+    pub fn unpooled(&self) -> Self {
+        Self {
+            pooled: false,
+            ..self.clone()
+        }
+    }
+
     /// Uses `jar` instead of the session's own cookie jar, e.g. to share
     /// cookies between sessions.
     pub fn with_cookie_jar(mut self, jar: Arc<CookieJar>) -> Self {
@@ -635,7 +661,12 @@ impl Session {
                 use_cookies,
             )?;
             let response = with_deadline(deadline, async {
-                client.hyper.request(outgoing).await.map_err(|e| {
+                let hyper = if self.pooled {
+                    &client.hyper
+                } else {
+                    &client.unpooled
+                };
+                hyper.request(outgoing).await.map_err(|e| {
                     if let Some(ip) = guard::blocked_address(&e) {
                         return Error::new(ErrorKind::Blocked(BlockReason::PrivateAddress(ip)));
                     }
@@ -772,31 +803,32 @@ impl Session {
         override_headers(&mut all, &self.default_headers);
         override_headers(&mut all, headers);
 
-        if use_cookies && !all.contains_key(COOKIE) {
-            if let Some(cookies) = self.cookies.header_for(url) {
-                all.insert(
-                    COOKIE,
-                    HeaderValue::try_from(cookies).map_err(|e| invalid(&e))?,
-                );
-            }
+        if use_cookies
+            && !all.contains_key(COOKIE)
+            && let Some(cookies) = self.cookies.header_for(url)
+        {
+            all.insert(
+                COOKIE,
+                HeaderValue::try_from(cookies).map_err(|e| invalid(&e))?,
+            );
         }
-        if !all.contains_key(REFERER) {
-            if let Some(referer) = referrer.and_then(|r| referrer_for(r, url)) {
-                all.insert(
-                    REFERER,
-                    HeaderValue::try_from(referer).map_err(|e| invalid(&e))?,
-                );
-            }
+        if !all.contains_key(REFERER)
+            && let Some(referer) = referrer.and_then(|r| referrer_for(r, url))
+        {
+            all.insert(
+                REFERER,
+                HeaderValue::try_from(referer).map_err(|e| invalid(&e))?,
+            );
         }
-        if !all.contains_key(AUTHORIZATION) {
-            if let Some(auth) = basic_auth_from_url(url) {
-                all.insert(AUTHORIZATION, auth);
-            }
+        if !all.contains_key(AUTHORIZATION)
+            && let Some(auth) = basic_auth_from_url(url)
+        {
+            all.insert(AUTHORIZATION, auth);
         }
-        if url.scheme() == "http" {
-            if let Some(authorization) = &self.client.inner.proxy_authorization {
-                all.insert(PROXY_AUTHORIZATION, authorization.clone());
-            }
+        if url.scheme() == "http"
+            && let Some(authorization) = &self.client.inner.proxy_authorization
+        {
+            all.insert(PROXY_AUTHORIZATION, authorization.clone());
         }
 
         let uri = request_uri(url).map_err(|e| invalid(&e))?;

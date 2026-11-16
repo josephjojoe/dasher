@@ -222,9 +222,10 @@ fn base_url_of(shared: &Shared, name: &str) -> Url {
         return base.clone();
     }
     match Url::parse(name) {
-        Ok(url) if url != shared.window.url() => url,
         // Inline scripts are named after the document; host scripts have
-        // made-up names.
+        // made-up names (`dasher:eval`, which parses as a URL nothing can
+        // be resolved against).
+        Ok(url) if url != shared.window.url() && url.scheme() != "dasher" => url,
         _ => document_base_url(shared),
     }
 }
@@ -367,10 +368,12 @@ fn fetch_blocking(shared: &Shared, url: &str) -> Result<Loaded, String> {
         "data" => return load_data_url(&parsed),
         scheme => return Err(format!("unsupported URL scheme '{scheme}:'")),
     }
+    // Not a pooled connection: the runtime that drives those is the one
+    // this call blocks.
     let session = shared
         .net
         .session()
-        .cloned()
+        .map(Session::unpooled)
         .ok_or("this page has no network access")?;
     let request = request(shared, parsed, ModuleCredentials::SameOrigin);
     std::thread::Builder::new()

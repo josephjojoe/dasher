@@ -256,10 +256,11 @@ fn read_request<'js>(ctx: &Ctx<'js>, object: &Object<'js>) -> rquickjs::Result<O
     // any request that may have side effects; servers check it against
     // CSRF.
     let unsafe_method = method != Method::GET && method != Method::HEAD;
-    if (unsafe_method || url.origin() != origin) && !headers.contains_key(ORIGIN) {
-        if let Ok(value) = HeaderValue::try_from(origin.ascii_serialization()) {
-            headers.insert(ORIGIN, value);
-        }
+    if (unsafe_method || url.origin() != origin)
+        && !headers.contains_key(ORIGIN)
+        && let Ok(value) = HeaderValue::try_from(origin.ascii_serialization())
+    {
+        headers.insert(ORIGIN, value);
     }
 
     let mut request = Request::new(method, url, kind);
@@ -459,10 +460,13 @@ fn send_sync(shared: &Rc<Shared>, outgoing: Outgoing) -> Result<(Head, Bytes), F
             )));
         }
     }
+    // Not a pooled connection: the runtime that drives those is the one
+    // this call blocks.
     let session = shared
         .net
         .session
-        .clone()
+        .as_ref()
+        .map(Session::unpooled)
         .ok_or_else(|| Failure::network("this page has no network access"))?;
     let thread = std::thread::Builder::new()
         .name("dasher-sync-xhr".into())
