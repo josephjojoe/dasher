@@ -23,31 +23,31 @@ $ dasher -e '[...document.querySelectorAll(".titleline > a")].slice(0, 2).map(a 
 On 492 popular sites loaded live from AWS Lambda (arm64, 3008 MB),
 three runs each, with [Lightpanda](https://github.com/lightpanda-io/browser)
 and Chromium's headless shell run back to back in the same sandbox
-(2026-11-15). The figures are for the 328 sites all three loaded:
+(2026-11-16). The figures are for the 340 sites all three loaded:
 
 | | dasher 0.1.0 | Lightpanda nightly | Chromium 156 |
 | --- | ---: | ---: | ---: |
-| Peak memory, median page | 39 MiB | 94 MiB | 387 MiB |
-| Peak memory, 90th percentile | 120 MiB | 209 MiB | 671 MiB |
-| CPU, median page | 0.94 s | 1.05 s | 3.74 s |
-| CPU, all pages | 612 s | 590 s | 2168 s |
-| Wall time, median page | 2.0 s | 2.7 s | 5.4 s |
-| Sites loaded, of 492 | 372 | 390 | 355 |
-| Start-up on an empty page: CPU, memory | 11 ms, 7 MiB | 39 ms, 23 MiB | 270 ms, 193 MiB |
+| Peak memory, median page | 41 MiB | 92 MiB | 387 MiB |
+| Peak memory, 90th percentile | 126 MiB | 208 MiB | 671 MiB |
+| CPU, median page | 0.87 s | 0.93 s | 3.71 s |
+| CPU, all pages | 670 s | 599 s | 2177 s |
+| Wall time, median page | 2.1 s | 2.7 s | 5.3 s |
+| Sites loaded, of 492 | 408 | 393 | 359 |
+| Start-up on an empty page: CPU, memory | 11 ms, 7 MiB | 39 ms, 23 MiB | 270 ms, 195 MiB |
 
 - **Memory is the reason to use dasher**: four tenths of Lightpanda's
   peak on the median site and a tenth of Chromium's.
-- **CPU is level with Lightpanda** (4% more over all pages) and about a
-  quarter of Chromium's. Where the two load the same content with the
-  same requests, dasher uses 1.17× Lightpanda's CPU: QuickJS interprets
+- **CPU is close to Lightpanda's**: less on the median page, 12% more
+  over all pages, and under a third of Chromium's. Where the two load
+  the same content with the same requests on pages that take over a
+  CPU second, dasher uses 1.18× Lightpanda's CPU: QuickJS interprets
   and V8 compiles.
-- **It loads fewer sites than Lightpanda.** A fifth of the list answers
-  requests from AWS with a bot wall, and dasher does nothing to get
-  past one: 93 sites blocked it, 76 blocked Lightpanda and 111 blocked
-  Chromium.
+- **It loaded the most sites.** Many sites answer requests from AWS
+  with a bot wall, and dasher does nothing special to get past one: 62
+  sites blocked it, 76 blocked Lightpanda and 110 blocked Chromium.
 - **Text matches Chromium's** on most sites: at least 0.9 similar on
-  252 of the 333 both loaded (Lightpanda: 260 of 344), and under half
-  the text on 13.
+  270 of the 345 both loaded (Lightpanda: 269 of 349), and under half
+  the text on 10.
 - **It starts sooner than Lightpanda**: 11 ms of CPU before a page's
   own work, against 39 ms.
 

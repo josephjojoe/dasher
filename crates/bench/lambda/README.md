@@ -5,17 +5,17 @@ Lambda invocation per site, with every browser run back to back in the
 same sandbox, so each site's numbers come from one machine, one network
 path and one few-minute window.
 
-- [Results, 2026-11-15](#results-2026-11-15)
+- [Results, 2026-11-16](#results-2026-11-16)
 - [Method](#method)
 - [What this does not show](#what-this-does-not-show)
 - [Running it](#running-it)
 
-The raw report is [`results/2026-11-15/report.txt`](results/2026-11-15/report.txt)
-and the per-site table [`results/2026-11-15/sites.csv`](results/2026-11-15/sites.csv).
+The raw report is [`results/2026-11-16/report.txt`](results/2026-11-16/report.txt)
+and the per-site table [`results/2026-11-16/sites.csv`](results/2026-11-16/sites.csv).
 
-## Results, 2026-11-15
+## Results, 2026-11-16
 
-dasher 0.1.0, Lightpanda `1.1.0-nightly.12173+18ff596e6` and Chromium's
+dasher 0.1.0, Lightpanda `1.1.0-nightly.12181+2519e1716` and Chromium's
 headless shell 156.0.8078.79, on 492 sites, three runs each, on arm64
 Lambda with 3008 MB (2 vCPUs) in us-east-1. Each tool ran with its
 defaults and was asked for the page's HTML once the network went idle.
@@ -24,69 +24,72 @@ defaults and was asked for the page's HTML once the network went idle.
 
 | Per site, majority of three runs | dasher | Lightpanda | Chromium |
 | --- | ---: | ---: | ---: |
-| Loaded | 372 | 390 | 355 |
-| Answered with a bot wall | 93 | 76 | 111 |
-| HTTP error page | 8 | 8 | 12 |
-| Empty page | 9 | 16 | 9 |
-| No document (connection, TLS, timeout) | 10 | 2 | 5 |
+| Loaded | 408 | 393 | 359 |
+| Answered with a bot wall | 62 | 76 | 110 |
+| HTTP error page | 7 | 7 | 10 |
+| Empty page | 10 | 14 | 9 |
+| No document (connection, TLS, timeout) | 5 | 2 | 4 |
 | Crashed or killed | 0 | 0 | 0 |
 
-All three loaded 328 sites and none loaded 85. Requests came from AWS
-addresses, which bot protection treats harshly, so about one site in
-five answered every tool with a challenge. Lightpanda got past more of
-them: 29 sites loaded for it and not for dasher, 11 the other way.
-Chromium's headless shell was refused most often.
+All three loaded 340 sites and none loaded 69. Requests came from AWS
+addresses, which bot protection treats harshly: 51 sites answered every
+tool with a challenge. dasher got past the most: 25 sites loaded for it
+and not for Lightpanda, 10 the other way. Chromium's headless shell was
+refused most often.
 
-dasher's ten failures: five sites that Lightpanda or Chromium could not
-reach either (gnu.org, search-load.com, rouydad24.ir, washingtonpost.com,
-bmvm.bihar.gov.in), asnet.jp (the server offers only finite-field
-Diffie-Hellman key exchange, which rustls does not implement),
-bestbuy.com (the request was reset; it loads from a home connection),
-two documents that did not answer in 30 s (baccredomatic.com, glami.gr)
-and one login redirect that could not be connected to.
+dasher's five failures: four sites that Lightpanda could not load
+either (gnu.org, search-load.com, bmvm.bihar.gov.in and a login redirect
+at jvsonline.fr that could not be connected to) and asnet.jp (the server
+offers only finite-field Diffie-Hellman key exchange, which rustls does
+not implement). Seven of its ten empty pages were empty for all three.
+Of the others, baccredomatic.com spent the whole CPU budget before it
+showed anything, and dashboard.composio.dev and student.amplify.com
+came back with a few characters. duolingo.com sent dasher to its
+"browser not supported" page, a 404: it wants `WebAssembly`.
 
 ### What a page cost
 
-The 328 sites all three loaded:
+The 340 sites all three loaded:
 
 | | dasher | Lightpanda | Chromium |
 | --- | ---: | ---: | ---: |
-| CPU per page, median | 0.94 s | 1.05 s | 3.74 s |
-| CPU per page, mean | 1.86 s | 1.80 s | 6.61 s |
-| CPU, 90th percentile | 5.33 s | 4.83 s | 14.95 s |
-| Wall time, median | 2.04 s | 2.67 s | 5.42 s |
-| Wall time, mean | 3.10 s | 2.87 s | 6.67 s |
-| Peak memory, median | 39 MiB | 94 MiB | 387 MiB |
-| Peak memory, 90th percentile | 120 MiB | 209 MiB | 671 MiB |
-| Peak memory, largest | 437 MiB | 629 MiB | 1233 MiB |
+| CPU per page, median | 0.87 s | 0.93 s | 3.71 s |
+| CPU per page, mean | 1.97 s | 1.76 s | 6.40 s |
+| CPU, 90th percentile | 5.73 s | 4.71 s | 14.56 s |
+| Wall time, median | 2.12 s | 2.69 s | 5.32 s |
+| Wall time, mean | 3.27 s | 2.90 s | 6.69 s |
+| Peak memory, median | 41 MiB | 92 MiB | 387 MiB |
+| Peak memory, 90th percentile | 126 MiB | 208 MiB | 671 MiB |
+| Peak memory, largest | 441 MiB | 629 MiB | 1172 MiB |
 
 | Ratio over those sites | total | median site |
 | --- | ---: | ---: |
-| dasher / Lightpanda, CPU | 1.04× | 1.03× |
-| dasher / Lightpanda, wall time | 1.08× | 0.89× |
-| dasher / Lightpanda, memory | 0.49× | 0.41× |
-| dasher / Chromium, CPU | 0.28× | 0.24× |
-| dasher / Chromium, wall time | 0.46× | 0.39× |
+| dasher / Lightpanda, CPU | 1.12× | 0.87× |
+| dasher / Lightpanda, wall time | 1.13× | 0.88× |
+| dasher / Lightpanda, memory | 0.50× | 0.40× |
+| dasher / Chromium, CPU | 0.31× | 0.23× |
+| dasher / Chromium, wall time | 0.49× | 0.41× |
 | dasher / Chromium, memory | 0.13× | 0.10× |
-| Lightpanda / Chromium, CPU | 0.27× | 0.26× |
+| Lightpanda / Chromium, CPU | 0.28× | 0.26× |
 | Lightpanda / Chromium, memory | 0.26× | 0.23× |
 
 Read as:
 
 - **Memory is where dasher is ahead**: four tenths of Lightpanda's peak
   on the median site and a tenth of Chromium's. It used less than
-  Lightpanda on 322 of the 328 sites and less than Chromium on all of
+  Lightpanda on 331 of the 340 sites and less than Chromium on all of
   them.
-- **CPU is level with Lightpanda**, 4% more in total: lower on 102
-  sites, within 10% on 92, higher on 134. Both use about a quarter of
-  Chromium's.
-- **Wall time is mixed.** dasher finished sooner than Lightpanda on the
-  median site, and later in total: Lightpanda stops waiting 5 s after it
-  starts (90 sites reached that cap), where dasher keeps going until the
-  page is quiet or a budget runs out. Ten dasher runs in 1,476 took 25 s
-  or more.
+- **CPU is close to Lightpanda's**: less on the median site and 12%
+  more in total, lower on 186 sites, within 10% on 60 and higher on
+  94. Its costly pages cost more: 5.7 s at the 90th percentile against
+  4.7 s. Both use between a quarter and a third of Chromium's.
+- **Wall time follows the same pattern.** dasher finished sooner than
+  Lightpanda on the median site, and later in total: Lightpanda stops
+  waiting 5 s after it starts (88 sites reached that cap), where dasher
+  keeps going until the page is quiet or a budget runs out. Six dasher
+  runs in 1,476 took 25 s or more.
 - **Per-run spread is small**: over a site's three runs, CPU varied by
-  4% of the median for dasher and Lightpanda (15% at the 90th
+  4% of the median for dasher and Lightpanda (17% and 13% at the 90th
   percentile), 7% for Chromium.
 
 ### The same content
@@ -97,25 +100,25 @@ comparison is repeated on sites where it does not. A site counts as
 least 0.9 of their distinct words with Chromium's (Jaccard similarity of
 the word sets).
 
-| 237 same-content sites | dasher | Lightpanda | Chromium |
+| 251 same-content sites | dasher | Lightpanda | Chromium |
 | --- | ---: | ---: | ---: |
-| CPU, total | 391 s | 368 s | 1459 s |
-| CPU, median | 0.78 s | 0.76 s | 3.23 s |
-| Peak memory, median | 34 MiB | 82 MiB | 364 MiB |
+| CPU, total | 400 s | 375 s | 1411 s |
+| CPU, median | 0.72 s | 0.73 s | 2.99 s |
+| Peak memory, median | 33 MiB | 82 MiB | 365 MiB |
 
-dasher used 1.06× Lightpanda's CPU on these (median site 1.04×) and
-0.27× Chromium's.
+dasher used 1.07× Lightpanda's CPU on these (median site 0.84×) and
+0.28× Chromium's.
 
 dasher against Lightpanda alone, on sites where their texts are at
 least 0.9 similar, their request counts within 25%, either spent more
-than a CPU second and dasher ended on no budget (99 sites): dasher used
-1.17× the CPU (median site 1.08×) and 0.56× the memory. This is the
+than a CPU second and dasher ended on no budget (105 sites): dasher used
+1.18× the CPU (median site 1.09×) and 0.55× the memory. This is the
 closest the run comes to the two doing the same work, and there
 dasher's interpreter (QuickJS) is behind Lightpanda's V8.
 
-On light pages (Chromium under 2 CPU s, 85 sites) the median was 0.14 s
-and 11 MiB for dasher, 0.15 s and 42 MiB for Lightpanda, 0.86 s and
-263 MiB for Chromium.
+On light pages (Chromium under 2 CPU s, 94 sites) the median was 0.11 s
+and 12 MiB for dasher, 0.18 s and 46 MiB for Lightpanda, 1.02 s and
+272 MiB for Chromium.
 
 ### How much of the page came back
 
@@ -123,41 +126,32 @@ Against Chromium's text, on the sites both loaded:
 
 | | dasher | Lightpanda |
 | --- | ---: | ---: |
-| Sites compared | 333 | 344 |
-| Median similarity | 0.997 | 0.998 |
-| At least 0.9 similar | 252 | 260 |
-| Under 0.5 similar | 22 | 22 |
-| Under half Chromium's text | 13 | 12 |
+| Sites compared | 345 | 349 |
+| Median similarity | 0.997 | 0.997 |
+| At least 0.9 similar | 270 | 269 |
+| Under 0.5 similar | 20 | 26 |
+| Under half Chromium's text | 10 | 14 |
 
-Chromium against itself, run to run, was at least 0.9 similar on 309 of
-333 sites: the rest serve different text on each load.
+Chromium against itself, run to run, was at least 0.9 similar on 318 of
+345 sites: the rest serve different text on each load.
 
-The thirteen sites where dasher kept under half of Chromium's text,
-with the page error behind it where there was one (see
+The ten sites where dasher kept under half of Chromium's text, with the
+page error behind it where there was one (see
 [COMPATIBILITY.md](../../../COMPATIBILITY.md)):
 
 - mongodb.com and seller.flipkart.com: a 2D context asked of a canvas
   that is not in the document, which dasher answers with `null`.
 - google.com/maps: `XPathResult` is undefined.
 - target.com: `WebAssembly` is undefined.
-- azure.microsoft.com: each request took about 8 s to answer, and
-  dasher fetches parser-blocking scripts one at a time.
-- microsoft.com: the server answered dasher with a block page ("Your
-  request has been blocked") under status 200, which the outcome rules
-  here did not take for a bot wall; the `JSON.parse` error is that
-  page's own JSON. From a home connection dasher gets the home page,
-  0.97 similar to Chromium's text here.
-- disneyplus.com and sooka.my: a `TypeError` in the page's own bundle,
-  then React's hydration error. Lightpanda kept as little of
-  disneyplus.com, and of word.cloud.microsoft.
-- instagram.com: the server sends its error page to a navigation
-  without `Sec-Fetch-*` headers, which dasher did not send in this run.
-  It sends them now, and gets the page Chromium got.
-- flashscore.ro: the consent banner, 17,400 characters of Chromium's
-  text, was missing. Its script (OneTrust) took the result of
-  `querySelectorAll` for an array, because `Array.isArray` said so in
-  this run's build, and failed in a promise. Fixed since: a load from a
-  home connection is 0.996 similar to Chrome's.
+- disneyplus.com and sooka.my: React gave up hydrating the page (its
+  error 423), on sooka.my after a `TypeError` in the page's own bundle.
+  Lightpanda kept as little of disneyplus.com.
+- word.cloud.microsoft: 63 characters and no page error. Lightpanda got
+  the same 63.
+- amazon.com: the server answered dasher and Lightpanda with a
+  "Continue shopping" interstitial under status 200, which the outcome
+  rules here do not take for a bot wall, and Chromium with the home
+  page.
 - digikala.com: the page is built by scripts after load, so under the
   default visibility policy its shelves are below the fold and never
   load. `--visibility all` or `--scroll` returns them.
@@ -168,34 +162,34 @@ with the page error behind it where there was one (see
   what dasher lacks is the rest of the feed, which loads on coming into
   view (as on digikala.com), and the ad frames.
 
-These were worked out after the run, from a home connection, on
-2026-11-15; the numbers above are the run's and have not been redone.
+The page errors are this run's. The digikala.com and yahoo.com
+explanations were worked out from a home connection.
 
 ### Limits
 
-- dasher: 27 runs of 1,476 ended on the CPU budget (10 s) and 3 on the
-  request budget; 4 reached the 30 s time limit. Ten sites ended on a
-  budget on most runs (among them bloomberg.com, hubspot.com,
-  huffpost.com, salesforce.com, twitch.tv). A budget is a success: the
-  page is returned as it stood.
-- Lightpanda: 266 runs stopped at its 5 s wait cap. With the cap at
-  30 s it used 1.17× the CPU, kept over 10% more text on 19 sites, and
-  was at least 0.9 similar to Chromium's text on 265 sites, against 260.
-- Chromium: on 186 sites it was still making requests 5 s after `load`
+- dasher: 39 runs of 1,476 ended on the CPU budget (10 s) and 3 on the
+  request budget; 3 reached the 30 s time limit. Fourteen sites ended
+  on a budget on most runs (among them bloomberg.com, homedepot.com,
+  hubspot.com, huffpost.com, salesforce.com). A budget is a success:
+  the page is returned as it stood.
+- Lightpanda: 272 runs stopped at its 5 s wait cap. With the cap at
+  30 s it used 1.17× the CPU, kept over 10% more text on 15 sites, and
+  was at least 0.9 similar to Chromium's text on 271 sites, against 269.
+- Chromium: on 191 sites it was still making requests 5 s after `load`
   and was read as it stood.
 
 ### Starting up
 
 Process start to exit on a page that costs nothing (one inline script,
-served from the sandbox itself), ten sandboxes, ten runs each, medians,
-measured on 2026-11-16 ([`results/2026-11-16/startup.txt`](results/2026-11-16/startup.txt)):
+served from the sandbox itself), ten sandboxes, ten runs each, medians
+([`results/2026-11-16/startup.txt`](results/2026-11-16/startup.txt)):
 
 | | dasher | Lightpanda | Chromium |
 | --- | ---: | ---: | ---: |
 | Print the version: wall | 10 ms | 10 ms | 31 ms |
-| Load the page: wall | 21 ms | 41 ms | 318 ms |
+| Load the page: wall | 21 ms | 41 ms | 324 ms |
 | Load the page: CPU | 11 ms | 39 ms | 270 ms |
-| Load the page: peak memory | 7.1 MiB | 22.9 MiB | 193 MiB |
+| Load the page: peak memory | 7.1 MiB | 22.6 MiB | 195 MiB |
 
 Wall times are in steps of 10 ms, the runner's sampling period.
 Waiting for network idle on top of `load` cost dasher and Lightpanda
@@ -204,8 +198,8 @@ nothing and Chromium 500 ms.
 ### Cost
 
 On Lambda the bill is wall time times configured memory. At the 3008 MB
-these ran with, the mean page of the 328 comes to $122 per million for
-dasher, $113 for Lightpanda and $261 for Chromium (us-east-1 arm64
+these ran with, the mean page of the 340 comes to $128 per million for
+dasher, $114 for Lightpanda and $262 for Chromium (us-east-1 arm64
 prices, request fee included). dasher's peak memory would allow a far
 smaller function, but Lambda gives CPU in proportion to memory, and
 that trade was not measured here.
@@ -228,8 +222,8 @@ that trade was not measured here.
   position. Besides the three tools, `lightpanda-30s` raises
   Lightpanda's wait cap and `chromium-noimg` turns Chromium's images
   off (0.87× its CPU, 0.94× its memory). Median CPU by position in the
-  round shows no trend (dasher's five positions: 0.96, 0.94, 0.95, 0.88
-  and 1.09 s, each over a different set of sites).
+  round shows no trend (dasher's five positions: 0.90, 0.79, 0.89, 0.79
+  and 0.89 s, each over a different set of sites).
 - **Commands.**
   - `dasher --json -t 30 URL`: defaults, which wait for the network to
     be idle for 500 ms within the page-time, CPU and request budgets.
@@ -256,8 +250,8 @@ that trade was not measured here.
 - **Warm-up.** Each sandbox reads every binary once and starts each
   tool once before measuring, so no run pays for the image's lazy
   loading.
-- **Hardware.** Lambda's arm64 fleet is mixed: 308 of these sandboxes
-  reported Neoverse N1 cores, 181 Neoverse V1 and 3 Neoverse V2. Ratios
+- **Hardware.** Lambda's arm64 fleet is mixed: 364 of these sandboxes
+  reported Neoverse N1 cores, 105 Neoverse V1 and 23 Neoverse V2. Ratios
   are within a sandbox; absolute times are over that mix.
 - **Outcomes.** A run *loaded* if it exited 0 with a status under 400
   and at least 40 characters of visible text that are not a bot wall's.
@@ -275,10 +269,10 @@ that trade was not measured here.
   images, fonts and stylesheets, and runs in five processes. It is here
   as the reference for content and as what a scraper would otherwise
   run, not as a like-for-like engine.
-- **Sites behind bot protection.** A fifth of the list answered with a
-  wall. Which tool gets through depends on its TLS and HTTP
-  fingerprint and on the address it calls from more than on anything
-  measured here.
+- **Sites behind bot protection.** Between an eighth and a fifth of
+  the list answered with a wall, depending on the tool. Which tool gets
+  through depends on its TLS and HTTP fingerprint and on the address it
+  calls from more than on anything measured here.
 - **Other hardware.** x86_64, and CPUs with more or less cache, were
   not measured.
 - **One day.** Sites change by the hour; three runs minutes apart
