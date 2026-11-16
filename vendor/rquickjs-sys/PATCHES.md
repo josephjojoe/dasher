@@ -178,9 +178,13 @@ rquickjs-sys = { git = "https://github.com/josephjojoe/dasher" }
   return g(); }` returned 1. Here the body uses the scope's variable,
   unless it declares the name again with `var` or as a function, which
   by the specification is a second variable that starts from the
-  parameter's value. A function that calls `eval` in its own body is
-  compiled as before, because the code it evaluates finds the names
-  from the compiled function. Both upstreams still have the two copies.
+  parameter's value. The code a direct `eval` in the body compiles
+  finds the same variable: the compiled function records which names
+  the body left to the parameters (`JSVarDef.has_param_var`, written
+  with the bytecode). A `var` that such an `eval` declares belongs to
+  the body, so it hides the parameter from the body and not from the
+  default values: the object holding those variables is looked in
+  before the parameter. Both upstreams still have the two copies.
   Test: `crates/js/tests/parameters.rs`, against Node's answers.
 
 ## Strings, JSON, arrays

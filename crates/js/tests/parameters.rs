@@ -5,8 +5,12 @@
 //! the closures in the default values read. QuickJS-NG 0.11 gave the body
 //! a second copy of each, so neither saw what the other assigned (a change
 //! in `vendor/rquickjs-sys`).
+//!
+//! The parameters are outside the body's own variables: a `var` that a
+//! direct `eval` declares in the body is one of those, and hides a
+//! parameter of its name from the body but not from the default values.
 
-use dasher_js::{JsRuntime, RuntimeOptions};
+use dasher_js::{JsRuntime, RuntimeOptions, ScriptCache, ScriptCacheOptions};
 
 fn runtime() -> JsRuntime {
     JsRuntime::new(RuntimeOptions::default()).expect("runtime")
@@ -16,8 +20,9 @@ fn runtime() -> JsRuntime {
 /// declares again with `var` or as a function (a second variable that
 /// starts from the parameter's value), patterns, rest parameters,
 /// `arguments`, every kind of function, `with`, and `eval` in a default
-/// value or in a function inside the body. The expected values are Node
-/// 22's; the engine gave 15 of the 53 before the change.
+/// value, in the body and in a function inside it, reading, assigning and
+/// declaring the names. The expected values are Node 22's; the engine gave
+/// 39 of the 94 before the change.
 #[test]
 fn a_body_and_the_closures_in_its_defaults_share_the_parameters() {
     let js = runtime();
@@ -50,23 +55,28 @@ fn an_async_function_shares_them_across_an_await() {
     assert_eq!(js.eval_json("result").unwrap().as_deref(), Some("[2,3,3]"));
 }
 
-/// A function that calls `eval` in its own body is compiled as upstream
-/// compiled it: the body and the code it evaluates use the arguments, and
-/// the closures in the default values their own variables. Node gives 5
-/// and `[2,2]` here.
+/// A compiled function carries which of its variables the body left for
+/// the parameters' own, for the code a direct `eval` compiles when the
+/// function runs. That has to survive the script cache, which writes the
+/// compiled script out and reads it back for the next page.
 #[test]
-fn a_function_with_eval_in_its_body_keeps_two_variables() {
-    let js = runtime();
-    assert_eq!(
-        js.eval_json(
-            "(() => {
-               function assigned(a = 1, set = (v) => { a = v; }) { set(5); return eval('a'); }
-               function read(a = eval('1'), g = () => a) { a = 2; return [eval('a'), g()]; }
-               return [assigned(), read()];
-             })()"
-        )
-        .unwrap()
-        .as_deref(),
-        Some("[1,[2,1]]")
-    );
+fn a_script_read_back_from_the_cache_gives_the_same_answers() {
+    let cache = ScriptCache::new(ScriptCacheOptions::default());
+    let source = format!("var answers = {};", include_str!("fixtures/parameters.js"));
+    for page in 0..3 {
+        let js = JsRuntime::new(RuntimeOptions {
+            script_cache: Some(cache.clone()),
+            ..RuntimeOptions::default()
+        })
+        .expect("runtime");
+        js.run_script(&source, "parameters.js").unwrap();
+        assert_eq!(
+            js.eval_json("answers").unwrap().as_deref(),
+            Some(include_str!("fixtures/parameters.expected.json")),
+            "page {page}"
+        );
+        assert!(js.errors().is_empty(), "{:?}", js.errors());
+    }
+    let stats = cache.stats();
+    assert_eq!((stats.misses, stats.hits), (1, 2), "{stats:?}");
 }

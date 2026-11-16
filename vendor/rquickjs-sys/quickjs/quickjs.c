@@ -759,6 +759,11 @@ typedef struct JSVarDef {
     /* dasher: only used during compilation: the function's body declares
        the name with 'var' or as a function (see js_param_binding) */
     unsigned int is_body_var : 1;
+    /* dasher: in a compiled function, on an argument or a variable at
+       function level: the body does not use it, but the variable of the
+       same name in the argument scope (see js_param_binding). Code that
+       a direct eval compiles later must do the same. */
+    unsigned int has_param_var : 1;
 } JSVarDef;
 
 /* for the encoding of the pc2line table */
@@ -21813,8 +21818,6 @@ typedef struct JSFunctionDef {
     bool has_parameter_expressions : 1; /* if true, an argument scope is created */
     bool has_use_strict : 1; /* to reject directive in special cases */
     bool has_eval_call : 1; /* true if the function contains a call to eval() */
-    bool has_body_eval_call : 1; /* dasher: and one of them is in its body,
-                                    not in its parameters */
     bool has_arguments_binding : 1; /* true if the 'arguments' binding is
                                    available in the function */
     bool has_this_binding : 1; /* true if the 'this' and new.target binding are
@@ -27867,7 +27870,6 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                     emit_op(s, OP_apply_eval);
                     emit_u16(s, fd->scope_level);
                     fd->has_eval_call = true;
-                    fd->has_body_eval_call |= (fd->body_scope >= 0); /* dasher */
                     break;
                 default:
                     if (call_type == FUNC_CALL_SUPER_CTOR) {
@@ -27911,7 +27913,6 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                     emit_u16(s, arg_count);
                     emit_u16(s, fd->scope_level);
                     fd->has_eval_call = true;
-                    fd->has_body_eval_call |= (fd->body_scope >= 0); /* dasher */
                     break;
                 default:
                     if (call_type == FUNC_CALL_SUPER_CTOR) {
@@ -33313,17 +33314,21 @@ static void var_object_test(JSContext *ctx, JSFunctionDef *s,
    name the body does not declare, and it is no longer closed when the
    parameters are done (see js_parse_function_decl2).
 
-   A function that calls eval directly in its body keeps upstream's
-   arrangement: the code it evaluates finds the names from the compiled
-   function, where the argument scope is not told apart. */
+   The parameters are then outside the body's variables, as in the
+   specification: a 'var' that a direct eval declares in the body hides
+   the parameter of that name from the body, so the eval's variable
+   object is tested before the parameter is used (js_param_var_test),
+   and the code an eval compiles finds the parameter after that object
+   (add_eval_variables, add_closure_variables). That code is compiled
+   when it runs, from the compiled function's variables:
+   JSVarDef.has_param_var tells it which of them the body replaced. */
 static int js_param_binding(JSContext *ctx, JSFunctionDef *fd, JSAtom name,
                             int var_idx)
 {
     JSVarDef *vd;
     int idx;
 
-    if (var_idx < 0 || !fd->has_parameter_expressions ||
-        fd->has_body_eval_call)
+    if (var_idx < 0 || !fd->has_parameter_expressions)
         return var_idx;
     if (var_idx & ARGUMENT_VAR_OFFSET)
         vd = &fd->args[var_idx - ARGUMENT_VAR_OFFSET];
@@ -33335,12 +33340,37 @@ static int js_param_binding(JSContext *ctx, JSFunctionDef *fd, JSAtom name,
     return idx >= 0 ? idx : var_idx;
 }
 
+/* dasher: 'var_name' resolved to a parameter's variable in 'fd' (see
+   js_param_binding): first look in the object holding the variables that
+   a direct eval declared in the body of 'fd', if it has one */
+static void js_param_var_test(JSContext *ctx, JSFunctionDef *s,
+                              JSFunctionDef *fd, JSAtom var_name, int op,
+                              DynBuf *bc, int *plabel_done)
+{
+    if (fd->var_object_idx < 0)
+        return;
+    if (fd == s) {
+        dbuf_putc(bc, OP_get_loc);
+        dbuf_put_u16(bc, fd->var_object_idx);
+    } else {
+        JSVarDef *vd = &fd->vars[fd->var_object_idx];
+        int idx;
+        vd->is_captured = 1;
+        idx = get_closure_var(ctx, s, fd, false, fd->var_object_idx,
+                              vd->var_name, false, false, JS_VAR_NORMAL);
+        dbuf_putc(bc, OP_get_var_ref);
+        dbuf_put_u16(bc, idx);
+    }
+    var_object_test(ctx, s, var_name, op, bc, plabel_done, 0);
+}
+
 static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
                              JSAtom var_name, int scope_level, int op,
                              DynBuf *bc, uint8_t *bc_buf,
                              LabelSlot *ls, int pos_next)
 {
     int idx, var_idx, is_put;
+    int param_idx; /* dasher: see js_param_binding() */
     int label_done;
     JSFunctionDef *fd;
     JSVarDef *vd;
@@ -33381,14 +33411,15 @@ static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
     is_arg_scope = (idx == ARG_SCOPE_END);
     /* dasher: a name bound by a parameter's pattern has a copy at function
        level (see js_param_binding) */
+    param_idx = -1;
     if (var_idx >= 0 && s->vars[var_idx].scope_level == 0)
-        var_idx = js_param_binding(ctx, s, var_name, var_idx);
+        param_idx = js_param_binding(ctx, s, var_name, var_idx);
     if (var_idx < 0) {
         /* argument scope: variables are not visible but pseudo
            variables are visible */
         if (!is_arg_scope) {
             var_idx = find_var(ctx, s, var_name);
-            var_idx = js_param_binding(ctx, s, var_name, var_idx); /* dasher */
+            param_idx = js_param_binding(ctx, s, var_name, var_idx); /* dasher */
         }
 
         if (var_idx < 0 && is_pseudo_var)
@@ -33414,6 +33445,10 @@ static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
             dbuf_put_u32(bc, JS_DupAtom(ctx, var_name));
             dbuf_putc(bc, JS_THROW_VAR_RO);
             goto done;
+        }
+        if (param_idx >= 0 && param_idx != var_idx) { /* dasher */
+            var_idx = param_idx;
+            js_param_var_test(ctx, s, s, var_name, op, bc, &label_done);
         }
         /* OP_scope_put_var_init is only used to initialize a
            lexical variable, so it is never used in a with or var object. It
@@ -33542,17 +33577,21 @@ static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
             idx = vd->scope_next;
         }
         is_arg_scope = (idx == ARG_SCOPE_END);
-        if (var_idx >= 0) {
-            if (fd->vars[var_idx].scope_level == 0) /* dasher */
-                var_idx = js_param_binding(ctx, fd, var_name, var_idx);
-            break;
-        }
-
-        if (!is_arg_scope) {
+        if (var_idx < 0 && !is_arg_scope)
             var_idx = find_var(ctx, fd, var_name);
-            var_idx = js_param_binding(ctx, fd, var_name, var_idx); /* dasher */
-            if (var_idx >= 0)
-                break;
+        if (var_idx >= 0) {
+            /* dasher: a variable or argument at function level may stand
+               aside for the parameter's own variable */
+            if ((var_idx & ARGUMENT_VAR_OFFSET) ||
+                fd->vars[var_idx].scope_level == 0) {
+                param_idx = js_param_binding(ctx, fd, var_name, var_idx);
+                if (param_idx != var_idx) {
+                    var_idx = param_idx;
+                    js_param_var_test(ctx, s, fd, var_name, op, bc,
+                                      &label_done);
+                }
+            }
+            break;
         }
         if (is_pseudo_var) {
             var_idx = resolve_pseudo_var(ctx, fd, var_name);
@@ -34083,17 +34122,12 @@ static void add_eval_variables(JSContext *ctx, JSFunctionDef *s)
             for(i = 0; i < fd->arg_count; i++) {
                 vd = &fd->args[i];
                 if (vd->var_name != JS_ATOM_NULL) {
-                    /* dasher: the variable the body uses for the name */
-                    int j = js_param_binding(ctx, fd, vd->var_name,
-                                             i | ARGUMENT_VAR_OFFSET);
-                    if (!(j & ARGUMENT_VAR_OFFSET)) {
-                        vd = &fd->vars[j];
-                        vd->is_captured = 1;
-                        get_closure_var(ctx, s, fd,
-                                        false, j, vd->var_name, false,
-                                        vd->is_lexical, JS_VAR_NORMAL);
+                    /* dasher: not if the body uses the parameter's own
+                       variable for the name: see below */
+                    if (js_param_binding(ctx, fd, vd->var_name,
+                                         i | ARGUMENT_VAR_OFFSET) !=
+                        (i | ARGUMENT_VAR_OFFSET))
                         continue;
-                    }
                     get_closure_var(ctx, s, fd,
                                     true, i, vd->var_name, false,
                                     vd->is_lexical, JS_VAR_NORMAL);
@@ -34106,13 +34140,39 @@ static void add_eval_variables(JSContext *ctx, JSFunctionDef *s)
                     vd->var_name != JS_ATOM__ret_ &&
                     vd->var_name != JS_ATOM_NULL) {
                     /* dasher: as for the arguments */
-                    int j = js_param_binding(ctx, fd, vd->var_name, i);
-                    vd = &fd->vars[j];
-                    if (j != i)
-                        vd->is_captured = 1;
+                    if (js_param_binding(ctx, fd, vd->var_name, i) != i)
+                        continue;
                     get_closure_var(ctx, s, fd,
-                                    false, j, vd->var_name, false,
+                                    false, i, vd->var_name, false,
                                     vd->is_lexical, JS_VAR_NORMAL);
+                }
+            }
+            /* dasher: the parameters' own variables, after the object of
+               the variables an eval declared in the body, which is among
+               those above (see js_param_binding) */
+            if (fd->has_parameter_expressions) {
+                int n = fd->arg_count + fd->var_count;
+                for(i = 0; i < n; i++) {
+                    int k, j;
+                    if (i < fd->arg_count) {
+                        vd = &fd->args[i];
+                        k = i | ARGUMENT_VAR_OFFSET;
+                    } else {
+                        vd = &fd->vars[i - fd->arg_count];
+                        k = i - fd->arg_count;
+                        if (vd->scope_level != 0)
+                            continue;
+                    }
+                    if (vd->var_name == JS_ATOM_NULL)
+                        continue;
+                    j = js_param_binding(ctx, fd, vd->var_name, k);
+                    if (j != k) {
+                        vd = &fd->vars[j];
+                        vd->is_captured = 1;
+                        get_closure_var(ctx, s, fd,
+                                        false, j, vd->var_name, false,
+                                        vd->is_lexical, JS_VAR_NORMAL);
+                    }
                 }
             }
         } else {
@@ -34153,6 +34213,19 @@ static void set_closure_from_var(JSContext *ctx, JSClosureVar *cv,
     cv->var_name = JS_DupAtom(ctx, vd->var_name);
 }
 
+/* dasher: the variable of the argument scope named 'name', which an
+   argument or variable with has_param_var stands aside for */
+static int find_param_vardef(JSFunctionBytecode *b, JSAtom name)
+{
+    int i;
+    for(i = 0; i < b->var_count; i++) {
+        JSVarDef *vd = &b->vardefs[b->arg_count + i];
+        if (vd->scope_level == ARG_SCOPE_INDEX && vd->var_name == name)
+            return i;
+    }
+    abort(); /* has_param_var is only set when there is one */
+}
+
 /* for direct eval compilation: add references to the variables of the
    calling function */
 static __exception int add_closure_variables(JSContext *ctx, JSFunctionDef *s,
@@ -34184,8 +34257,11 @@ static __exception int add_closure_variables(JSContext *ctx, JSFunctionDef *s,
     if (!is_arg_scope) {
         /* Add argument variables */
         for(i = 0; i < b->arg_count; i++) {
-            JSClosureVar *cv = &s->closure_var[s->closure_var_count++];
+            JSClosureVar *cv;
             vd = &b->vardefs[i];
+            if (vd->has_param_var) /* dasher: see below */
+                continue;
+            cv = &s->closure_var[s->closure_var_count++];
             cv->is_local = true;
             cv->is_arg = true;
             cv->is_const = false;
@@ -34197,9 +34273,21 @@ static __exception int add_closure_variables(JSContext *ctx, JSFunctionDef *s,
         /* Add local non lexical variables */
         for(i = 0; i < b->var_count; i++) {
             vd = &b->vardefs[b->arg_count + i];
-            if (vd->scope_level == 0 && vd->var_name != JS_ATOM__ret_) {
+            if (vd->scope_level == 0 && vd->var_name != JS_ATOM__ret_ &&
+                !vd->has_param_var) { /* dasher: see below */
                 JSClosureVar *cv = &s->closure_var[s->closure_var_count++];
                 set_closure_from_var(ctx, cv, vd, i);
+            }
+        }
+        /* dasher: the parameters' own variables, after the object of the
+           variables an eval declared in the body, which is among those
+           above (see js_param_binding) */
+        for(i = 0; i < b->arg_count + b->var_count; i++) {
+            vd = &b->vardefs[i];
+            if (vd->has_param_var) {
+                JSClosureVar *cv = &s->closure_var[s->closure_var_count++];
+                int j = find_param_vardef(b, vd->var_name);
+                set_closure_from_var(ctx, cv, &b->vardefs[b->arg_count + j], j);
             }
         }
     } else {
@@ -36493,18 +36581,39 @@ static int js_lazy_resolve_name(JSContext *ctx, JSFunctionDef *lf,
                     return -1;
             }
         }
-        if (var_idx >= 0) {
-            if (fd->vars[var_idx].scope_level == 0)
-                var_idx = js_param_binding(ctx, fd, name, var_idx);
+        if (var_idx >= 0 && fd->vars[var_idx].scope_level != 0)
             break;
+        if (var_idx >= 0) {
+            /* at function level: the last variables of the chain */
+            for (idx = vd->scope_next; idx >= 0; idx = fd->vars[idx].scope_next)
+                step++;
         }
         is_arg_scope = (idx == ARG_SCOPE_END);
         step++;
-        if (!is_arg_scope) {
+        if (var_idx < 0 && !is_arg_scope)
             var_idx = find_var(ctx, fd, name);
-            var_idx = js_param_binding(ctx, fd, name, var_idx);
-            if (var_idx >= 0)
-                break;
+        if (var_idx >= 0) {
+            /* the parameter's own variable comes after the object of the
+               variables an eval declared in the body: see
+               js_param_binding() */
+            int param_idx = js_param_binding(ctx, fd, name, var_idx);
+            if (param_idx != var_idx) {
+                var_idx = param_idx;
+                if (fd->var_object_idx >= 0) {
+                    vd = &fd->vars[fd->var_object_idx];
+                    vd->is_captured = 1;
+                    k->has_marker = true;
+                    if (js_lazy_note(ctx, lf, k,
+                                     get_closure_var(ctx, lf, fd, false,
+                                                     fd->var_object_idx,
+                                                     vd->var_name, false,
+                                                     false, JS_VAR_NORMAL),
+                                     step + 1))
+                        return -1;
+                }
+                step += 2;
+            }
+            break;
         }
         if (is_pseudo_var) {
             var_idx = resolve_pseudo_var(ctx, fd, name);
@@ -36889,6 +36998,23 @@ static JSValue js_create_function2(JSContext *ctx, JSFunctionDef *fd,
     fd->byte_code.buf = NULL;
 
     b->func_name = fd->func_name;
+    if (fd->has_parameter_expressions) {
+        /* dasher: for a direct eval in the body (see js_param_binding) */
+        int i;
+        for(i = 0; i < fd->arg_count; i++) {
+            JSVarDef *vd = &fd->args[i];
+            if (vd->var_name != JS_ATOM_NULL &&
+                js_param_binding(ctx, fd, vd->var_name,
+                                 i | ARGUMENT_VAR_OFFSET) != (i | ARGUMENT_VAR_OFFSET))
+                vd->has_param_var = 1;
+        }
+        for(i = 0; i < fd->var_count; i++) {
+            JSVarDef *vd = &fd->vars[i];
+            if (vd->scope_level == 0 && vd->var_name != JS_ATOM_NULL &&
+                js_param_binding(ctx, fd, vd->var_name, i) != i)
+                vd->has_param_var = 1;
+        }
+    }
     if (fd->arg_count + fd->var_count > 0) {
         b->vardefs = (void *)(base + vardefs_offset);
         if (fd->arg_count > 0)
@@ -39407,6 +39533,7 @@ static int JS_WriteFunctionTag(BCWriterState *s, JSValueConst obj)
             bc_set_flags(&flags, &idx, vd->is_const, 1);
             bc_set_flags(&flags, &idx, vd->is_lexical, 1);
             bc_set_flags(&flags, &idx, vd->is_captured, 1);
+            bc_set_flags(&flags, &idx, vd->has_param_var, 1); /* dasher */
             assert(idx <= 8);
             bc_put_u8(s, flags);
         }
@@ -40618,6 +40745,7 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
             vd->is_const = bc_get_flags(v8, &idx, 1);
             vd->is_lexical = bc_get_flags(v8, &idx, 1);
             vd->is_captured = bc_get_flags(v8, &idx, 1);
+            vd->has_param_var = bc_get_flags(v8, &idx, 1); /* dasher */
 #ifdef ENABLE_DUMPS // JS_DUMP_READ_OBJECT
             if (check_dump_flag(s->ctx->rt, JS_DUMP_READ_OBJECT)) {
                 bc_read_trace(s, "%3d  %d%c%c%c %4d  ",
