@@ -27,5 +27,8 @@ npm ci
 npm run build   # rewrites ../fixtures/compat
 ```
 
-The exact versions are in `package-lock.json`. The vendored libraries
-keep their licence headers; all are MIT-licensed.
+The exact versions are in `package-lock.json`. The libraries are
+MIT-licensed, except Lit, which is BSD-3-Clause. Bundlers drop some of
+their licence comments, so the notices are kept in
+[`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt); update it when a
+library is added or its licence changes.

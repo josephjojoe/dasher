@@ -128,7 +128,9 @@ async fn main() -> dasher::Result<()> {
 
 dasher is not on crates.io: it builds against a patched QuickJS
 ([`vendor/rquickjs-sys`](vendor/rquickjs-sys/PATCHES.md)), and a
-published crate cannot carry a `[patch]`. Depend on the repository and
+published crate cannot carry a `[patch]`. The crate named `dasher`
+there is an unrelated project, so `cargo add dasher` and
+`cargo install dasher` get something else. Depend on the repository and
 repeat the patch:
 
 ```toml

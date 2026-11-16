@@ -108,11 +108,16 @@ are all in one file, listed at the top of
 Linux (`--user-agent` changes both), `navigator.userAgentData` matches,
 and `navigator.webdriver` is `false`. dasher does nothing else to look
 like a person: it sends no client-hint headers, its TLS and HTTP/2
-handshakes are not Chrome's, and it solves no challenges. Sites behind bot protection (Cloudflare, Akamai, DataDome,
-PerimeterX) often answer it with a challenge page, as they answer any
-client that is not a full browser; on 500 popular sites fetched from AWS
-that was about one site in five, for Chromium's headless shell as much
-as for dasher (see [crates/bench/README.md](crates/bench/README.md)).
+handshakes are not Chrome's, and it solves no challenges. Sites behind
+bot protection (Cloudflare, Akamai, DataDome, PerimeterX) often answer
+it with a challenge page, as they answer any client that is not a full
+browser; on 492 popular sites fetched from AWS that was about one site
+in five, for Chromium's headless shell as much as for dasher (see
+[crates/bench/lambda](crates/bench/lambda/README.md)).
+
+dasher does not read `robots.txt` and does not limit its own request
+rate. Which pages to fetch, and how often, is for the program that
+drives it to decide.
 
 ## Network gaps
 
