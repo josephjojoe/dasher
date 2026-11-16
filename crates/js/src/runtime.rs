@@ -982,6 +982,10 @@ fn install<'js>(
     )?;
 
     native.set(
+        "interfaceMembers",
+        Function::new(ctx.clone(), interface_members)?,
+    )?;
+    native.set(
         "loadGlue",
         Function::new(ctx.clone(), |ctx: Ctx<'js>, name: String| {
             glue::load_lazy(&ctx, &name)
@@ -1021,6 +1025,62 @@ fn install<'js>(
         return Err(rquickjs::Error::Unknown);
     }
     Ok(())
+}
+
+/// `native.interfaceMembers(ctor)`: makes the members of an interface
+/// enumerable, as WebIDL has them (see `interfaceMembers` in prelude.js).
+/// That is every string-keyed property of `ctor` but `length`, `name` and
+/// `prototype`, and every one of its prototype object but `constructor`.
+fn interface_members<'js>(ctx: Ctx<'js>, ctor: Object<'js>) -> rquickjs::Result<()> {
+    use rquickjs::atom::PredefinedAtom::{Constructor, Length, Name, Prototype};
+    make_enumerable(&ctx, &ctor, &[Length as u32, Name as u32, Prototype as u32])?;
+    let proto: Value<'js> = ctor.get(Prototype)?;
+    match proto.as_object() {
+        Some(proto) if !proto.is_function() => make_enumerable(&ctx, proto, &[Constructor as u32]),
+        _ => Ok(()),
+    }
+}
+
+/// What `Object.defineProperty(object, key, { enumerable: true })` does,
+/// for each own string key of `object` whose atom is not in `except`.
+fn make_enumerable<'js>(
+    ctx: &Ctx<'js>,
+    object: &Object<'js>,
+    except: &[u32],
+) -> rquickjs::Result<()> {
+    let raw = ctx.as_raw().as_ptr();
+    let mut keys = std::ptr::null_mut();
+    let mut len = 0;
+    // SAFETY: `raw` is the live context `ctx` wraps and `object` a live
+    // object in it. On success the engine hands over `len` keys at `keys`,
+    // which are read while it is still allocated and freed once.
+    unsafe {
+        let flags = qjs::JS_GPN_STRING_MASK as i32;
+        if qjs::JS_GetOwnPropertyNames(raw, &mut keys, &mut len, object.as_raw(), flags) < 0 {
+            return Err(rquickjs::Error::Exception);
+        }
+        let mut result = Ok(());
+        for key in std::slice::from_raw_parts(keys, len as usize) {
+            if except.contains(&key.atom) {
+                continue;
+            }
+            let defined = qjs::JS_DefineProperty(
+                raw,
+                object.as_raw(),
+                key.atom,
+                qjs::JS_UNDEFINED,
+                qjs::JS_UNDEFINED,
+                qjs::JS_UNDEFINED,
+                (qjs::JS_PROP_HAS_ENUMERABLE | qjs::JS_PROP_ENUMERABLE | qjs::JS_PROP_THROW) as i32,
+            );
+            if defined < 0 {
+                result = Err(rquickjs::Error::Exception);
+                break;
+            }
+        }
+        qjs::JS_FreePropertyEnum(raw, keys, len);
+        result
+    }
 }
 
 /// For benchmarks (`DASHER_EAGER_JS`, with the `replay` feature): compile

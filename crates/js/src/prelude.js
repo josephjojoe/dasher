@@ -605,26 +605,13 @@
   // and the symbol-keyed members (@@toStringTag, @@iterator) stay hidden,
   // as do the function's own `length`, `name` and `prototype`.
   //
-  // Runs for some 2,300 members before every page, so it reads nothing
-  // back: defining a member that is already enumerable changes nothing.
-  // The built-ins are captured and the loops indexed because the streams'
-  // turn comes once page scripts have run (see lazy.js).
-  const ENUMERABLE = { enumerable: true };
+  // Runs for some 2,300 members before every page, so it is native: a
+  // call of Object.defineProperty for each took a tenth of the time a
+  // page's globals take to set up. Being native, it is also the same
+  // when the streams' turn comes, once page scripts have run (see
+  // lazy.js).
+  const interfaceMembers = native.interfaceMembers;
   const defineProperty = Object.defineProperty;
-  const ownNames = Object.getOwnPropertyNames;
-  function interfaceMembers(ctor) {
-    const statics = ownNames(ctor);
-    for (let i = 0; i < statics.length; i++) {
-      const key = statics[i];
-      if (key !== 'length' && key !== 'name' && key !== 'prototype') defineProperty(ctor, key, ENUMERABLE);
-    }
-    const proto = ctor.prototype;
-    if (proto === null || typeof proto !== 'object') return;
-    const members = ownNames(proto);
-    for (let i = 0; i < members.length; i++) {
-      if (members[i] !== 'constructor') defineProperty(proto, members[i], ENUMERABLE);
-    }
-  }
 
   // Installs interfaces, and the Window's own operations and attributes,
   // on the global object the way WebIDL does: writable and configurable.
