@@ -56,7 +56,8 @@ Method, per-site results and what the comparison does not show:
 
 ## Install
 
-Static Linux binaries (x86_64 and arm64) and Lambda zips are on the
+Static Linux binaries (x86_64 and arm64), a macOS binary (Apple
+silicon) and Lambda zips are on the
 [releases page](https://github.com/josephjojoe/dasher/releases). Or
 build from source with Rust 1.88 or later and a C compiler:
 
