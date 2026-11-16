@@ -1,6 +1,7 @@
 # Only the sources go into the build context.
 target/
 .git/
+.claude/
 .github/
 docs/
 *.md
