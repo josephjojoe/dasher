@@ -187,20 +187,29 @@ These were worked out after the run, from a home connection, on
 ### Starting up
 
 Process start to exit on a page that costs nothing (one inline script,
-served from the sandbox itself), ten sandboxes, ten runs each, medians:
+served from the sandbox itself), ten sandboxes, ten runs each, medians.
+This part was run again on 2026-11-16, with dasher built from `main`
+after 0.1.0 and the same Lightpanda and Chromium
+([`results/2026-11-16/startup.txt`](results/2026-11-16/startup.txt)):
 
 | | dasher | Lightpanda | Chromium |
 | --- | ---: | ---: | ---: |
 | Print the version: wall | 10 ms | 10 ms | 31 ms |
-| Load the page: wall | 67 ms | 41 ms | 324 ms |
-| Load the page: CPU | 60 ms | 36 ms | 260 ms |
-| Load the page: peak memory | 7.8 MiB | 22.9 MiB | 192 MiB |
+| Load the page: wall | 21 ms | 41 ms | 318 ms |
+| Load the page: CPU | 11 ms | 39 ms | 270 ms |
+| Load the page: peak memory | 7.1 MiB | 22.9 MiB | 193 MiB |
 
 Wall times are in steps of 10 ms, the runner's sampling period.
-dasher's 60 ms is its own start-up and not the page's work (a static
-page with no scripts costs it as much), and it is more than
-Lightpanda's. Waiting for network idle on top of `load` cost dasher and
-Lightpanda nothing and Chromium 500 ms.
+Waiting for network idle on top of `load` cost dasher and Lightpanda
+nothing and Chromium 500 ms.
+
+dasher 0.1.0 took 60 ms of CPU and 67 ms of wall time on the same page
+([`results/2026-11-15/startup.txt`](results/2026-11-15/startup.txt)):
+it compiled its own JavaScript glue in every process, which is now done
+when dasher is built. By core type the two runs agree on Lightpanda
+(40 and 39 ms on Neoverse N1, 31 and 30 ms on V1), and dasher went from
+64 to 11 ms on N1 and from 50 to 9 ms on V1. Every figure outside this
+section is 0.1.0's and has not been redone.
 
 ### Cost
 

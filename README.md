@@ -33,7 +33,10 @@ and Chromium's headless shell run back to back in the same sandbox
 | CPU, all pages | 612 s | 590 s | 2168 s |
 | Wall time, median page | 2.0 s | 2.7 s | 5.4 s |
 | Sites loaded, of 492 | 372 | 390 | 355 |
-| Start-up on an empty page: CPU, memory | 60 ms, 8 MiB | 36 ms, 23 MiB | 260 ms, 192 MiB |
+| Start-up on an empty page: CPU, memory¹ | 11 ms, 7 MiB | 39 ms, 23 MiB | 270 ms, 193 MiB |
+
+¹ Measured again on 2026-11-16 with dasher built from `main`; 0.1.0
+takes 60 ms.
 
 - **Memory is the reason to use dasher**: four tenths of Lightpanda's
   peak on the median site and a tenth of Chromium's.
@@ -48,8 +51,8 @@ and Chromium's headless shell run back to back in the same sandbox
 - **Text matches Chromium's** on most sites: at least 0.9 similar on
   252 of the 333 both loaded (Lightpanda: 260 of 344), and under half
   the text on 13.
-- **It starts slower than Lightpanda**: 60 ms of CPU before a page's
-  own work, against 36 ms.
+- **It starts sooner than Lightpanda** on `main`: 11 ms of CPU before
+  a page's own work, against 39 ms. The 0.1.0 release takes 60 ms.
 
 Method, per-site results and what the comparison does not show:
 [crates/bench/lambda](crates/bench/lambda/README.md).
