@@ -190,10 +190,10 @@ impl Timers {
             repeat: timer.interval.is_some(),
             nesting: timer.nesting,
         };
-        if !fire.repeat {
-            if let Some(timer) = self.timers.remove(&id) {
-                self.forget(&timer);
-            }
+        if !fire.repeat
+            && let Some(timer) = self.timers.remove(&id)
+        {
+            self.forget(&timer);
         }
         Some(fire)
     }

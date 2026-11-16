@@ -129,12 +129,12 @@ impl Job {
         if self.timeout_ms == Some(0) {
             return Err(InvalidJob::new("timeout_ms must be positive"));
         }
-        if let Some(v) = self.viewport {
-            if v.width == 0 || v.height == 0 {
-                return Err(InvalidJob::new(
-                    "viewport width and height must be positive",
-                ));
-            }
+        if let Some(v) = self.viewport
+            && (v.width == 0 || v.height == 0)
+        {
+            return Err(InvalidJob::new(
+                "viewport width and height must be positive",
+            ));
         }
         if self.extract.keys().any(String::is_empty) {
             return Err(InvalidJob::new("extract names must not be empty"));

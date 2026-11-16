@@ -486,13 +486,14 @@ impl<'a> Sink<'a> {
         match prev {
             Some(p) if doc.is_text(p) => {
                 let data = doc.text_mut(p).expect("is text");
-                if let Some(log) = self.log.borrow_mut().as_mut() {
-                    if !log.new_text.contains(&p) && log.grown_text.insert(p) {
-                        log.changes.push(TreeChange::TextAppended {
-                            node: p,
-                            old_len: data.len(),
-                        });
-                    }
+                if let Some(log) = self.log.borrow_mut().as_mut()
+                    && !log.new_text.contains(&p)
+                    && log.grown_text.insert(p)
+                {
+                    log.changes.push(TreeChange::TextAppended {
+                        node: p,
+                        old_len: data.len(),
+                    });
                 }
                 data.push_str(text);
                 self.grown_text.borrow_mut().push(p);

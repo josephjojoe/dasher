@@ -265,11 +265,9 @@ fn insert_into(
         dom.ce_removed(ctx, doc, old_parent, &[node]);
     }
     dom.ce_inserted(doc, &moved);
-    if record {
-        if let (Some(&first), Some(&last)) = (moved.first(), moved.last()) {
-            let (prev, next) = (doc.prev_sibling(first), doc.next_sibling(last));
-            dom.child_list(doc, parent, &moved, &[], prev, next);
-        }
+    if record && let (Some(&first), Some(&last)) = (moved.first(), moved.last()) {
+        let (prev, next) = (doc.prev_sibling(first), doc.next_sibling(last));
+        dom.child_list(doc, parent, &moved, &[], prev, next);
     }
     Ok(moved)
 }
@@ -388,10 +386,10 @@ pub(super) fn replace_all(
 ) -> Result<Vec<NodeId>> {
     let result = {
         let mut doc = dom.doc_mut();
-        if let Some(node) = node {
-            if doc.is_host_including_inclusive_ancestor(node, parent) {
-                return Err(dom_error(ctx, DomError::HierarchyRequest));
-            }
+        if let Some(node) = node
+            && doc.is_host_including_inclusive_ancestor(node, parent)
+        {
+            return Err(dom_error(ctx, DomError::HierarchyRequest));
         }
         let removed = remove_children(ctx, dom, &mut doc, parent);
         dom.bump();

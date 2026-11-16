@@ -1106,11 +1106,11 @@ fn run_from(
         Start::Chars(chars) => {
             let mut at = from;
             while let Some(hit) = chars.find(subject, at, flags) {
-                if let Some(pairs) = &plan.pairs {
-                    if !pairs_allow(pairs, subject, hit) {
-                        at = hit + subject.char_at(hit).1;
-                        continue;
-                    }
+                if let Some(pairs) = &plan.pairs
+                    && !pairs_allow(pairs, subject, hit)
+                {
+                    at = hit + subject.char_at(hit).1;
+                    continue;
                 }
                 let found = try_at(hit);
                 if found != 0 {

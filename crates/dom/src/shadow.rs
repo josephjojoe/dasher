@@ -269,10 +269,10 @@ impl Iterator for ShadowIncluding<'_> {
             self.stack.push(c);
             child = doc.prev_sibling(c);
         }
-        if !doc.shadow_roots.is_empty() {
-            if let Some(root) = doc.shadow_root(n) {
-                self.stack.push(root);
-            }
+        if !doc.shadow_roots.is_empty()
+            && let Some(root) = doc.shadow_root(n)
+        {
+            self.stack.push(root);
         }
         Some(n)
     }

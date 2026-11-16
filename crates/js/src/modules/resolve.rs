@@ -75,10 +75,8 @@ impl ImportMap {
         for (prefix, entries) in &self.scopes {
             let in_scope = prefix == base_str
                 || (prefix.ends_with('/') && base_str.starts_with(prefix.as_str()));
-            if in_scope {
-                if let Some(url) = match_entries(normalized, as_url.as_ref(), entries)? {
-                    return Ok(url);
-                }
+            if in_scope && let Some(url) = match_entries(normalized, as_url.as_ref(), entries)? {
+                return Ok(url);
             }
         }
         if let Some(url) = match_entries(normalized, as_url.as_ref(), &self.imports)? {

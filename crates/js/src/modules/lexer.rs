@@ -127,10 +127,10 @@ impl<'a> Lexer<'a> {
             let Some(&c) = self.src.get(self.pos) else {
                 break;
             };
-            if let Some(offset) = self.closed_import.take() {
-                if c != b'{' {
-                    self.dynamic.push(offset);
-                }
+            if let Some(offset) = self.closed_import.take()
+                && c != b'{'
+            {
+                self.dynamic.push(offset);
             }
             let next_paren = std::mem::replace(&mut self.next_paren, Paren::Plain);
             let after_dot = std::mem::replace(&mut self.after_dot, false);

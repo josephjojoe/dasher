@@ -1,0 +1,103 @@
+name: Release
+
+# A tag `vX.Y.Z` builds the binaries and publishes a GitHub release with
+# them. Run by hand, it builds the same archives and keeps them as workflow
+# artifacts, without a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux-musl
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            lambda: x86_64
+          - name: aarch64-linux-musl
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            lambda: arm64
+          - name: aarch64-macos
+            os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p dasher-cli
+      - name: Check the binary
+        run: |
+          bin=target/${{ matrix.target }}/release/dasher
+          file "$bin"
+          version=$("$bin" --version)
+          echo "$version"
+          test "$version" = "dasher $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dasher-cli") | .version')"
+          if [ "${{ runner.os }}" = Linux ]; then file "$bin" | grep -q 'statically linked\|static-pie linked'; fi
+          # A page with a script, from a local server, end to end.
+          mkdir -p /tmp/site && echo '<!doctype html><h1>a</h1><script>document.querySelector("h1").textContent = [1, 2, 3].map(x => x * 2).join()</script>' > /tmp/site/index.html
+          (cd /tmp/site && python3 -m http.server 8099 >/dev/null 2>&1 &)
+          sleep 1
+          test "$("$bin" -e 'document.querySelector("h1").textContent' http://127.0.0.1:8099/)" = "2,4,6"
+      - name: Package
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          case "$GITHUB_REF" in refs/tags/v*) ;; *) version=$(git rev-parse --short HEAD) ;; esac
+          name=dasher-$version-${{ matrix.name }}
+          mkdir -p dist "$name"
+          cp target/${{ matrix.target }}/release/dasher LICENSE THIRD-PARTY-LICENSES.txt README.md CHANGELOG.md "$name/"
+          tar -czf "dist/$name.tar.gz" "$name"
+          if [ -n "${{ matrix.lambda }}" ]; then
+            # The same binary as a Lambda custom runtime: a zip with `bootstrap`.
+            mkdir lambda
+            cp target/${{ matrix.target }}/release/dasher lambda/bootstrap
+            cp LICENSE THIRD-PARTY-LICENSES.txt lambda/
+            (cd lambda && zip -q "../dist/dasher-lambda-$version-${{ matrix.lambda }}.zip" bootstrap LICENSE THIRD-PARTY-LICENSES.txt)
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Checksums and notes
+        run: |
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          # This version's section of the changelog.
+          awk -v v="${GITHUB_REF_NAME#v}" '/^## /{on = index($0, "## " v " ") == 1} on' CHANGELOG.md | tail -n +2 > notes.md
+          test -s notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "dasher ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag

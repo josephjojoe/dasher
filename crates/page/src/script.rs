@@ -307,14 +307,13 @@ impl Scripts {
         };
         // A fetch task only ends early if it is aborted, which only happens
         // when the whole set is dropped.
-        if let Ok((id, fetched)) = joined {
-            if let Some(Entry {
+        if let Ok((id, fetched)) = joined
+            && let Some(Entry {
                 source: Source::Classic(_, slot),
                 ..
             }) = self.entries.get_mut(&id)
-            {
-                *slot = Some(fetched);
-            }
+        {
+            *slot = Some(fetched);
         }
     }
 

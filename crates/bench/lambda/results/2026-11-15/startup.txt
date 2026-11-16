@@ -1,0 +1,11 @@
+sandboxes 10, runs 900
+mode       tool           n wall ms med     p90 CPU ms med peak MiB med exit!=0
+version    dasher       100          10      11          0          1.2       0
+version    lightpanda   100          10      10          1          3.4       0
+version    chromium     100          31      31         22         36.5       0
+tiny-load  dasher       100          67      72         60          7.8       0
+tiny-load  lightpanda   100          41      44         36         22.9       0
+tiny-load  chromium     100         324     371        260        192.2       0
+tiny       dasher       100          67      72         61          7.8       0
+tiny       lightpanda   100          41      42         39         21.4       0
+tiny       chromium     100         817     858        265        202.5       0

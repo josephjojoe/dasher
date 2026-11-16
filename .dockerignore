@@ -5,3 +5,5 @@ target/
 docs/
 *.md
 !crates/**/*.md
+crates/bench/lambda/data/
+crates/bench/lambda/image/bin/

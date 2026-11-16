@@ -45,6 +45,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --locked
 
+  deny:
+    # Advisories, licences, duplicate and wildcard dependencies, and crate
+    # sources, by the policy in deny.toml.
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  notices:
+    # THIRD-PARTY-LICENSES.txt is generated from the dependency tree: fails
+    # when a dependency change has left it behind.
+    name: third-party notices
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - run: cargo about generate --locked --manifest-path crates/cli/Cargo.toml about.hbs -o /tmp/notices.txt
+      - run: diff -u THIRD-PARTY-LICENSES.txt /tmp/notices.txt
+
   release:
     # Guards the deployment target: a fully static musl binary built with the
     # size-tuned release profile. Then benchmarks it on the fixture suite and

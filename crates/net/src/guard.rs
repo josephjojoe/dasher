@@ -205,10 +205,10 @@ impl Service<Uri> for GuardedHttp {
     }
 
     fn call(&mut self, dst: Uri) -> ConnectFuture {
-        if let Some(ip) = literal_host(&dst) {
-            if let Err(blocked) = check(self.guard, ip) {
-                return Box::pin(async move { Err(blocked.into()) });
-            }
+        if let Some(ip) = literal_host(&dst)
+            && let Err(blocked) = check(self.guard, ip)
+        {
+            return Box::pin(async move { Err(blocked.into()) });
         }
         let connecting = self.inner.call(dst);
         Box::pin(async move { Ok(connecting.await?) })

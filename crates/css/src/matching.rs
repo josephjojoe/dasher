@@ -293,10 +293,10 @@ impl<'a> Context<'a> {
     }
 
     fn matches_nth(&self, nth: &Nth, el: NodeId) -> bool {
-        if let Some(of) = &nth.of {
-            if !self.matches_list(of, el) {
-                return false;
-            }
+        if let Some(of) = &nth.of
+            && !self.matches_list(of, el)
+        {
+            return false;
         }
         let counts = |sibling: NodeId| {
             if nth.of_type {
@@ -686,14 +686,15 @@ impl<'a> Context<'a> {
                 {
                     return false;
                 }
-                if doc.is_html(n, Name::DETAILS) && !self.has(n, Name::OPEN) {
-                    if let Some(child) = child {
-                        let summary = doc
-                            .element_children(n)
-                            .find(|&c| doc.is_html(c, Name::SUMMARY));
-                        if summary != Some(child) {
-                            return false;
-                        }
+                if doc.is_html(n, Name::DETAILS)
+                    && !self.has(n, Name::OPEN)
+                    && let Some(child) = child
+                {
+                    let summary = doc
+                        .element_children(n)
+                        .find(|&c| doc.is_html(c, Name::SUMMARY));
+                    if summary != Some(child) {
+                        return false;
                     }
                 }
             }
@@ -701,12 +702,10 @@ impl<'a> Context<'a> {
                 if inline_style(style, "display").is_some_and(|v| v.eq_ignore_ascii_case("none")) {
                     return false;
                 }
-                if !visibility_decided {
-                    if let Some(v) = inline_style(style, "visibility") {
-                        visibility_decided = true;
-                        if v.eq_ignore_ascii_case("hidden") || v.eq_ignore_ascii_case("collapse") {
-                            return false;
-                        }
+                if !visibility_decided && let Some(v) = inline_style(style, "visibility") {
+                    visibility_decided = true;
+                    if v.eq_ignore_ascii_case("hidden") || v.eq_ignore_ascii_case("collapse") {
+                        return false;
                     }
                 }
             }

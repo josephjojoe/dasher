@@ -293,11 +293,11 @@ impl Document {
                 self.template_hosts.remove(&contents);
                 stack.push(contents);
             }
-            if !self.shadow_roots.is_empty() {
-                if let Some(shadow) = self.shadow_roots.remove(&n) {
-                    self.shadow_hosts.remove(&shadow.root);
-                    stack.push(shadow.root);
-                }
+            if !self.shadow_roots.is_empty()
+                && let Some(shadow) = self.shadow_roots.remove(&n)
+            {
+                self.shadow_hosts.remove(&shadow.root);
+                stack.push(shadow.root);
             }
             if self.node(n).flags & flags::HAS_PREFIX != 0 {
                 self.prefixes.remove(&n);
@@ -743,19 +743,19 @@ impl Document {
     /// Every attribute change that can change [`element_id`](Self::element_id)
     /// takes the element out of the index first and puts it back after.
     fn index_id(&mut self, id: NodeId) {
-        if let Some(NodeData::Element(e)) = self.nodes.get(id.index()).map(|n| &n.data) {
-            if let Some(a) = e.attrs.iter().find(|a| a.is_id()) {
-                self.ids.insert(&a.value, id);
-            }
+        if let Some(NodeData::Element(e)) = self.nodes.get(id.index()).map(|n| &n.data)
+            && let Some(a) = e.attrs.iter().find(|a| a.is_id())
+        {
+            self.ids.insert(&a.value, id);
         }
     }
 
     /// Takes `id` out of the id index, if it is in it.
     fn unindex_id(&mut self, id: NodeId) {
-        if let Some(NodeData::Element(e)) = self.nodes.get(id.index()).map(|n| &n.data) {
-            if let Some(a) = e.attrs.iter().find(|a| a.is_id()) {
-                self.ids.remove(&a.value, id);
-            }
+        if let Some(NodeData::Element(e)) = self.nodes.get(id.index()).map(|n| &n.data)
+            && let Some(a) = e.attrs.iter().find(|a| a.is_id())
+        {
+            self.ids.remove(&a.value, id);
         }
     }
 
@@ -1281,11 +1281,11 @@ impl Document {
         // fill in.
         let mut work = vec![(id, copy, deep)];
         while let Some((src, dst, deep)) = work.pop() {
-            if let Some(shadow) = self.shadow_roots.get(&src).copied() {
-                if shadow.init.clonable {
-                    let root = self.attach_shadow_unchecked(dst, shadow.init, false);
-                    work.push((shadow.root, root, true));
-                }
+            if let Some(shadow) = self.shadow_roots.get(&src).copied()
+                && shadow.init.clonable
+            {
+                let root = self.attach_shadow_unchecked(dst, shadow.init, false);
+                work.push((shadow.root, root, true));
             }
             if !deep {
                 continue;

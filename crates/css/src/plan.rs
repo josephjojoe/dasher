@@ -155,22 +155,22 @@ pub(crate) fn source<'a>(list: &SelectorList, cx: &Context<'a>, root: NodeId) ->
     }
 
     // One selector with an id further left: start from that element.
-    if let [complex] = &*list.selectors {
-        if let Some(id) = ancestor_id(complex) {
-            let mut found = doc.elements_with_id(id, quirks);
-            match (found.next(), found.next()) {
-                // No element has the id, so nothing matches.
-                (None, _) => return Source::One(None),
-                (Some(e), None) if doc.is_descendant(e, root) => {
-                    return Source::Tree(doc.descendants(e));
-                }
-                // The element is the root or above it, so it narrows
-                // nothing; or it is in another tree, so nothing matches
-                // (but a full walk finds that out too).
-                (Some(_), None) => {}
-                // A repeated id: walk everything.
-                (Some(_), Some(_)) => {}
+    if let [complex] = &*list.selectors
+        && let Some(id) = ancestor_id(complex)
+    {
+        let mut found = doc.elements_with_id(id, quirks);
+        match (found.next(), found.next()) {
+            // No element has the id, so nothing matches.
+            (None, _) => return Source::One(None),
+            (Some(e), None) if doc.is_descendant(e, root) => {
+                return Source::Tree(doc.descendants(e));
             }
+            // The element is the root or above it, so it narrows
+            // nothing; or it is in another tree, so nothing matches
+            // (but a full walk finds that out too).
+            (Some(_), None) => {}
+            // A repeated id: walk everything.
+            (Some(_), Some(_)) => {}
         }
     }
 

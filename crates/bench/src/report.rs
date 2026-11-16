@@ -264,10 +264,10 @@ impl Budgets {
     pub fn check(&self, results: &Results) -> Vec<String> {
         let mut over = Vec::new();
         let mut check = |what: &str, actual: f64, budget: Option<f64>| {
-            if let Some(budget) = budget {
-                if actual > budget {
-                    over.push(format!("{what}: {actual:.2} MiB, budget {budget} MiB"));
-                }
+            if let Some(budget) = budget
+                && actual > budget
+            {
+                over.push(format!("{what}: {actual:.2} MiB, budget {budget} MiB"));
             }
         };
         let b = &self.0;

@@ -289,10 +289,10 @@ impl DocumentParser {
         }
         impl Drop for Restore<'_> {
             fn drop(&mut self) {
-                if let DocSlot::Lent(lent) = &mut *self.slot.borrow_mut() {
-                    if let Some(lent) = lent.take() {
-                        *self.doc = lent;
-                    }
+                if let DocSlot::Lent(lent) = &mut *self.slot.borrow_mut()
+                    && let Some(lent) = lent.take()
+                {
+                    *self.doc = lent;
                 }
             }
         }

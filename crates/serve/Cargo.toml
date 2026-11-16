@@ -4,7 +4,9 @@ description = "HTTP service and AWS Lambda runtime for dasher"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
 
 [lints]

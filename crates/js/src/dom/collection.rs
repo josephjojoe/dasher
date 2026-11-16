@@ -80,10 +80,10 @@ impl Matches {
 
     /// The matching nodes under `root` as of `version`.
     pub(crate) fn ids(&self, doc: &Document, root: NodeId, version: u32) -> Rc<[NodeId]> {
-        if let Some((v, ids)) = &*self.cache.borrow() {
-            if *v == version {
-                return Rc::clone(ids);
-            }
+        if let Some((v, ids)) = &*self.cache.borrow()
+            && *v == version
+        {
+            return Rc::clone(ids);
         }
         let ids: Rc<[NodeId]> = self.filter.collect(doc, root).into();
         *self.cache.borrow_mut() = Some((version, Rc::clone(&ids)));

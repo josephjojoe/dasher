@@ -150,10 +150,10 @@ impl BudgetState {
 
     fn cpu_reached(&self, at: Duration) -> bool {
         let now = Instant::now();
-        if let Some((cpu, when)) = self.cpu_seen.get() {
-            if cpu + now.saturating_duration_since(when) < at {
-                return false;
-            }
+        if let Some((cpu, when)) = self.cpu_seen.get()
+            && cpu + now.saturating_duration_since(when) < at
+        {
+            return false;
         }
         let cpu = thread_cpu_time();
         self.cpu_seen.set(Some((cpu, now)));

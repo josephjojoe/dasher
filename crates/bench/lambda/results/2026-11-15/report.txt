@@ -1,0 +1,434 @@
+sites measured: 500; in the site list: 492; with all five variants: 492; runs: 7380
+runs per variant: {'dasher': 1476, 'lightpanda': 1476, 'chromium': 1476, 'lightpanda-30s': 1476, 'chromium-noimg': 1476}
+sandbox CPUs (by /proc/cpuinfo part): {'0xd0c': 308, '0xd40': 181, '0xd4f': 3}
+sets: {'crux': 268, 'known': 220, 'both': 4} strata: {'top1k': 53, '10k-100k': 108, '1k-10k': 111, 'known': 220}
+
+== OUTCOMES (per site, majority of 3 runs)
+  dasher          {'ok': 372, 'empty': 9, 'http_error': 8, 'blocked': 93, 'fail': 10}
+  lightpanda      {'ok': 390, 'empty': 16, 'http_error': 8, 'blocked': 76, 'fail': 2}
+  chromium        {'ok': 355, 'empty': 9, 'http_error': 12, 'blocked': 111, 'fail': 5}
+  lightpanda-30s  {'ok': 389, 'empty': 11, 'http_error': 8, 'blocked': 77, 'fail': 7}
+  chromium-noimg  {'ok': 355, 'empty': 9, 'http_error': 11, 'blocked': 112, 'fail': 5}
+  signals/kills by variant: {'dasher': 0, 'lightpanda': 0, 'chromium': 0, 'lightpanda-30s': 0, 'chromium-noimg': 0}
+
+== OVERLAP of ok sites
+  dasher & lightpanda: both ok 361; only dasher 11; only lightpanda 29; neither 91
+  dasher & chromium: both ok 333; only dasher 39; only chromium 22; neither 98
+  lightpanda & chromium: both ok 344; only lightpanda 46; only chromium 11; neither 91
+  all three ok: 328; none ok: 85
+  outcome of the other two where one is not ok:
+    dasher not ok (lightpanda ok, chromium ok): {'blocked:n+n': 66, 'blocked:n+Y': 4, 'blocked:Y+n': 12, 'blocked:Y+Y': 11, 'empty:n+n': 7, 'empty:n+Y': 1, 'empty:Y+Y': 1, 'fail:n+n': 5, 'fail:n+Y': 1, 'fail:Y+n': 1, 'fail:Y+Y': 3, 'http_error:n+n': 7, 'http_error:Y+Y': 1}
+    lightpanda not ok (dasher ok, chromium ok): {'blocked:n+n': 64, 'blocked:n+Y': 4, 'blocked:Y+n': 4, 'blocked:Y+Y': 4, 'empty:n+n': 13, 'empty:n+Y': 1, 'empty:Y+n': 1, 'empty:Y+Y': 1, 'fail:n+n': 1, 'fail:n+Y': 1, 'http_error:n+n': 7, 'http_error:Y+n': 1}
+    chromium not ok (dasher ok, lightpanda ok): {'blocked:n+n': 66, 'blocked:n+Y': 12, 'blocked:Y+n': 5, 'blocked:Y+Y': 28, 'empty:n+n': 8, 'empty:Y+Y': 1, 'fail:n+n': 4, 'fail:n+Y': 1, 'http_error:n+n': 7, 'http_error:Y+n': 1, 'http_error:Y+Y': 4}
+
+== ONE-SIDED: dasher not ok where Chromium is ok
+  alphacommunity_in                        dasher blocked    (202, text 0) | lightpanda blocked    | chromium text 4388
+  asnet_jp                                 dasher fail       (None, text 0) | lightpanda ok         | chromium text 1507
+  baccredomatic_com                        dasher fail       (None, text 0) | lightpanda ok         | chromium text 626
+  bestbuy_com                              dasher fail       (None, text 0) | lightpanda ok         | chromium text 3961
+  bmvm_bihar_gov_in                        dasher fail       (None, text 0) | lightpanda fail       | chromium text 1535
+  booking_com                              dasher blocked    (202, text 0) | lightpanda ok         | chromium text 12750
+  cdc_gov                                  dasher blocked    (403, text 205) | lightpanda ok         | chromium text 5595
+  cisco_com                                dasher blocked    (403, text 207) | lightpanda ok         | chromium text 29052
+  dashboard_composio_dev                   dasher empty      (200, text 7) | lightpanda ok         | chromium text 130
+  docs_aws_amazon_com_lambda_latest_dg_wel dasher blocked    (405, text 366) | lightpanda ok         | chromium text 20966
+  docs_github_com_en_get_started           dasher blocked    (429, text 5439) | lightpanda ok         | chromium text 5415
+  duolingo_com                             dasher http_error (404, text 111) | lightpanda ok         | chromium text 2416
+  facebook_com                             dasher blocked    (400, text 116) | lightpanda ok         | chromium text 486
+  forum_arizona_rp_com                     dasher blocked    (200, text 381) | lightpanda blocked    | chromium text 746
+  games_prodigygame_com                    dasher blocked    (202, text 0) | lightpanda ok         | chromium text 126
+  homedepot_com                            dasher blocked    (403, text 207) | lightpanda ok         | chromium text 6123
+  intel_com_content_www_us_en_homepage_htm dasher blocked    (403, text 238) | lightpanda ok         | chromium text 9599
+  primark_com                              dasher blocked    (403, text 123) | lightpanda ok         | chromium text 6940
+  roomclip_jp                              dasher blocked    (403, text 27) | lightpanda ok         | chromium text 7357
+  stackoverflow_com_questions              dasher blocked    (403, text 346) | lightpanda blocked    | chromium text 20076
+  student_amplify_com                      dasher empty      (200, text 22) | lightpanda empty      | chromium text 333
+  uncch_instructure_com                    dasher blocked    (403, text 42) | lightpanda blocked    | chromium text 5852
+
+== ONE-SIDED: dasher ok where Chromium is not
+  abercrombie_com                          chromium blocked    (200, text 389) | lightpanda ok         | dasher text 12715
+  arca_live                                chromium blocked    (403, text 330) | lightpanda ok         | dasher text 20432
+  behindthevoiceactors_com                 chromium blocked    (403, text 368) | lightpanda ok         | dasher text 12347
+  besoccer_com                             chromium http_error (406, text 14432) | lightpanda ok         | dasher text 13931
+  bloomberg_com                            chromium blocked    (403, text 715) | lightpanda blocked    | dasher text 21997
+  cdiscount_com                            chromium blocked    (403, text 558) | lightpanda empty      | dasher text 19411
+  chordtela_com                            chromium blocked    (403, text 755) | lightpanda ok         | dasher text 2084
+  co_computrabajo_com                      chromium blocked    (403, text 27) | lightpanda blocked    | dasher text 4855
+  dell_com_en_us                           chromium blocked    (403, text 211) | lightpanda ok         | dasher text 32830
+  dishadaily_com                           chromium blocked    (403, text 348) | lightpanda ok         | dasher text 6190
+  edition_cnn_com                          chromium empty      (200, text 13) | lightpanda ok         | dasher text 17036
+  etiqa_com                                chromium blocked    (403, text 205) | lightpanda ok         | dasher text 5252
+  extensionesap_esap_edu_co                chromium http_error (500, text 255) | lightpanda ok         | dasher text 256
+  gestor_clinicasomer_com                  chromium http_error (500, text 253) | lightpanda ok         | dasher text 155
+  gospodynka_com_ua                        chromium blocked    (403, text 242) | lightpanda ok         | dasher text 2845
+  international_iq_test_com                chromium blocked    (403, text 362) | lightpanda ok         | dasher text 10678
+  internationalcupid_com                   chromium blocked    (403, text 220) | lightpanda ok         | dasher text 4530
+  ipn4_paymentus_com                       chromium blocked    (403, text 753) | lightpanda ok         | dasher text 33478
+  jsfiddle_net                             chromium blocked    (403, text 336) | lightpanda ok         | dasher text 8173
+  latimes_com                              chromium blocked    (403, text 36) | lightpanda ok         | dasher text 34490
+  linkedin_com                             chromium blocked    (403, text 344) | lightpanda ok         | dasher text 5143
+  lynk_id                                  chromium blocked    (403, text 751) | lightpanda ok         | dasher text 7777
+  mobilejsr_com                            chromium blocked    (403, text 338) | lightpanda ok         | dasher text 394
+  muslima_com                              chromium blocked    (403, text 209) | lightpanda ok         | dasher text 4556
+  nih_gov                                  chromium blocked    (403, text 751) | lightpanda ok         | dasher text 3979
+  openfront_io                             chromium blocked    (403, text 336) | lightpanda ok         | dasher text 22797
+  pantarhei_sk                             chromium blocked    (403, text 756) | lightpanda ok         | dasher text 91240
+  paypal_com_us_home                       chromium blocked    (403, text 10) | lightpanda blocked    | dasher text 11045
+  portal_librus_pl                         chromium http_error (500, text 245) | lightpanda ok         | dasher text 3183
+  produto_mercadolivre_com_br              chromium blocked    (403, text 113) | lightpanda ok         | dasher text 8405
+  replit_com                               chromium blocked    (403, text 753) | lightpanda ok         | dasher text 9263
+  salesforce_com                           chromium blocked    (403, text 212) | lightpanda ok         | dasher text 51809
+  scholar_google_co_id                     chromium blocked    (429, text 1014) | lightpanda ok         | dasher text 1115
+  scholar_google_co_kr                     chromium blocked    (429, text 1013) | lightpanda ok         | dasher text 1115
+  tienda_claro_com_ar                      chromium blocked    (403, text 553) | lightpanda ok         | dasher text 2351
+  toyhou_se                                chromium blocked    (403, text 330) | lightpanda blocked    | dasher text 1088
+  usatoday_com                             chromium http_error (402, text 167) | lightpanda http_error | dasher text 10767
+  voi_0101_co_jp                           chromium blocked    (403, text 208) | lightpanda ok         | dasher text 8529
+  x_com                                    chromium blocked    (403, text 0) | lightpanda ok         | dasher text 431
+
+== ONE-SIDED: dasher vs lightpanda
+  accuweather_com                          dasher blocked    (403, text 209) | lightpanda ok         (200, text 6858) | chromium blocked
+  adobe_com                                dasher blocked    (403, text 207) | lightpanda ok         (200, text 15710) | chromium blocked
+  asnet_jp                                 dasher fail       (None, text 0) | lightpanda ok         (200, text 1707) | chromium ok
+  baccredomatic_com                        dasher fail       (None, text 0) | lightpanda ok         (200, text 626) | chromium ok
+  bengali_news18_com                       dasher blocked    (403, text 212) | lightpanda ok         (200, text 19864) | chromium blocked
+  bestbuy_com                              dasher fail       (None, text 0) | lightpanda ok         (200, text 4444) | chromium ok
+  bloomberg_com                            dasher ok         (200, text 21997) | lightpanda blocked    (403, text 22061) | chromium blocked
+  booking_com                              dasher blocked    (202, text 0) | lightpanda ok         (200, text 10934) | chromium ok
+  canva_com                                dasher blocked    (403, text 8988) | lightpanda ok         (200, text 342) | chromium blocked
+  cdc_gov                                  dasher blocked    (403, text 205) | lightpanda ok         (200, text 5595) | chromium ok
+  cdiscount_com                            dasher ok         (200, text 19411) | lightpanda empty      (200, text 9) | chromium blocked
+  chess_com                                dasher ok         (200, text 1500) | lightpanda blocked    (403, text 338) | chromium ok
+  cisco_com                                dasher blocked    (403, text 207) | lightpanda ok         (200, text 26548) | chromium ok
+  co_computrabajo_com                      dasher ok         (200, text 4855) | lightpanda blocked    (403, text 27) | chromium blocked
+  cricinfo_com                             dasher blocked    (403, text 210) | lightpanda ok         (200, text 25028) | chromium blocked
+  dashboard_composio_dev                   dasher empty      (200, text 7) | lightpanda ok         (200, text 130) | chromium ok
+  dnn_de                                   dasher blocked    (403, text 6) | lightpanda ok         (200, text 26174) | chromium blocked
+  docs_aws_amazon_com_lambda_latest_dg_wel dasher blocked    (405, text 366) | lightpanda ok         (200, text 20948) | chromium ok
+  docs_github_com_en_get_started           dasher blocked    (429, text 5439) | lightpanda ok         (200, text 5439) | chromium ok
+  duolingo_com                             dasher http_error (404, text 111) | lightpanda ok         (200, text 2416) | chromium ok
+  e_jumbo_gr                               dasher blocked    (403, text 208) | lightpanda ok         (200, text 167201) | chromium blocked
+  eleconomista_es                          dasher blocked    (403, text 211) | lightpanda ok         (200, text 26780) | chromium blocked
+  elperiodicoextremadura_com               dasher ok         (200, text 18615) | lightpanda blocked    (406, text 144) | chromium ok
+  facebook_com                             dasher blocked    (400, text 116) | lightpanda ok         (200, text 486) | chromium ok
+  games_prodigygame_com                    dasher blocked    (202, text 0) | lightpanda ok         (200, text 126) | chromium ok
+  homedepot_com                            dasher blocked    (403, text 207) | lightpanda ok         (200, text 6192) | chromium ok
+  imdb_com                                 dasher blocked    (202, text 0) | lightpanda ok         (200, text 21860) | chromium blocked
+  intel_com_content_www_us_en_homepage_htm dasher blocked    (403, text 238) | lightpanda ok         (200, text 9599) | chromium ok
+  israelhayom_co_il                        dasher blocked    (403, text 213) | lightpanda ok         (200, text 41694) | chromium blocked
+  leplants_ru                              dasher ok         (200, text 7918) | lightpanda blocked    (403, text 7918) | chromium ok
+  mayoclinic_org                           dasher blocked    (403, text 212) | lightpanda ok         (200, text 4985) | chromium blocked
+  nature_com                               dasher ok         (200, text 11660) | lightpanda blocked    (200, text 389) | chromium ok
+  oreillyauto_com                          dasher blocked    (403, text 213) | lightpanda ok         (200, text 4643) | chromium blocked
+  paypal_com_us_home                       dasher ok         (200, text 11045) | lightpanda blocked    (403, text 10) | chromium blocked
+  primark_com                              dasher blocked    (403, text 123) | lightpanda ok         (200, text 11748) | chromium ok
+  roomclip_jp                              dasher blocked    (403, text 27) | lightpanda ok         (200, text 7430) | chromium ok
+  toyhou_se                                dasher ok         (200, text 1088) | lightpanda blocked    (403, text 330) | chromium blocked
+  usatoday_com                             dasher ok         (200, text 10767) | lightpanda http_error (402, text 167) | chromium http_error
+  washingtonpost_com                       dasher fail       (None, text 0) | lightpanda ok         (200, text 18031) | chromium fail
+  youtube_com                              dasher ok         (200, text 942) | lightpanda empty      (200, text 7) | chromium ok
+
+== CONTENT against Chromium (sites where both are ok; token-set Jaccard similarity of visible text)
+  dasher          n=333 similarity median 0.997 p25 0.909 p10 0.701 | >=0.9: 252 >=0.7: 300 <0.5: 22 | text length ratio median 1.00; under half Chromium's text: 13, over double: 6
+  (Chromium against itself across runs: median 1.000, >=0.9 on 309 of 333)
+  lightpanda      n=344 similarity median 0.998 p25 0.908 p10 0.658 | >=0.9: 260 >=0.7: 305 <0.5: 22 | text length ratio median 1.00; under half Chromium's text: 12, over double: 10
+  lightpanda-30s  n=345 similarity median 0.998 p25 0.921 p10 0.667 | >=0.9: 265 >=0.7: 307 <0.5: 22 | text length ratio median 1.00; under half Chromium's text: 9, over double: 11
+  chromium-noimg  n=354 similarity median 1.000 p25 1.000 p10 0.970 | >=0.9: 339 >=0.7: 348 <0.5: 4 | text length ratio median 1.00; under half Chromium's text: 1, over double: 0
+  dasher vs lightpanda where both ok: n=361 median 1.000 >=0.9: 300 <0.5: 26
+  dasher much less text than Chromium (both ok, dasher under half):
+    azure_microsoft_com_en_us                dasher 42 lightpanda 12311 (ok) chromium 16264 | dasher errors 0 budget []
+    word_cloud_microsoft                     dasher 63 lightpanda 63 (ok) chromium 11523 | dasher errors 0 budget []
+    disneyplus_com                           dasher 192 lightpanda 192 (ok) chromium 32120 | dasher errors 1 budget []
+    mongodb_com                              dasher 103 lightpanda 13814 (ok) chromium 10822 | dasher errors 11 budget []
+    sooka_my                                 dasher 50 lightpanda 7940 (ok) chromium 3936 | dasher errors 2 budget []
+    seller_flipkart_com                      dasher 81 lightpanda 5618 (ok) chromium 5618 | dasher errors 1 budget []
+    google_com_maps                          dasher 90 lightpanda 104 (ok) chromium 553 | dasher errors 1 budget []
+    instagram_com                            dasher 160 lightpanda 864 (ok) chromium 864 | dasher errors 0 budget []
+    microsoft_com_en_us                      dasher 2098 lightpanda 4523 (ok) chromium 7073 | dasher errors 2 budget []
+    digikala_com                             dasher 1211 lightpanda 94 (ok) chromium 4033 | dasher errors 0 budget []
+    target_com                               dasher 1097 lightpanda 3971 (ok) chromium 3123 | dasher errors 1 budget []
+    flashscore_ro                            dasher 13329 lightpanda 24789 (ok) chromium 30739 | dasher errors 1 budget []
+    yahoo_com                                dasher 5740 lightpanda 11053 (ok) chromium 12411 | dasher errors 0 budget []
+  lightpanda much less text than Chromium (both ok, under half):
+    vedantu_com                              lightpanda 83 dasher 49582 (ok) chromium 49582 | lightpanda wall 4.6
+    word_cloud_microsoft                     lightpanda 63 dasher 63 (ok) chromium 11523 | lightpanda wall 0.9
+    disneyplus_com                           lightpanda 192 dasher 192 (ok) chromium 32120 | lightpanda wall 2.5
+    digikala_com                             lightpanda 94 dasher 1211 (ok) chromium 4033 | lightpanda wall 3.5
+    melhorrastreio_com_br                    lightpanda 66 dasher 2784 (ok) chromium 2374 | lightpanda wall 1.2
+    m_dcinside_com                           lightpanda 2394 dasher 18760 (ok) chromium 19268 | lightpanda wall 5.4
+    google_nl                                lightpanda 124 dasher 966 (ok) chromium 819 | lightpanda wall 0.8
+    google_com_maps                          lightpanda 104 dasher 90 (ok) chromium 553 | lightpanda wall 1.8
+    shop_shajgoj_com                         lightpanda 1114 dasher 5465 (ok) chromium 5465 | lightpanda wall 2.1
+    trello_com                               lightpanda 3990 dasher 14378 (ok) chromium 14378 | lightpanda wall 1.9
+    jysk_ie                                  lightpanda 5328 dasher 12213 (ok) chromium 12632 | lightpanda wall 1.2
+    results_indiaresults_com                 lightpanda 1834 dasher 3505 (ok) chromium 4056 | lightpanda wall 5.1
+
+-- ALL THREE OK: n=328
+  CPU s         dasher          median    0.94 mean    1.86 p90    5.33 p99   10.04 max    11.8 sum    611.5
+  CPU s         lightpanda      median    1.05 mean    1.80 p90    4.83 p99    6.91 max    13.3 sum    589.8
+  CPU s         chromium        median    3.74 mean    6.61 p90   14.95 p99   38.89 max    52.3 sum   2168.3
+  wall s        dasher          median    2.04 mean    3.10 p90    7.02 p99   11.46 max    30.0 sum   1016.4
+  wall s        lightpanda      median    2.67 mean    2.87 p90    5.22 p99    5.81 max    13.5 sum    941.6
+  wall s        chromium        median    5.42 mean    6.67 p90   12.38 p99   31.01 max    37.2 sum   2188.1
+  peak mem MiB  dasher          median   38.82 mean   54.16 p90  119.86 p99  214.97 max   436.6 sum  17765.0
+  peak mem MiB  lightpanda      median   93.84 mean  111.11 p90  209.10 p99  310.64 max   629.4 sum  36444.8
+  peak mem MiB  chromium        median  386.73 mean  431.90 p90  670.51 p99  958.34 max  1232.7 sum 141663.0
+  CPU  dasher/lightpanda: total 611.5 vs 589.8 = 1.04x | per-site median 1.03x, geomean 1.01x, p10 0.65 p90 1.59 | dasher lower on 102, within 10% on 92, higher on 134
+  wall dasher/lightpanda: total 1016.4 vs 941.6 = 1.08x | per-site median 0.89x, geomean 0.89x, p10 0.47 p90 1.63 | dasher lower on 168, within 10% on 57, higher on 103
+  mem  dasher/lightpanda: total 18191320.0 vs 37319488.0 = 0.49x | per-site median 0.41x, geomean 0.41x, p10 0.26 p90 0.66 | dasher lower on 322, within 10% on 2, higher on 4
+  CPU  dasher/chromium: total 611.5 vs 2168.3 = 0.28x | per-site median 0.24x, geomean 0.23x, p10 0.10 p90 0.56 | dasher lower on 314, within 10% on 5, higher on 9
+  wall dasher/chromium: total 1016.4 vs 2188.1 = 0.46x | per-site median 0.39x, geomean 0.39x, p10 0.14 p90 0.86 | dasher lower on 297, within 10% on 12, higher on 19
+  mem  dasher/chromium: total 18191320.0 vs 145062955.5 = 0.13x | per-site median 0.10x, geomean 0.09x, p10 0.04 p90 0.22 | dasher lower on 328, within 10% on 0, higher on 0
+  CPU  lightpanda/chromium: total 589.8 vs 2168.3 = 0.27x | per-site median 0.26x, geomean 0.23x, p10 0.10 p90 0.48 | lightpanda lower on 317, within 10% on 5, higher on 6
+  wall lightpanda/chromium: total 941.6 vs 2188.1 = 0.43x | per-site median 0.49x, geomean 0.44x, p10 0.17 p90 0.81 | lightpanda lower on 311, within 10% on 6, higher on 11
+  mem  lightpanda/chromium: total 37319488.0 vs 145062955.5 = 0.26x | per-site median 0.23x, geomean 0.22x, p10 0.12 p90 0.37 | lightpanda lower on 326, within 10% on 1, higher on 1
+
+-- all three ok, crux list: n=168
+  CPU s         dasher          median    0.89 mean    1.57 p90    4.05 p99    8.84 max    10.0 sum    264.5
+  CPU s         lightpanda      median    0.89 mean    1.45 p90    3.83 p99    6.20 max     6.6 sum    244.2
+  CPU s         chromium        median    3.65 mean    5.94 p90   12.78 p99   36.48 max    52.3 sum    997.3
+  wall s        dasher          median    2.32 mean    3.27 p90    6.54 p99   11.15 max    24.6 sum    549.7
+  wall s        lightpanda      median    2.82 mean    3.01 p90    5.17 p99    5.55 max     5.8 sum    506.5
+  wall s        chromium        median    5.62 mean    6.72 p90   12.02 p99   30.78 max    37.2 sum   1129.1
+  peak mem MiB  dasher          median   37.32 mean   49.36 p90  103.70 p99  173.18 max   224.0 sum   8292.3
+  peak mem MiB  lightpanda      median   88.09 mean   98.92 p90  179.16 p99  262.08 max   292.6 sum  16618.0
+  peak mem MiB  chromium        median  382.09 mean  410.05 p90  595.99 p99  805.31 max   954.9 sum  68888.0
+  CPU  dasher/lightpanda: total 264.5 vs 244.2 = 1.08x | per-site median 1.02x, geomean 1.07x, p10 0.72 p90 1.61 | dasher lower on 50, within 10% on 50, higher on 68
+  wall dasher/lightpanda: total 549.7 vs 506.5 = 1.09x | per-site median 0.91x, geomean 0.93x, p10 0.58 p90 1.65 | dasher lower on 84, within 10% on 34, higher on 50
+  mem  dasher/lightpanda: total 8491298.0 vs 17016882.0 = 0.50x | per-site median 0.42x, geomean 0.43x, p10 0.27 p90 0.72 | dasher lower on 164, within 10% on 1, higher on 3
+  CPU  dasher/chromium: total 264.5 vs 997.3 = 0.27x | per-site median 0.24x, geomean 0.23x, p10 0.09 p90 0.55 | dasher lower on 160, within 10% on 5, higher on 3
+  wall dasher/chromium: total 549.7 vs 1129.1 = 0.49x | per-site median 0.47x, geomean 0.45x, p10 0.19 p90 0.89 | dasher lower on 151, within 10% on 8, higher on 9
+  mem  dasher/chromium: total 8491298.0 vs 70541342.0 = 0.12x | per-site median 0.10x, geomean 0.09x, p10 0.04 p90 0.22 | dasher lower on 168, within 10% on 0, higher on 0
+  CPU  lightpanda/chromium: total 244.2 vs 997.3 = 0.24x | per-site median 0.24x, geomean 0.22x, p10 0.10 p90 0.43 | lightpanda lower on 165, within 10% on 1, higher on 2
+  wall lightpanda/chromium: total 506.5 vs 1129.1 = 0.45x | per-site median 0.51x, geomean 0.48x, p10 0.23 p90 0.81 | lightpanda lower on 162, within 10% on 3, higher on 3
+  mem  lightpanda/chromium: total 17016882.0 vs 70541342.0 = 0.24x | per-site median 0.23x, geomean 0.22x, p10 0.13 p90 0.36 | lightpanda lower on 168, within 10% on 0, higher on 0
+
+-- all three ok, known list: n=162
+  CPU s         dasher          median    1.01 mean    2.18 p90    6.07 p99   10.04 max    11.8 sum    352.8
+  CPU s         lightpanda      median    1.39 mean    2.18 p90    5.33 p99    7.42 max    13.3 sum    352.4
+  CPU s         chromium        median    3.92 mean    7.34 p90   17.23 p99   38.53 max    44.9 sum   1188.8
+  wall s        dasher          median    1.56 mean    2.94 p90    7.40 p99   12.09 max    30.0 sum    475.6
+  wall s        lightpanda      median    2.35 mean    2.74 p90    5.31 p99    6.41 max    13.5 sum    443.5
+  wall s        chromium        median    5.16 mean    6.62 p90   15.64 p99   30.99 max    36.3 sum   1072.7
+  peak mem MiB  dasher          median   42.12 mean   59.30 p90  131.26 p99  217.06 max   436.6 sum   9606.0
+  peak mem MiB  lightpanda      median  102.53 mean  124.35 p90  246.78 p99  352.41 max   629.4 sum  20145.3
+  peak mem MiB  chromium        median  398.08 mean  455.38 p90  747.35 p99 1043.90 max  1232.7 sum  73771.6
+  CPU  dasher/lightpanda: total 352.8 vs 352.4 = 1.00x | per-site median 1.03x, geomean 0.95x, p10 0.57 p90 1.58 | dasher lower on 53, within 10% on 43, higher on 66
+  wall dasher/lightpanda: total 475.6 vs 443.5 = 1.07x | per-site median 0.89x, geomean 0.84x, p10 0.41 p90 1.57 | dasher lower on 84, within 10% on 24, higher on 54
+  mem  dasher/lightpanda: total 9836506.0 vs 20628770.0 = 0.48x | per-site median 0.40x, geomean 0.40x, p10 0.26 p90 0.63 | dasher lower on 160, within 10% on 1, higher on 1
+  CPU  dasher/chromium: total 352.8 vs 1188.8 = 0.30x | per-site median 0.24x, geomean 0.23x, p10 0.10 p90 0.59 | dasher lower on 156, within 10% on 0, higher on 6
+  wall dasher/chromium: total 475.6 vs 1072.7 = 0.44x | per-site median 0.33x, geomean 0.34x, p10 0.12 p90 0.81 | dasher lower on 148, within 10% on 4, higher on 10
+  mem  dasher/chromium: total 9836506.0 vs 75542086.5 = 0.13x | per-site median 0.09x, geomean 0.09x, p10 0.04 p90 0.22 | dasher lower on 162, within 10% on 0, higher on 0
+  CPU  lightpanda/chromium: total 352.4 vs 1188.8 = 0.30x | per-site median 0.26x, geomean 0.25x, p10 0.10 p90 0.51 | lightpanda lower on 154, within 10% on 4, higher on 4
+  wall lightpanda/chromium: total 443.5 vs 1072.7 = 0.41x | per-site median 0.45x, geomean 0.40x, p10 0.14 p90 0.81 | lightpanda lower on 151, within 10% on 3, higher on 8
+  mem  lightpanda/chromium: total 20628770.0 vs 75542086.5 = 0.27x | per-site median 0.24x, geomean 0.23x, p10 0.11 p90 0.39 | lightpanda lower on 160, within 10% on 1, higher on 1
+
+-- SAME CONTENT: all three ok, dasher and lightpanda each >= 0.9 similar to Chromium: n=237
+  CPU s         dasher          median    0.78 mean    1.65 p90    4.49 p99   10.04 max    11.8 sum    391.1
+  CPU s         lightpanda      median    0.76 mean    1.55 p90    4.59 p99    6.83 max    13.3 sum    368.4
+  CPU s         chromium        median    3.23 mean    6.16 p90   14.43 p99   40.63 max    52.3 sum   1458.9
+  wall s        dasher          median    1.61 mean    2.80 p90    6.98 p99   11.42 max    24.6 sum    663.5
+  wall s        lightpanda      median    2.15 mean    2.58 p90    5.18 p99    5.77 max    13.5 sum    611.6
+  wall s        chromium        median    4.32 mean    6.24 p90   12.18 p99   31.44 max    37.2 sum   1479.5
+  peak mem MiB  dasher          median   34.11 mean   47.51 p90  105.98 p99  209.24 max   436.6 sum  11259.8
+  peak mem MiB  lightpanda      median   81.56 mean   99.27 p90  188.58 p99  284.11 max   629.4 sum  23527.3
+  peak mem MiB  chromium        median  364.24 mean  415.70 p90  665.79 p99  960.68 max  1232.7 sum  98522.0
+  CPU  dasher/lightpanda: total 391.1 vs 368.4 = 1.06x | per-site median 1.04x, geomean 1.05x, p10 0.74 p90 1.56 | dasher lower on 66, within 10% on 69, higher on 102
+  wall dasher/lightpanda: total 663.5 vs 611.6 = 1.08x | per-site median 0.91x, geomean 0.89x, p10 0.47 p90 1.65 | dasher lower on 118, within 10% on 44, higher on 75
+  mem  dasher/lightpanda: total 11530086.0 vs 24091974.0 = 0.48x | per-site median 0.38x, geomean 0.40x, p10 0.27 p90 0.62 | dasher lower on 234, within 10% on 0, higher on 3
+  CPU  dasher/chromium: total 391.1 vs 1458.9 = 0.27x | per-site median 0.23x, geomean 0.22x, p10 0.10 p90 0.50 | dasher lower on 229, within 10% on 3, higher on 5
+  wall dasher/chromium: total 663.5 vs 1479.5 = 0.45x | per-site median 0.37x, geomean 0.36x, p10 0.14 p90 0.81 | dasher lower on 222, within 10% on 5, higher on 10
+  mem  dasher/chromium: total 11530086.0 vs 100886536.5 = 0.11x | per-site median 0.08x, geomean 0.08x, p10 0.04 p90 0.19 | dasher lower on 237, within 10% on 0, higher on 0
+  CPU  lightpanda/chromium: total 368.4 vs 1458.9 = 0.25x | per-site median 0.24x, geomean 0.21x, p10 0.09 p90 0.42 | lightpanda lower on 232, within 10% on 2, higher on 3
+  wall lightpanda/chromium: total 611.6 vs 1479.5 = 0.41x | per-site median 0.48x, geomean 0.41x, p10 0.15 p90 0.79 | lightpanda lower on 229, within 10% on 3, higher on 5
+  mem  lightpanda/chromium: total 24091974.0 vs 100886536.5 = 0.24x | per-site median 0.22x, geomean 0.21x, p10 0.11 p90 0.33 | lightpanda lower on 236, within 10% on 0, higher on 1
+
+-- same content, heavy pages (Chromium > 2 CPU s): n=152
+  CPU s         dasher          median    1.42 mean    2.44 p90    5.70 p99   10.04 max    11.8 sum    370.7
+  CPU s         lightpanda      median    1.53 mean    2.28 p90    5.38 p99    7.07 max    13.3 sum    347.2
+  CPU s         chromium        median    5.79 mean    9.05 p90   18.36 p99   43.42 max    52.3 sum   1376.0
+  wall s        dasher          median    2.79 mean    3.91 p90    8.63 p99   12.56 max    24.6 sum    594.5
+  wall s        lightpanda      median    3.27 mean    3.41 p90    5.25 p99    5.85 max    13.5 sum    518.3
+  wall s        chromium        median    6.92 mean    8.56 p90   15.69 p99   33.94 max    37.2 sum   1300.6
+  peak mem MiB  dasher          median   51.53 mean   65.48 p90  125.10 p99  214.07 max   436.6 sum   9952.5
+  peak mem MiB  lightpanda      median  111.24 mean  128.32 p90  204.76 p99  312.95 max   629.4 sum  19504.8
+  peak mem MiB  chromium        median  450.29 mean  497.97 p90  750.80 p99 1065.09 max  1232.7 sum  75691.4
+  CPU  dasher/lightpanda: total 370.7 vs 347.2 = 1.07x | per-site median 1.00x, geomean 1.02x, p10 0.59 p90 1.58 | dasher lower on 47, within 10% on 46, higher on 59
+  wall dasher/lightpanda: total 594.5 vs 518.3 = 1.15x | per-site median 0.92x, geomean 0.96x, p10 0.55 p90 1.89 | dasher lower on 74, within 10% on 24, higher on 54
+  mem  dasher/lightpanda: total 10191382.0 vs 19972962.0 = 0.51x | per-site median 0.46x, geomean 0.46x, p10 0.31 p90 0.69 | dasher lower on 149, within 10% on 0, higher on 3
+  CPU  dasher/chromium: total 370.7 vs 1376.0 = 0.27x | per-site median 0.25x, geomean 0.24x, p10 0.08 p90 0.56 | dasher lower on 145, within 10% on 3, higher on 4
+  wall dasher/chromium: total 594.5 vs 1300.6 = 0.46x | per-site median 0.41x, geomean 0.41x, p10 0.16 p90 0.87 | dasher lower on 138, within 10% on 4, higher on 10
+  mem  dasher/chromium: total 10191382.0 vs 77508036.0 = 0.13x | per-site median 0.11x, geomean 0.11x, p10 0.05 p90 0.21 | dasher lower on 152, within 10% on 0, higher on 0
+  CPU  lightpanda/chromium: total 347.2 vs 1376.0 = 0.25x | per-site median 0.26x, geomean 0.23x, p10 0.10 p90 0.45 | lightpanda lower on 149, within 10% on 1, higher on 2
+  wall lightpanda/chromium: total 518.3 vs 1300.6 = 0.40x | per-site median 0.46x, geomean 0.42x, p10 0.19 p90 0.79 | lightpanda lower on 148, within 10% on 1, higher on 3
+  mem  lightpanda/chromium: total 19972962.0 vs 77508036.0 = 0.26x | per-site median 0.26x, geomean 0.24x, p10 0.14 p90 0.35 | lightpanda lower on 151, within 10% on 0, higher on 1
+
+-- same content, light pages (Chromium <= 2 CPU s): n=85
+  CPU s         dasher          median    0.14 mean    0.24 p90    0.55 p99    0.88 max     1.1 sum     20.3
+  CPU s         lightpanda      median    0.15 mean    0.25 p90    0.57 p99    1.58 max     1.8 sum     21.3
+  CPU s         chromium        median    0.86 mean    0.97 p90    1.62 p99    1.95 max     2.0 sum     82.8
+  wall s        dasher          median    0.58 mean    0.81 p90    1.66 p99    3.15 max     3.6 sum     69.0
+  wall s        lightpanda      median    0.87 mean    1.10 p90    2.27 p99    3.85 max     5.1 sum     93.4
+  wall s        chromium        median    1.58 mean    2.11 p90    4.17 p99    6.77 max     7.9 sum    179.0
+  peak mem MiB  dasher          median   11.23 mean   15.38 p90   26.75 p99   50.61 max    57.3 sum   1307.3
+  peak mem MiB  lightpanda      median   41.56 mean   47.32 p90   78.36 p99  106.21 max   110.0 sum   4022.5
+  peak mem MiB  chromium        median  263.39 mean  268.59 p90  318.60 p99  398.47 max   411.2 sum  22830.6
+  CPU  dasher/lightpanda: total 20.3 vs 21.3 = 0.95x | per-site median 1.11x, geomean 1.10x, p10 0.84 p90 1.53 | dasher lower on 19, within 10% on 23, higher on 43
+  wall dasher/lightpanda: total 69.0 vs 93.4 = 0.74x | per-site median 0.89x, geomean 0.78x, p10 0.40 p90 1.29 | dasher lower on 44, within 10% on 20, higher on 21
+  mem  dasher/lightpanda: total 1338704.0 vs 4119012.0 = 0.33x | per-site median 0.32x, geomean 0.31x, p10 0.26 p90 0.38 | dasher lower on 85, within 10% on 0, higher on 0
+  CPU  dasher/chromium: total 20.3 vs 82.8 = 0.25x | per-site median 0.19x, geomean 0.20x, p10 0.10 p90 0.36 | dasher lower on 84, within 10% on 0, higher on 1
+  wall dasher/chromium: total 69.0 vs 179.0 = 0.39x | per-site median 0.33x, geomean 0.30x, p10 0.12 p90 0.65 | dasher lower on 84, within 10% on 1, higher on 0
+  mem  dasher/chromium: total 1338704.0 vs 23378500.5 = 0.06x | per-site median 0.04x, geomean 0.05x, p10 0.03 p90 0.09 | dasher lower on 85, within 10% on 0, higher on 0
+  CPU  lightpanda/chromium: total 21.3 vs 82.8 = 0.26x | per-site median 0.16x, geomean 0.18x, p10 0.09 p90 0.37 | lightpanda lower on 83, within 10% on 1, higher on 1
+  wall lightpanda/chromium: total 93.4 vs 179.0 = 0.52x | per-site median 0.54x, geomean 0.38x, p10 0.12 p90 0.81 | lightpanda lower on 81, within 10% on 2, higher on 2
+  mem  lightpanda/chromium: total 4119012.0 vs 23378500.5 = 0.18x | per-site median 0.16x, geomean 0.16x, p10 0.10 p90 0.26 | lightpanda lower on 85, within 10% on 0, higher on 0
+
+-- DASHER AND LIGHTPANDA OK: n=361
+  CPU s         dasher          median    0.94 mean    1.86 p90    5.18 p99   10.04 max    11.8 sum    670.5
+  CPU s         lightpanda      median    1.00 mean    1.85 p90    4.73 p99    7.06 max    36.2 sum    669.5
+  wall s        dasher          median    1.98 mean    3.07 p90    7.03 p99   12.38 max    30.0 sum   1109.9
+  wall s        lightpanda      median    2.50 mean    2.92 p90    5.24 p99    5.85 max    35.4 sum   1053.1
+  peak mem MiB  dasher          median   38.80 mean   53.86 p90  120.21 p99  213.73 max   436.6 sum  19445.0
+  peak mem MiB  lightpanda      median   92.94 mean  111.08 p90  209.52 p99  326.62 max   629.4 sum  40101.2
+  CPU  dasher/lightpanda: total 670.5 vs 669.5 = 1.00x | per-site median 1.03x, geomean 1.01x, p10 0.63 p90 1.61 | dasher lower on 112, within 10% on 103, higher on 146
+  wall dasher/lightpanda: total 1109.9 vs 1053.1 = 1.05x | per-site median 0.89x, geomean 0.87x, p10 0.45 p90 1.61 | dasher lower on 186, within 10% on 62, higher on 113
+  mem  dasher/lightpanda: total 19911704.0 vs 41063676.0 = 0.48x | per-site median 0.40x, geomean 0.41x, p10 0.26 p90 0.66 | dasher lower on 353, within 10% on 4, higher on 4
+
+-- WORK-MATCHED dasher vs lightpanda (requests within 1.25x, text similarity >= 0.9): n=246
+  CPU s         dasher          median    0.72 mean    1.61 p90    4.81 p99   10.03 max    10.1 sum    394.8
+  CPU s         lightpanda      median    0.71 mean    1.46 p90    3.92 p99    6.79 max    36.2 sum    358.8
+  wall s        dasher          median    1.59 mean    2.67 p90    6.37 p99   11.38 max    24.6 sum    657.7
+  wall s        lightpanda      median    2.02 mean    2.50 p90    5.11 p99    5.76 max    35.4 sum    615.5
+  peak mem MiB  dasher          median   31.31 mean   47.11 p90  118.71 p99  214.30 max   224.0 sum  11589.9
+  peak mem MiB  lightpanda      median   77.94 mean   95.23 p90  181.22 p99  325.25 max   370.9 sum  23427.0
+  CPU  dasher/lightpanda: total 394.8 vs 358.8 = 1.10x | per-site median 1.05x, geomean 1.10x, p10 0.82 p90 1.57 | dasher lower on 56, within 10% on 85, higher on 105
+  wall dasher/lightpanda: total 657.7 vs 615.5 = 1.07x | per-site median 0.91x, geomean 0.89x, p10 0.49 p90 1.57 | dasher lower on 123, within 10% on 45, higher on 78
+  mem  dasher/lightpanda: total 11868052.0 vs 23989222.0 = 0.49x | per-site median 0.39x, geomean 0.41x, p10 0.27 p90 0.62 | dasher lower on 243, within 10% on 1, higher on 2
+
+-- work-matched heavy (either > 1 CPU s, no dasher budget): n=99
+  CPU s         dasher          median    1.99 mean    2.95 p90    5.83 p99    8.25 max     8.8 sum    292.4
+  CPU s         lightpanda      median    1.92 mean    2.53 p90    4.81 p99    6.54 max     7.0 sum    250.1
+  wall s        dasher          median    3.66 mean    4.49 p90    8.34 p99   16.34 max    24.6 sum    444.2
+  wall s        lightpanda      median    3.72 mean    3.69 p90    5.21 p99    5.70 max     5.8 sum    365.3
+  peak mem MiB  dasher          median   65.91 mean   81.52 p90  138.99 p99  218.86 max   224.0 sum   8070.3
+  peak mem MiB  lightpanda      median  127.67 mean  146.82 p90  218.28 p99  341.21 max   370.9 sum  14535.1
+  CPU  dasher/lightpanda: total 292.4 vs 250.1 = 1.17x | per-site median 1.08x, geomean 1.13x, p10 0.81 p90 1.63 | dasher lower on 21, within 10% on 30, higher on 48
+  wall dasher/lightpanda: total 444.2 vs 365.3 = 1.22x | per-site median 1.04x, geomean 1.05x, p10 0.67 p90 1.68 | dasher lower on 37, within 10% on 17, higher on 45
+  mem  dasher/lightpanda: total 8264000.0 vs 14883892.0 = 0.56x | per-site median 0.53x, geomean 0.53x, p10 0.39 p90 0.75 | dasher lower on 97, within 10% on 1, higher on 1
+
+-- DASHER AND CHROMIUM OK: n=333
+  CPU s         dasher          median    0.94 mean    1.86 p90    5.29 p99   10.04 max    11.8 sum    620.1
+  CPU s         chromium        median    3.75 mean    6.59 p90   14.69 p99   38.84 max    52.3 sum   2194.3
+  wall s        dasher          median    2.06 mean    3.10 p90    7.01 p99   11.44 max    30.0 sum   1031.6
+  wall s        chromium        median    5.35 mean    6.67 p90   12.28 p99   31.01 max    37.2 sum   2220.4
+  peak mem MiB  dasher          median   38.83 mean   54.17 p90  119.05 p99  214.78 max   436.6 sum  18038.9
+  peak mem MiB  chromium        median  387.47 mean  431.78 p90  668.48 p99  958.11 max  1232.7 sum 143781.4
+  CPU  dasher/chromium: total 620.1 vs 2194.3 = 0.28x | per-site median 0.24x, geomean 0.23x, p10 0.10 p90 0.56 | dasher lower on 319, within 10% on 5, higher on 9
+  wall dasher/chromium: total 1031.6 vs 2220.4 = 0.46x | per-site median 0.39x, geomean 0.39x, p10 0.14 p90 0.87 | dasher lower on 302, within 10% on 12, higher on 19
+  mem  dasher/chromium: total 18471812.0 vs 147232157.5 = 0.13x | per-site median 0.10x, geomean 0.09x, p10 0.04 p90 0.22 | dasher lower on 333, within 10% on 0, higher on 0
+
+-- dasher and Chromium ok, same content (>= 0.9): n=252
+  CPU s         dasher          median    0.80 mean    1.62 p90    4.11 p99   10.04 max    11.8 sum    408.0
+  CPU s         chromium        median    3.24 mean    6.04 p90   14.33 p99   40.04 max    52.3 sum   1522.2
+  wall s        dasher          median    1.69 mean    2.81 p90    6.94 p99   11.35 max    24.6 sum    707.1
+  wall s        chromium        median    4.38 mean    6.18 p90   12.03 p99   31.33 max    37.2 sum   1557.7
+  peak mem MiB  dasher          median   34.55 mean   47.66 p90  108.14 p99  208.00 max   436.6 sum  12009.4
+  peak mem MiB  chromium        median  367.00 mean  415.88 p90  659.91 p99  960.43 max  1232.7 sum 104801.6
+  CPU  dasher/chromium: total 408.0 vs 1522.2 = 0.27x | per-site median 0.23x, geomean 0.22x, p10 0.10 p90 0.51 | dasher lower on 244, within 10% on 3, higher on 5
+  wall dasher/chromium: total 707.1 vs 1557.7 = 0.45x | per-site median 0.38x, geomean 0.37x, p10 0.14 p90 0.83 | dasher lower on 234, within 10% on 7, higher on 11
+  mem  dasher/chromium: total 12297638.0 vs 107316865.5 = 0.11x | per-site median 0.09x, geomean 0.08x, p10 0.04 p90 0.19 | dasher lower on 252, within 10% on 0, higher on 0
+
+== SENSITIVITY: Lightpanda's wait cap (default 5 s) against 30 s
+
+-- lightpanda and lightpanda-30s ok: n=388
+  CPU s         lightpanda      median    1.06 mean    1.92 p90    4.83 p99    7.23 max    36.2 sum    744.4
+  CPU s         lightpanda-30s  median    1.14 mean    2.25 p90    5.13 p99   16.88 max    36.4 sum    873.8
+  wall s        lightpanda      median    2.74 mean    2.97 p90    5.25 p99    6.63 max    35.4 sum   1154.0
+  wall s        lightpanda-30s  median    2.63 mean    3.83 p90    7.51 p99   23.87 max    35.4 sum   1484.9
+  peak mem MiB  lightpanda      median   94.72 mean  113.95 p90  211.76 p99  320.33 max   629.4 sum  44214.2
+  peak mem MiB  lightpanda-30s  median   96.77 mean  118.29 p90  220.40 p99  365.99 max   654.0 sum  45894.6
+  CPU 30s/default: total 873.8 vs 744.4 = 1.17x | per-site median 1.00x, geomean 1.05x, p10 0.97 p90 1.17 | lightpanda-30s lower on 5, within 10% on 337, higher on 46
+  text 30s/default: total 1.033 | sites with >10% more text at 30 s: 19
+  outcomes changed: {('empty', 'fail'): 5, ('ok', 'blocked'): 2, ('blocked', 'ok'): 1}
+  lightpanda-30s similarity to Chromium: n=345 median 0.998 >=0.9 265
+
+== SENSITIVITY: Chromium without images
+
+-- chromium and chromium-noimg ok: n=354
+  CPU s         chromium        median    3.71 mean    6.48 p90   14.45 p99   38.61 max    52.3 sum   2293.5
+  CPU s         chromium-noimg  median    3.23 mean    5.66 p90   13.38 p99   28.58 max    48.0 sum   2005.3
+  wall s        chromium        median    5.54 mean    6.70 p90   12.18 p99   31.00 max    37.2 sum   2371.4
+  wall s        chromium-noimg  median    4.98 mean    6.07 p90   11.17 p99   24.39 max    37.0 sum   2147.1
+  peak mem MiB  chromium        median  384.91 mean  429.97 p90  666.03 p99  957.13 max  1232.7 sum 152208.1
+  peak mem MiB  chromium-noimg  median  366.28 mean  403.58 p90  624.66 p99  864.92 max  1188.6 sum 142868.5
+  CPU noimg/default: total 2005.3 vs 2293.5 = 0.87x | per-site median 0.90x, geomean 0.88x, p10 0.71 p90 1.00 | chromium-noimg lower on 181, within 10% on 159, higher on 14
+  wall noimg/default: total 2147.1 vs 2371.4 = 0.91x | per-site median 0.95x, geomean 0.92x, p10 0.79 p90 1.01 | chromium-noimg lower on 103, within 10% on 234, higher on 17
+  mem noimg/default: total 146297381.5 vs 155861075.5 = 0.94x | per-site median 0.96x, geomean 0.94x, p10 0.85 p90 1.01 | chromium-noimg lower on 70, within 10% on 276, higher on 8
+  dasher / chromium-noimg, all ok: total 610.3 vs 1888.8 = 0.32x | per-site median 0.27x, geomean 0.27x, p10 0.11 p90 0.63 | dasher lower on 311, within 10% on 5, higher on 11
+
+== LIMITS HIT (runs)
+  dasher: budget_exhausted {None: 1446, 'cpu': 27, 'requests': 3} timed_out 4 runs >= 25 s wall 10
+     sites with a budget on most runs: ['bloomberg_com', 'dexter_com_ar', 'hubspot_com', 'huffpost_com', 'ibm_com_us_en', 'kabu_com', 'newrelic_com', 'salesforce_com', 'tailwindcss_com_docs_installation', 'twitch_tv']
+  lightpanda: runs >= 4.9 s wall 266 (sites, most runs: 90), >= 25 s 3, killed 0
+  lightpanda-30s: runs >= 4.9 s wall 271 (sites, most runs: 88), >= 25 s 15, killed 0
+  chromium: capped {'settle': 540, None: 915, 'timeout': 21}; sites capped on most runs: 186; killed 0
+  chromium-noimg: capped {'settle': 535, None: 934, 'timeout': 7}; sites capped on most runs: 181; killed 0
+
+== MEMORY, every run that exited 0 (dasher, lightpanda: peak RSS; chromium: peak summed PSS of its processes)
+  dasher          n=1445 p10 8 median 27 p90 109 p99 214 max 438 | over 256 MiB 4, over 512 0, over 1024 0
+  lightpanda      n=1373 p10 26 median 81 p90 205 p99 323 max 631 | over 256 MiB 68, over 512 3, over 1024 0
+  chromium        n=1458 p10 210 median 360 p90 617 p99 948 max 1241 | over 256 MiB 1103, over 512 296, over 1024 5
+  lightpanda-30s  n=1359 p10 28 median 84 p90 213 p99 365 max 665 | over 256 MiB 91, over 512 3, over 1024 0
+  chromium-noimg  n=1462 p10 208 median 342 p90 571 p99 824 max 1191 | over 256 MiB 1055, over 512 252, over 1024 4
+  chromium summed RSS / summed PSS: median 1.54; processes at once: median 5.0
+
+== ORDER EFFECT: median CPU by position in the round (all three ok)
+  dasher          {0: 0.957, 1: 0.941, 2: 0.946, 3: 0.881, 4: 1.093} n {0: 306, 1: 278, 2: 308, 3: 289, 4: 295}
+  lightpanda      {0: 1.117, 1: 1.0, 2: 1.044, 3: 1.006, 4: 1.031} n {0: 295, 1: 306, 2: 278, 3: 308, 4: 289}
+  chromium        {0: 3.62, 1: 3.71, 2: 3.805, 3: 3.55, 4: 3.84} n {0: 289, 1: 295, 2: 306, 3: 278, 4: 308}
+  lightpanda-30s  {0: 1.05, 1: 1.077, 2: 1.152, 3: 1.056, 4: 1.171} n {0: 308, 1: 289, 2: 295, 3: 306, 4: 278}
+  chromium-noimg  {0: 3.08, 1: 3.515, 2: 3.065, 3: 3.46, 4: 3.41} n {0: 278, 1: 308, 2: 289, 3: 295, 4: 306}
+
+== RUN-TO-RUN: per-site spread of CPU over the 3 runs, (max-min)/median, all three ok
+  dasher          median 0.04 p90 0.15
+  lightpanda      median 0.04 p90 0.14
+  chromium        median 0.07 p90 0.37
+
+== COST per million pages on Lambda arm64 at 3008 MB (mean wall x memory + request fee), all three ok
+  dasher          mean wall 3.10 s  mean CPU 1.86 s -> $122
+  lightpanda      mean wall 2.87 s  mean CPU 1.80 s -> $113
+  chromium        mean wall 6.67 s  mean CPU 6.61 s -> $261
+  lightpanda-30s  mean wall 3.79 s  mean CPU 2.14 s -> $149
+  chromium-noimg  mean wall 5.99 s  mean CPU 5.76 s -> $235
+
+== BIGGEST CPU GAPS among same-content sites
+  dasher dearer than chromium  newrelic_com                         dasher  10.02 lightpanda   5.71 chromium   6.18 reqs 68/74/27 budget ['cpu']
+  dasher dearer than chromium  time_com                             dasher   5.51 lightpanda   4.64 chromium   2.26 reqs 276/213/26 budget []
+  dasher dearer than chromium  hubspot_com                          dasher  11.75 lightpanda  13.31 chromium   9.27 reqs 72/92/139 budget ['cpu']
+  dasher dearer than chromium  kabu_com                             dasher  10.04 lightpanda   2.35 chromium   8.12 reqs 100/104/85 budget ['cpu']
+  dasher dearer than chromium  diariodocentrodomundo_com_br         dasher   1.11 lightpanda   1.55 chromium   0.91 reqs 63/95/5 budget []
+  dasher dearer than chromium  dexter_com_ar                        dasher  10.04 lightpanda   4.55 chromium   9.97 reqs 99/96/71 budget ['cpu']
+  dasher dearer than chromium  missmary_com                         dasher   5.94 lightpanda   3.93 chromium   6.07 reqs 67/66/46 budget []
+  dasher dearer than chromium  luugy_com                            dasher   0.06 lightpanda   0.03 chromium   0.27 reqs 1/1/1 budget []
+  dasher dearer than chromium  globalprimereport_com                dasher   0.06 lightpanda   0.04 chromium   0.28 reqs 3/3/3 budget []
+  dasher dearer than chromium  info_cern_ch_hypertext_WWW_TheProjec dasher   0.07 lightpanda   0.04 chromium   0.31 reqs 1/1/1 budget []
+  dasher dearer than lightpanda kabu_com                             dasher  10.04 lightpanda   2.35 chromium   8.12 reqs 100/104/85 budget ['cpu']
+  dasher dearer than lightpanda dexter_com_ar                        dasher  10.04 lightpanda   4.55 chromium   9.97 reqs 99/96/71 budget ['cpu']
+  dasher dearer than lightpanda huffpost_com                         dasher  10.04 lightpanda   5.68 chromium  44.85 reqs 354/249/625 budget ['cpu']
+  dasher dearer than lightpanda newrelic_com                         dasher  10.02 lightpanda   5.71 chromium   6.18 reqs 68/74/27 budget ['cpu']
+  dasher dearer than lightpanda shopify_com                          dasher   4.54 lightpanda   0.30 chromium   7.46 reqs 164/91/137 budget []
+  dasher dearer than lightpanda adac_de                              dasher   5.18 lightpanda   1.89 chromium   5.50 reqs 94/84/117 budget []
+  dasher dearer than lightpanda newyorker_com                        dasher   9.95 lightpanda   7.14 chromium  22.28 reqs 143/118/187 budget ['cpu']
+  dasher dearer than lightpanda tuasaude_com                         dasher   8.24 lightpanda   5.54 chromium  52.29 reqs 181/226/667 budget []
+  dasher dearer than lightpanda theguardian_com_international        dasher   6.98 lightpanda   4.28 chromium  13.64 reqs 416/337/239 budget []
+  dasher dearer than lightpanda nike_com                             dasher   6.08 lightpanda   3.73 chromium  12.43 reqs 79/114/217 budget []
+  dasher cheaper than lightpanda atlassian_com                        dasher   1.32 lightpanda   6.08 chromium  22.05 reqs 42/98/91
+  dasher cheaper than lightpanda timesofindia_indiatimes_com          dasher   1.38 lightpanda   5.87 chromium  38.11 reqs 106/350/594
+  dasher cheaper than lightpanda datadoghq_com                        dasher   2.41 lightpanda   5.96 chromium   9.86 reqs 90/388/110
+  dasher cheaper than lightpanda eenadu_net                           dasher   2.10 lightpanda   5.55 chromium  19.98 reqs 89/231/189
+  dasher cheaper than lightpanda fifaaddict_com                       dasher   1.37 lightpanda   4.23 chromium  10.70 reqs 52/176/143
+  dasher cheaper than lightpanda foxnews_com                          dasher   1.61 lightpanda   3.98 chromium  14.33 reqs 114/142/182
+  dasher cheaper than lightpanda tyumen_hh_ru                         dasher   0.62 lightpanda   2.81 chromium   9.43 reqs 44/63/87
+  dasher cheaper than lightpanda notion_com                           dasher   1.02 lightpanda   2.99 chromium  11.90 reqs 78/135/79
+  dasher cheaper than lightpanda nytimes_com                          dasher   3.70 lightpanda   5.63 chromium  17.29 reqs 406/448/421
+  dasher cheaper than lightpanda wix_com                              dasher   0.99 lightpanda   2.90 chromium  13.40 reqs 121/166/150

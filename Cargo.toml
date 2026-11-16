@@ -6,20 +6,27 @@ exclude = ["vendor"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
+license = "MIT"
 repository = "https://github.com/josephjojoe/dasher"
-publish = false
+homepage = "https://github.com/josephjojoe/dasher"
+readme = "README.md"
+keywords = ["scraping", "headless", "browser", "javascript", "serverless"]
+categories = ["web-programming", "command-line-utilities"]
+publish = true
 
 [workspace.dependencies]
-# Internal crates. Depend on these with `dasher-foo.workspace = true`.
-dasher = { path = "crates/dasher" }
-dasher-css = { path = "crates/css" }
-dasher-dom = { path = "crates/dom" }
-dasher-js = { path = "crates/js" }
-dasher-net = { path = "crates/net" }
-dasher-page = { path = "crates/page" }
-dasher-serve = { path = "crates/serve" }
-dasher-test-server = { path = "crates/test-server" }
+# Internal crates. Depend on these with `dasher-foo.workspace = true`. The
+# versions are what a published crate would depend on; bump them with
+# `workspace.package.version`.
+dasher = { path = "crates/dasher", version = "0.1.0" }
+dasher-css = { path = "crates/css", version = "0.1.0" }
+dasher-dom = { path = "crates/dom", version = "0.1.0" }
+dasher-js = { path = "crates/js", version = "0.1.0" }
+dasher-net = { path = "crates/net", version = "0.1.0" }
+dasher-page = { path = "crates/page", version = "0.1.0" }
+dasher-serve = { path = "crates/serve", version = "0.1.0" }
+dasher-test-server = { path = "crates/test-server", version = "0.1.0" }
 
 # Third-party crates shared across the workspace.
 bytes = "1"

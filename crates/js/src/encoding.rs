@@ -211,7 +211,7 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
         .bytes()
         .filter(|b| !matches!(b, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '))
         .collect();
-    if data.len() % 4 == 0 {
+    if data.len().is_multiple_of(4) {
         for _ in 0..2 {
             if data.last() == Some(&b'=') {
                 data.pop();

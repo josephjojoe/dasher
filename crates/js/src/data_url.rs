@@ -62,12 +62,13 @@ fn percent_decode(input: &[u8]) -> Vec<u8> {
     let mut i = 0;
     while i < input.len() {
         let byte = input[i];
-        if byte == b'%' && i + 2 < input.len() {
-            if let (Some(hi), Some(lo)) = (hex(input[i + 1]), hex(input[i + 2])) {
-                out.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
-            }
+        if byte == b'%'
+            && i + 2 < input.len()
+            && let (Some(hi), Some(lo)) = (hex(input[i + 1]), hex(input[i + 2]))
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+            continue;
         }
         out.push(byte);
         i += 1;
@@ -82,7 +83,7 @@ pub(crate) fn forgiving_base64_decode(input: &[u8]) -> Option<Vec<u8>> {
         .copied()
         .filter(|b| !matches!(b, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '))
         .collect();
-    if data.len() % 4 == 0 {
+    if data.len().is_multiple_of(4) {
         for _ in 0..2 {
             if data.last() == Some(&b'=') {
                 data.pop();

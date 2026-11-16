@@ -156,11 +156,12 @@ impl Store {
             let what = if found.is_some() { "hit" } else { "miss" };
             eprintln!("replay: {what} {method} {url}");
         }
-        if found.is_none() && std::env::var_os("DASHER_REPLAY_MISSES").is_some() {
-            if let Ok(mut misses) = self.misses.lock() {
-                misses.push(exact_key(method, url));
-                eprintln!("replay miss: {method} {url}");
-            }
+        if found.is_none()
+            && std::env::var_os("DASHER_REPLAY_MISSES").is_some()
+            && let Ok(mut misses) = self.misses.lock()
+        {
+            misses.push(exact_key(method, url));
+            eprintln!("replay miss: {method} {url}");
         }
         found
     }
@@ -216,10 +217,10 @@ pub(crate) fn write(dir: &Path, method: &Method, request_url: &Url, recorded: &R
         ) {
             continue;
         }
-        if let Ok(value) = value.to_str() {
-            if !value.contains('\n') {
-                meta.push_str(&format!("{name}: {value}\n"));
-            }
+        if let Ok(value) = value.to_str()
+            && !value.contains('\n')
+        {
+            meta.push_str(&format!("{name}: {value}\n"));
         }
     }
     let _ = fs::write(dir.join(format!("{stem}.body")), &recorded.body);

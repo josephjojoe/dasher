@@ -265,10 +265,11 @@ impl DomState {
         } else {
             0
         };
-        if let Some((v, e, h)) = self.layout.root.get() {
-            if v == version && e == epoch {
-                return h;
-            }
+        if let Some((v, e, h)) = self.layout.root.get()
+            && v == version
+            && e == epoch
+        {
+            return h;
         }
         let body = doc.body();
         let height = match g.visibility {

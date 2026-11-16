@@ -24,12 +24,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p dasher-cli \
     && cp target/release/dasher /dasher
 
-# Just the binary, named as a Lambda custom runtime expects.
+# Just the binary, named as a Lambda custom runtime expects, and the notices
+# to ship with it.
 FROM scratch AS lambda-zip
 COPY --from=build /dasher /bootstrap
+COPY LICENSE THIRD-PARTY-LICENSES.txt /
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /dasher /dasher
+# The licence, and the notices of what is compiled into the binary.
+COPY LICENSE THIRD-PARTY-LICENSES.txt /licenses/
 ENV PORT=8080
 EXPOSE 8080
 USER nonroot

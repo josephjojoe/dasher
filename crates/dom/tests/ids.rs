@@ -154,15 +154,15 @@ impl World {
                 }
             }
             12 => {
-                if let Some(el) = self.any_element() {
-                    if let Ok(root) = self.doc.attach_shadow(el, ShadowRootInit::open()) {
-                        let id = self.rng.pick(IDS);
-                        self.doc.set_inner_html(el, "");
-                        let inner = self.doc.create_element("div");
-                        self.doc.set_attribute(inner, "id", id);
-                        self.doc.append_child(root, inner).unwrap();
-                        self.adopt_new(el);
-                    }
+                if let Some(el) = self.any_element()
+                    && let Ok(root) = self.doc.attach_shadow(el, ShadowRootInit::open())
+                {
+                    let id = self.rng.pick(IDS);
+                    self.doc.set_inner_html(el, "");
+                    let inner = self.doc.create_element("div");
+                    self.doc.set_attribute(inner, "id", id);
+                    self.doc.append_child(root, inner).unwrap();
+                    self.adopt_new(el);
                 }
             }
             13 => {
