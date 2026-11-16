@@ -3,8 +3,8 @@
 //!
 //! They run with the document borrowed and reach dasher-dom's id index and
 //! dasher-css's query plans directly, with the selector parsed once and
-//! cached by text (`DomState::selector`). `querySelectorAll` returns what
-//! the glue did: an array of the matches with `NodeList.prototype`.
+//! cached by text (`DomState::selector`). `querySelectorAll` returns a
+//! static `NodeList` of the matches (see the `lists` module).
 
 use std::rc::Rc;
 
@@ -55,19 +55,13 @@ pub(super) fn query_selector_all<'c>(
         }
         values.push(v);
     }
-    let count = i32::try_from(values.len()).map_err(|_| Thrown::Type(c"Too many results."))?;
-    // SAFETY: the array takes the values' references.
-    let array = unsafe { qjs::JS_NewArrayFrom(c.ctx, count, values.as_ptr()) };
+    let proto = c.members.proto(super::lists::Proto::NodeList);
+    let list = c.members.lists().create_static(c.ctx, proto, values);
     // SAFETY: a tag check.
-    if unsafe { qjs::JS_IsException(array) } {
+    if unsafe { qjs::JS_IsException(list) } {
         return Err(Thrown::Pending);
     }
-    if !c.members.static_node_list(c.ctx, array) {
-        // SAFETY: `array` is ours.
-        unsafe { qjs::JS_FreeValue(c.ctx, array) };
-        return Err(Thrown::Pending);
-    }
-    Ok(Ret::Value(array))
+    Ok(Ret::Value(list))
 }
 
 pub(super) fn matches<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {

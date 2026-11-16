@@ -20,6 +20,12 @@
 //! The lists `childNodes`, `children` and `attributes` return are made on
 //! first use and kept in the wrapper's extras, so `el.children ===
 //! el.children`.
+//!
+//! A static `NodeList` (`querySelectorAll`'s result, a `MutationRecord`'s
+//! nodes) is an object of a fourth class, whose opaque is a
+//! [`StaticList`]: the nodes it was made with, each a reference of its
+//! own. It is not an array, as it is not in a browser: `Array.isArray` is
+//! false for it, which pages branch on.
 
 use std::ffi::{CStr, c_int};
 use std::rc::Rc;
@@ -69,6 +75,8 @@ impl ListClass {
 /// The list classes of a runtime.
 pub(crate) struct Lists {
     ids: [qjs::JSClassID; 3],
+    /// The class of static node lists.
+    fixed: qjs::JSClassID,
 }
 
 impl Lists {
@@ -96,7 +104,65 @@ impl Lists {
             }
             ids[class as usize] = id;
         }
-        Ok(Lists { ids })
+        let def = qjs::JSClassDef {
+            class_name: c"NodeList".as_ptr(),
+            finalizer: Some(finalize_static),
+            gc_mark: Some(mark_static),
+            call: None,
+            // QuickJS keeps the pointer and only reads through it.
+            exotic: std::ptr::from_ref(&STATIC_EXOTIC).cast_mut(),
+        };
+        let mut fixed: qjs::JSClassID = 0;
+        // SAFETY: `rt` is live; QuickJS copies what it needs of `def`.
+        unsafe {
+            qjs::JS_NewClassID(rt, &mut fixed);
+            if qjs::JS_NewClass(rt, fixed, &def) != 0 {
+                return Err(rquickjs::Error::Allocation);
+            }
+        }
+        Ok(Lists { ids, fixed })
+    }
+
+    /// The static node list `value` is, if it is one.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Lists::get`].
+    pub(crate) unsafe fn static_list<'v>(&self, value: qjs::JSValue) -> Option<&'v StaticList> {
+        // SAFETY: `JS_GetOpaque` checks the tag and class; objects of this
+        // class have a `StaticList` as their opaque.
+        unsafe {
+            qjs::JS_GetOpaque(value, self.fixed)
+                .cast::<StaticList>()
+                .as_ref()
+        }
+    }
+
+    /// A new static node list of `items`, whose references it takes, with
+    /// prototype `proto`, or `JS_EXCEPTION`.
+    pub(crate) fn create_static(
+        &self,
+        ctx: *mut qjs::JSContext,
+        proto: qjs::JSValue,
+        items: Vec<qjs::JSValue>,
+    ) -> qjs::JSValue {
+        let list = StaticList {
+            // SAFETY: `ctx` is live.
+            rt: unsafe { qjs::JS_GetRuntime(ctx) },
+            items: items.into_boxed_slice(),
+        };
+        // SAFETY: the caller keeps `proto` alive; the class is registered
+        // in this runtime.
+        let obj = unsafe { qjs::JS_NewObjectProtoClass(ctx, proto, self.fixed) };
+        // SAFETY: a tag check.
+        if unsafe { qjs::JS_IsException(obj) } {
+            return obj;
+        }
+        let ptr = Box::into_raw(Box::new(list));
+        // SAFETY: `obj` is a new object of our class; its finalizer frees
+        // the box.
+        unsafe { qjs::JS_SetOpaque(obj, ptr.cast()) };
+        obj
     }
 
     /// The list `value` is, if it is one of `class`.
@@ -167,6 +233,61 @@ unsafe extern "C" fn mark(rt: *mut qjs::JSRuntime, val: qjs::JSValue, mark: qjs:
         let ptr = qjs::JS_GetOpaque(val, qjs::JS_GetClassID(val)).cast::<List>();
         if let Some(list) = ptr.as_ref() {
             qjs::JS_MarkValue(rt, list.owner, mark);
+        }
+    }
+}
+
+unsafe extern "C" fn finalize_static(_rt: *mut qjs::JSRuntime, val: qjs::JSValue) {
+    // SAFETY: `val` is a static node list being freed; its opaque is the
+    // box `Lists::create_static` made, or null.
+    unsafe {
+        let ptr = qjs::JS_GetOpaque(val, qjs::JS_GetClassID(val)).cast::<StaticList>();
+        if !ptr.is_null() {
+            drop(Box::from_raw(ptr));
+        }
+    }
+}
+
+unsafe extern "C" fn mark_static(
+    rt: *mut qjs::JSRuntime,
+    val: qjs::JSValue,
+    mark: qjs::JS_MarkFunc,
+) {
+    // SAFETY: as in `finalize_static`.
+    unsafe {
+        let ptr = qjs::JS_GetOpaque(val, qjs::JS_GetClassID(val)).cast::<StaticList>();
+        if let Some(list) = ptr.as_ref() {
+            for &item in &list.items {
+                qjs::JS_MarkValue(rt, item, mark);
+            }
+        }
+    }
+}
+
+/// The Rust side of a static node list: its items, in order.
+pub(crate) struct StaticList {
+    rt: *mut qjs::JSRuntime,
+    /// References of our own.
+    items: Box<[qjs::JSValue]>,
+}
+
+impl StaticList {
+    pub(crate) fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Item `i`, borrowed.
+    pub(crate) fn get(&self, i: usize) -> Option<qjs::JSValue> {
+        self.items.get(i).copied()
+    }
+}
+
+impl Drop for StaticList {
+    fn drop(&mut self) {
+        for &item in &self.items {
+            // SAFETY: the references are ours, in this runtime, which
+            // outlives its objects.
+            unsafe { qjs::JS_FreeValueRT(self.rt, item) };
         }
     }
 }
@@ -488,6 +609,16 @@ static NODE_LIST_EXOTIC: qjs::JSClassExoticMethods = qjs::JSClassExoticMethods {
     set_property: None,
 };
 
+static STATIC_EXOTIC: qjs::JSClassExoticMethods = qjs::JSClassExoticMethods {
+    get_own_property: Some(static_get_own),
+    get_own_property_names: Some(static_names_of),
+    delete_property: Some(delete_nothing),
+    define_own_property: Some(define_unless_index),
+    has_property: None,
+    get_property: None,
+    set_property: None,
+};
+
 static COLLECTION_EXOTIC: qjs::JSClassExoticMethods = qjs::JSClassExoticMethods {
     get_own_property: Some(collection_get_own),
     get_own_property_names: Some(collection_names_of),
@@ -598,6 +729,52 @@ unsafe extern "C" fn nodes_get_own(
     };
     // SAFETY: as above.
     unsafe { item_property(ctx, desc, list, root, (atom & !ATOM_TAG_INT) as usize) }
+}
+
+/// The static node list behind `obj`, if it is one.
+///
+/// # Safety
+///
+/// `ctx` must be live and `obj` alive.
+unsafe fn static_in<'a>(ctx: *mut qjs::JSContext, obj: qjs::JSValue) -> Option<&'a StaticList> {
+    // SAFETY: the context's opaque is null or the live `NativeData`.
+    let members = unsafe { NativeData::of(ctx) }.and_then(NativeData::members)?;
+    // SAFETY: as for the function.
+    unsafe { members.lists().static_list(obj) }
+}
+
+unsafe extern "C" fn static_get_own(
+    ctx: *mut qjs::JSContext,
+    desc: *mut qjs::JSPropertyDescriptor,
+    obj: qjs::JSValue,
+    atom: qjs::JSAtom,
+) -> c_int {
+    if atom & ATOM_TAG_INT == 0 {
+        return 0;
+    }
+    // SAFETY: QuickJS calls this with a live context, object and atom.
+    let item = unsafe { static_in(ctx, obj) }.and_then(|l| l.get((atom & !ATOM_TAG_INT) as usize));
+    let Some(item) = item else { return 0 };
+    if desc.is_null() {
+        return 1;
+    }
+    // SAFETY: the list keeps `item` alive; the duplicate is the caller's.
+    let value = unsafe { qjs::JS_DupValue(ctx, item) };
+    let flags = qjs::JS_PROP_ENUMERABLE | qjs::JS_PROP_CONFIGURABLE;
+    // SAFETY: as above.
+    unsafe { fill(ctx, desc, value, flags) }
+}
+
+unsafe extern "C" fn static_names_of(
+    ctx: *mut qjs::JSContext,
+    ptab: *mut *mut qjs::JSPropertyEnum,
+    plen: *mut u32,
+    obj: qjs::JSValue,
+) -> c_int {
+    // SAFETY: as for an exotic method.
+    let indexes = unsafe { static_in(ctx, obj) }.map_or(0, StaticList::len);
+    // SAFETY: as above.
+    unsafe { property_list(ctx, ptab, plen, indexes, &[]) }
 }
 
 unsafe extern "C" fn collection_get_own(
@@ -878,6 +1055,49 @@ pub(super) fn new_collection<'js>(
     }
     // SAFETY: `obj` is a new reference, which the `Value` takes.
     Ok(unsafe { rquickjs::Value::from_raw(ctx.clone(), obj) })
+}
+
+/// `N.staticList(items)`: a new static `NodeList` of the nodes in the
+/// array `items`.
+pub(super) fn new_static<'js>(
+    ctx: &Ctx<'js>,
+    items: &rquickjs::Array<'js>,
+) -> Result<rquickjs::Value<'js>> {
+    let raw_ctx = ctx.as_raw().as_ptr();
+    // SAFETY: the context's opaque is null or the live `NativeData`.
+    let members = unsafe { NativeData::of(raw_ctx) }.and_then(NativeData::members);
+    let members = members.ok_or(rquickjs::Error::Unknown)?;
+    let mut values = Vec::with_capacity(items.len());
+    for item in items.iter::<rquickjs::Value<'js>>() {
+        values.push(item?);
+    }
+    // The list takes a reference to each.
+    let raw = values
+        .iter()
+        // SAFETY: `v` is alive; the duplicate is the list's.
+        .map(|v| unsafe { qjs::JS_DupValue(raw_ctx, v.as_raw()) })
+        .collect();
+    let proto = members.proto(Proto::NodeList);
+    let obj = members.lists().create_static(raw_ctx, proto, raw);
+    // SAFETY: a tag check.
+    if unsafe { qjs::JS_IsException(obj) } {
+        return Err(rquickjs::Error::Exception);
+    }
+    // SAFETY: `obj` is a new reference, which the `Value` takes.
+    Ok(unsafe { rquickjs::Value::from_raw(ctx.clone(), obj) })
+}
+
+/// The static node list behind `value`, if it is one, for the natives
+/// `dom.js` calls.
+pub(super) fn static_value<'a>(
+    ctx: &Ctx<'_>,
+    value: &rquickjs::Value<'_>,
+) -> Option<&'a StaticList> {
+    // SAFETY: the context's opaque is null or the live `NativeData`.
+    let members = unsafe { NativeData::of(ctx.as_raw().as_ptr()) }.and_then(NativeData::members);
+    // SAFETY: `value` is alive while the caller holds it, which covers the
+    // caller's use of the list.
+    members.and_then(|m| unsafe { m.lists().static_list(value.as_raw()) })
 }
 
 /// The list behind `value`, of any class, with its root, for the natives

@@ -20,7 +20,6 @@
   const defineProperty = Object.defineProperty;
   const getPrototypeOf = Object.getPrototypeOf;
   const setPrototypeOf = Object.setPrototypeOf;
-  const ArrayIsArray = Array.isArray;
   const ReflectApply = Reflect.apply;
   const queueTask = internals.queueTask;
 
@@ -76,14 +75,11 @@
   // Collections. Live ones are native objects (dom/lists.rs) that answer
   // indexed (and, for HTMLCollection, named) properties themselves; their
   // `length`, `item` and `namedItem` are native members. Static NodeLists
-  // are arrays with NodeList.prototype. As in browsers, the iteration
-  // members are Array.prototype's, which work on both.
+  // are native objects too, holding the nodes they were made with; they
+  // are not arrays (pages branch on Array.isArray). As in browsers, the
+  // iteration members are Array.prototype's, which work on both.
 
   function listItem(list, i) {
-    if (ArrayIsArray(list)) {
-      const v = list[i];
-      return v === undefined ? null : v;
-    }
     return N.collItem(list, i);
   }
 
@@ -109,7 +105,7 @@
   }
 
   function staticNodeList(array) {
-    return setPrototypeOf(array, NodeList.prototype);
+    return N.staticList(array);
   }
 
   // Array.prototype's iteration members, in place of the stand-ins below.

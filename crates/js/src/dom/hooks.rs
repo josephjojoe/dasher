@@ -144,14 +144,6 @@ impl Hooks {
         hook.call::<_, ()>((array,))
     }
 
-    /// Gives the array `array` `NodeList.prototype`, as the glue's
-    /// `staticNodeList`. Returns false with an exception thrown on failure.
-    pub(crate) fn static_node_list(&self, ctx: *mut qjs::JSContext, array: qjs::JSValue) -> bool {
-        // SAFETY: `array` is a live object of the caller's, the prototype
-        // ours.
-        unsafe { qjs::JS_SetPrototype(ctx, array, self.node_list_proto) >= 0 }
-    }
-
     pub(crate) fn lists(&self) -> &Lists {
         &self.lists
     }

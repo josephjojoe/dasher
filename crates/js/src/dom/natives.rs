@@ -1628,8 +1628,18 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "collLength",
         move |ctx: Ctx<'js>, c: Value<'js>| -> Result<usize> {
+            if let Some(list) = lists::static_value(&ctx, &c) {
+                return Ok(list.len());
+            }
             let (list, root) = lists::list_value(&ctx, &c)?;
             Ok(list.ids(&d, &d.doc(), root).len())
+        },
+    )?;
+    def(
+        obj,
+        "staticList",
+        |ctx: Ctx<'js>, items: Array<'js>| -> Result<Value<'js>> {
+            lists::new_static(&ctx, &items)
         },
     )?;
     let d = Rc::clone(dom);
@@ -1637,12 +1647,21 @@ fn install_queries<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> {
         obj,
         "collItem",
         move |ctx: Ctx<'js>, c: Value<'js>, i: f64| -> Result<Value<'js>> {
+            let index = (i >= 0.0 && i.fract() == 0.0).then_some(i as usize);
+            if let Some(list) = lists::static_value(&ctx, &c) {
+                return Ok(match index.and_then(|i| list.get(i)) {
+                    // SAFETY: the list keeps the item alive; the `Value`
+                    // takes a new reference.
+                    Some(raw) => unsafe {
+                        Value::from_raw(ctx.clone(), qjs::JS_DupValue(ctx.as_raw().as_ptr(), raw))
+                    },
+                    None => Value::new_null(ctx),
+                });
+            }
             let item = {
                 let (list, root) = lists::list_value(&ctx, &c)?;
                 let ids = list.ids(&d, &d.doc(), root);
-                (i >= 0.0 && i.fract() == 0.0)
-                    .then(|| ids.get(i as usize).copied())
-                    .flatten()
+                index.and_then(|i| ids.get(i).copied())
             };
             wrap_opt(&ctx, &d, item)
         },

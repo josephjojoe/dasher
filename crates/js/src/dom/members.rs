@@ -1116,6 +1116,15 @@ unsafe extern "C" fn call_member(
         Receiver::List(class) => {
             // SAFETY: `this` is alive for the call.
             let Some(list) = (unsafe { members.lists().get(this, class) }) else {
+                // A static node list has no root node to call a member
+                // with. `length` is the one native member of a `NodeList`.
+                // SAFETY: as above.
+                let fixed = unsafe { members.lists().static_list(this) };
+                if let (ListClass::NodeList, Some(list)) = (class, fixed) {
+                    debug_assert_eq!(member.name, "length");
+                    let len = i32::try_from(list.len()).unwrap_or(i32::MAX);
+                    return qjs::JS_MKVAL(qjs::JS_TAG_INT, len);
+                }
                 // SAFETY: as above.
                 return unsafe { Thrown::Illegal.throw(ctx) };
             };
@@ -1320,12 +1329,6 @@ impl Members {
         scripts: &[NodeId],
     ) -> Result<()> {
         self.hooks.connected(ctx, dom, scripts)
-    }
-
-    /// Makes `array` a static `NodeList`; false with an exception thrown
-    /// if that fails.
-    pub(super) fn static_node_list(&self, ctx: *mut qjs::JSContext, array: qjs::JSValue) -> bool {
-        self.hooks.static_node_list(ctx, array)
     }
 
     pub(super) fn add_reflected(&self, reflected: Reflected) -> usize {

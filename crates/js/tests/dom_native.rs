@@ -226,12 +226,121 @@ fn collections_are_live_without_a_proxy() {
           ['entries', [...nodes.entries()].map(([i]) => i), [0, 1, 2]],
           ['Array.from', Array.from(lis).length, 3],
           ['static qsa', [Array.isArray(u.querySelectorAll('li')), u.querySelectorAll('li') instanceof NodeList,
-            u.querySelectorAll('li').item(0).tagName], [true, true, 'LI']],
+            u.querySelectorAll('li').item(0).tagName], [false, true, 'LI']],
           ['tags', [String(kids), String(nodes)], ['[object HTMLCollection]', '[object NodeList]']],
           ['length receiver', (() => { try { Object.getOwnPropertyDescriptor(HTMLCollection.prototype, 'length').get.call(nodes); return 'none'; } catch (e) { return e.message; } })(), 'Illegal invocation'],
         ]"#,
     );
     assert_eq!(out, "[]");
+}
+
+#[test]
+fn static_node_lists_are_not_arrays() {
+    let js = page(
+        "<ul id=u><li>1</li><li>2</li><li>3</li></ul><label for=i>l</label><input id=i>\
+         <select id=s multiple><option selected>a</option><option selected>b</option></select>",
+    );
+    let out = failures(
+        &js,
+        &format!(
+            "{THROWS} const u = document.getElementById('u'); const q = u.querySelectorAll('li');
+             const none = u.querySelectorAll('b'); const first = q[0];
+             const length = Object.getOwnPropertyDescriptor(NodeList.prototype, 'length').get;
+             const records = []; const mo = new MutationObserver(() => {{}});
+             mo.observe(u, {{ childList: true }});
+             u.append(document.createElement('li')); u.lastChild.remove();
+             records.push(...mo.takeRecords());"
+        ),
+        r#"[
+          ['not an array', [Array.isArray(q), Array.isArray(none), q instanceof NodeList, q instanceof Array], [false, false, true, false]],
+          ['tag', [String(q), Object.prototype.toString.call(none)], ['[object NodeList]', '[object NodeList]']],
+          ['length', [q.length, none.length, length.call(q), 'length' in q], [3, 0, 3, true]],
+          ['length is the prototype\'s', [Object.hasOwn(q, 'length'), throws(() => length.call([]))], [false, 'TypeError: Illegal invocation']],
+          ['index', [q[0].textContent, q[2].textContent, q[3], q[-1], q['1'].textContent], ['1', '3', undefined, undefined, '2']],
+          ['item', [q.item(1).textContent, q.item(3), q.item(-1), none.item(0), q.item('1').textContent], ['2', null, null, null, '2']],
+          ['in', [0 in q, 2 in q, 3 in q, 0 in none], [true, true, false, false]],
+          ['keys', [Object.keys(q), Object.getOwnPropertyNames(q), Object.keys(none)], [['0', '1', '2'], ['0', '1', '2'], []]],
+          ['descriptor', Object.getOwnPropertyDescriptor(q, 1).enumerable, true],
+          ['indexes are read-only', [(q[0] = 5, q[0] === first), delete q[0], q[0] === first,
+            throws(() => { 'use strict'; q[0] = 5; }).split(':')[0]], [true, true, true, 'TypeError']],
+          ['json', [JSON.stringify(none), JSON.stringify(q)], ['{}', '{"0":{},"1":{},"2":{}}']],
+          ['expando', (q.foo = 2, [q.foo, q.length]), [2, 3]],
+          ['iteration', [[...q].length, Array.from(q).map((x) => x.textContent), [...q.keys()],
+            [...q.entries()].map(([i, x]) => i + x.textContent), [...q.values()].length],
+            [3, ['1', '2', '3'], [0, 1, 2], ['01', '12', '23'], 3]],
+          ['forEach', (() => { const out = []; q.forEach((x, i, l) => out.push(i, l === q)); return out; })(), [0, true, 1, true, 2, true]],
+          ['for of', (() => { let n = 0; for (const x of q) n += Number(x.textContent); return n; })(), 6],
+          ['array methods borrow', [Array.prototype.map.call(q, (x) => x.textContent), Array.prototype.slice.call(q, 1).length], [['1', '2', '3'], 2]],
+          ['concat does not spread', [[].concat(q).length, [].concat(q)[0] === q], [1, true]],
+          ['a snapshot', (u.firstChild.remove(), [q.length, q[0] === first, q[0].isConnected, u.querySelectorAll('li').length]), [3, true, false, 2]],
+          ['fresh each call', u.querySelectorAll('li') === u.querySelectorAll('li'), false],
+          ['document and fragment', [Array.isArray(document.querySelectorAll('li')),
+            Array.isArray(document.createDocumentFragment().querySelectorAll('li')),
+            document.createDocumentFragment().querySelectorAll('li').length], [false, false, 0]],
+          ['mutation records', records.map((r) => [Array.isArray(r.addedNodes), r.addedNodes instanceof NodeList,
+            r.addedNodes.length, r.removedNodes.length, Array.isArray(r.removedNodes)]),
+            [[false, true, 1, 0, false], [false, true, 0, 1, false]]],
+          ['a record\'s node', [records[0].addedNodes[0].tagName, records[0].addedNodes.item(0) === records[1].removedNodes[0]], ['LI', true]],
+          ['an empty record list is frozen', [Object.isFrozen(records[0].removedNodes), (records[0].removedNodes.x = 1, records[0].removedNodes.x)], [true, undefined]],
+          ['labels', [Array.isArray(document.getElementById('i').labels), document.getElementById('i').labels.length,
+            document.getElementById('i').labels[0].textContent], [false, 1, 'l']],
+          ['selectedOptions', [Array.isArray(document.getElementById('s').selectedOptions),
+            [...document.getElementById('s').selectedOptions].map((o) => o.text)], [false, ['a', 'b']]],
+        ]"#,
+    );
+    assert_eq!(out, "[]");
+}
+
+/// A page helper that takes HTML strings in an array or nodes in a
+/// `NodeList` and tells them apart with `Array.isArray`, as OneTrust's
+/// consent banner does when it builds its preference centre.
+#[test]
+fn a_node_list_takes_the_branch_for_nodes() {
+    let js = page(
+        "<div id=panel></div><template id=t><p class=d>one</p><p class=d>two</p><p>three</p></template>",
+    );
+    let out = eval(
+        &js,
+        r#"
+        function appendTo(target, what) {
+          if (Array.isArray(what)) {
+            what.forEach((html) => target.insertAdjacentHTML('beforeend', html));
+          } else {
+            for (let i = 0; i < what.length; i++) target.appendChild(what[i].cloneNode(true));
+          }
+        }
+        const panel = document.getElementById('panel');
+        const fragment = document.getElementById('t').content;
+        appendTo(panel, fragment.querySelectorAll('.d'));
+        appendTo(panel, ['<b>four</b>']);
+        panel.textContent
+        "#,
+    );
+    assert_eq!(out, "\"onetwofour\"");
+}
+
+/// A static list keeps its nodes alive after they leave the tree and the
+/// collector has run.
+#[test]
+fn a_static_node_list_keeps_its_nodes() {
+    let js = page("<ul id=u><li>1</li><li>2</li></ul>");
+    eval(
+        &js,
+        "globalThis.q = document.querySelectorAll('li'); document.getElementById('u').remove(); 0",
+    );
+    js.run_gc();
+    eval(
+        &js,
+        "for (let i = 0; i < 2000; i++) document.createElement('p'); 0",
+    );
+    js.run_gc();
+    let out = eval(
+        &js,
+        "[q.length, q[0].textContent, q[1].textContent, q[0].parentNode.id, q[1].tagName]",
+    );
+    assert_eq!(out, r#"[2,"1","2","u","LI"]"#);
+    eval(&js, "delete globalThis.q; 0");
+    js.run_gc();
 }
 
 #[test]
