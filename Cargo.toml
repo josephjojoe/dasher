@@ -9,7 +9,6 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/josephjojoe/dasher"
-homepage = "https://github.com/josephjojoe/dasher"
 readme = "README.md"
 keywords = ["scraping", "headless", "browser", "javascript", "serverless"]
 categories = ["web-programming", "command-line-utilities"]

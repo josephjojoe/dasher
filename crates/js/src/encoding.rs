@@ -120,7 +120,9 @@ fn decode_utf16(
     unit: fn([u8; 2]) -> u16,
 ) -> Option<Decoded> {
     let mut units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| unit([pair[0], pair[1]]))
         .collect();
     let mut consumed = units.len() * 2;

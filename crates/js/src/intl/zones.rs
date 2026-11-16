@@ -392,7 +392,9 @@ fn with_transitions<R>(zone: usize, s: f64, f: impl FnOnce(&Transitions) -> R) -
                     .as_bytes()
                     .get(2..)
                     .unwrap_or_default()
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| slot(parse36(std::str::from_utf8(pair).unwrap_or(""))))
                     .collect();
                 z.era += 1;

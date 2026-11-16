@@ -1136,7 +1136,9 @@ fn decode(key: &Key, bytes: &[u8]) -> Option<Entry> {
     let mut offsets = |n: usize| -> Option<Arc<[u32]>> {
         Some(
             take(n.checked_mul(4)?)?
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect(),
         )

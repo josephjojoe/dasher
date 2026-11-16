@@ -240,7 +240,7 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, native: &Object<'js>) -> Result<()> {
         "querySerialize",
         Function::new(ctx.clone(), |pairs: Vec<String>| {
             let mut out = form_urlencoded::Serializer::new(String::new());
-            for pair in pairs.chunks_exact(2) {
+            for pair in pairs.as_chunks::<2>().0 {
                 out.append_pair(&pair[0], &pair[1]);
             }
             out.finish()

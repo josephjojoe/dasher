@@ -245,7 +245,7 @@ fn read_request<'js>(ctx: &Ctx<'js>, object: &Object<'js>) -> rquickjs::Result<O
 
     let mut headers = HeaderMap::new();
     let flat: Vec<String> = object.get("headers")?;
-    for pair in flat.chunks_exact(2) {
+    for pair in flat.as_chunks::<2>().0 {
         let name = HeaderName::from_bytes(pair[0].as_bytes())
             .map_err(|_| type_error(format!("'{}' is not a valid HTTP header name.", pair[0])))?;
         let value = HeaderValue::from_bytes(&latin1_bytes(&pair[1]))
