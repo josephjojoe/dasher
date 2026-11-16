@@ -114,11 +114,21 @@ fn a_binary_named_bootstrap_is_a_lambda_runtime() {
     std::fs::create_dir_all(&dir).unwrap();
     let bootstrap = dir.join("bootstrap");
     std::fs::copy(env!("CARGO_BIN_EXE_dasher"), &bootstrap).unwrap();
-    let output = Command::new(&bootstrap)
-        .env("AWS_LAMBDA_RUNTIME_API", api.addr().to_string())
-        .env("DASHER_ALLOW_PRIVATE_ADDRESSES", "true")
-        .output()
-        .unwrap();
+    // Linux refuses to run a file that any process has open for writing.
+    // Another test's child, forked while the copy was being written, holds
+    // the copy's descriptor until it execs, so the first try can be refused.
+    let output = loop {
+        match Command::new(&bootstrap)
+            .env("AWS_LAMBDA_RUNTIME_API", api.addr().to_string())
+            .env("DASHER_ALLOW_PRIVATE_ADDRESSES", "true")
+            .output()
+        {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            output => break output.unwrap(),
+        }
+    };
     std::fs::remove_dir_all(&dir).unwrap();
 
     // It stops when the Runtime API fails, as Lambda expects.
