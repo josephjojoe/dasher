@@ -48,6 +48,12 @@ impl HeapState {
         }
     }
 
+    /// Bytes allocated and not yet freed, where the heap is dasher's own
+    /// (on Unix); the engine counts the same.
+    pub(crate) fn used(&self) -> usize {
+        self.used.get()
+    }
+
     /// The limit, if there is one.
     pub(crate) fn limit(&self) -> Option<usize> {
         (self.limit != usize::MAX).then_some(self.limit)

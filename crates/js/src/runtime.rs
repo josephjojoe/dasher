@@ -611,7 +611,31 @@ impl JsRuntime {
         if let Some(scripts) = &js.shared.scripts {
             js.with(|ctx| scripts.attach(&ctx));
         }
-        js.with(|ctx| install(&ctx, &js.shared, &options).map_err(|e| js.shared.capture(&ctx, e)))?;
+        // Everything the glue makes stays, so the cycle collector, which
+        // the growing heap would start five times on the way, has nothing
+        // to free. It is held off, and the threshold then left about
+        // where those runs would have left it: each sets it to one and a
+        // half times the heap.
+        // SAFETY: the runtime is live and this thread holds it.
+        let mut threshold = js.with(|ctx| unsafe {
+            qjs::JS_GetGCThreshold(qjs::JS_GetRuntime(ctx.as_raw().as_ptr())) as usize
+        });
+        js.runtime.set_gc_threshold(usize::MAX);
+        let installed = js.with(|ctx| {
+            install(&ctx, &js.shared, &options).map_err(|e| js.shared.capture(&ctx, e))
+        });
+        // The engine's own count means walking the heap.
+        let heap = if cfg!(unix) {
+            js.shared.heap.used()
+        } else {
+            js.memory_allocated()
+        };
+        while threshold <= heap {
+            // The 1 is for a threshold of 0 or 1, set to collect always.
+            threshold += threshold / 2 + 1;
+        }
+        js.runtime.set_gc_threshold(threshold);
+        installed?;
         Ok(js)
     }
 
