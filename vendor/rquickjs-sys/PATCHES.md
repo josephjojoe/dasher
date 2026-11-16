@@ -170,6 +170,19 @@ rquickjs-sys = { git = "https://github.com/josephjojoe/dasher" }
   objects and bytecode functions. It does the same work in the same
   order.
 
+- **A function's body shares its parameters with the closures in their
+  default values.** When a parameter has a default value or a pattern,
+  the parameters are variables of a scope of their own, which closures
+  in those expressions read. Upstream left the body with the arguments
+  themselves, a second copy: `function f(a = 1, g = () => a) { a = 2;
+  return g(); }` returned 1. Here the body uses the scope's variable,
+  unless it declares the name again with `var` or as a function, which
+  by the specification is a second variable that starts from the
+  parameter's value. A function that calls `eval` in its own body is
+  compiled as before, because the code it evaluates finds the names
+  from the compiled function. Both upstreams still have the two copies.
+  Test: `crates/js/tests/parameters.rs`, against Node's answers.
+
 ## Strings, JSON, arrays
 
 - **`s += x` appends in place** when the variable holds the only other

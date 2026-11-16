@@ -756,6 +756,9 @@ typedef struct JSVarDef {
     int func_pool_idx : 24; /* only used during compilation : index in
                                the constant pool for hoisted function
                                definition */
+    /* dasher: only used during compilation: the function's body declares
+       the name with 'var' or as a function (see js_param_binding) */
+    unsigned int is_body_var : 1;
 } JSVarDef;
 
 /* for the encoding of the pc2line table */
@@ -21810,6 +21813,8 @@ typedef struct JSFunctionDef {
     bool has_parameter_expressions : 1; /* if true, an argument scope is created */
     bool has_use_strict : 1; /* to reject directive in special cases */
     bool has_eval_call : 1; /* true if the function contains a call to eval() */
+    bool has_body_eval_call : 1; /* dasher: and one of them is in its body,
+                                    not in its parameters */
     bool has_arguments_binding : 1; /* true if the 'arguments' binding is
                                    available in the function */
     bool has_this_binding : 1; /* true if the 'this' and new.target binding are
@@ -24505,8 +24510,14 @@ static int define_var(JSParseState *s, JSFunctionDef *fd, JSAtom name,
         } else {
             /* if the variable already exists, don't add it again  */
             idx = find_var(ctx, fd, name);
-            if (idx >= 0)
+            if (idx >= 0) {
+                /* dasher: see js_param_binding() */
+                if (idx & ARGUMENT_VAR_OFFSET)
+                    fd->args[idx - ARGUMENT_VAR_OFFSET].is_body_var = 1;
+                else
+                    fd->vars[idx].is_body_var = 1;
                 break;
+            }
             idx = add_var(ctx, fd, name);
             if (idx >= 0) {
                 if (name == JS_ATOM_arguments && fd->has_arguments_binding)
@@ -27856,6 +27867,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                     emit_op(s, OP_apply_eval);
                     emit_u16(s, fd->scope_level);
                     fd->has_eval_call = true;
+                    fd->has_body_eval_call |= (fd->body_scope >= 0); /* dasher */
                     break;
                 default:
                     if (call_type == FUNC_CALL_SUPER_CTOR) {
@@ -27899,6 +27911,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                     emit_u16(s, arg_count);
                     emit_u16(s, fd->scope_level);
                     fd->has_eval_call = true;
+                    fd->has_body_eval_call |= (fd->body_scope >= 0); /* dasher */
                     break;
                 default:
                     if (call_type == FUNC_CALL_SUPER_CTOR) {
@@ -33287,6 +33300,41 @@ static void var_object_test(JSContext *ctx, JSFunctionDef *s,
 }
 
 /* return the position of the next opcode */
+/* dasher: 'var_idx' is what find_var() gave for 'name' in 'fd', seen from
+   the function's body. When a parameter has a default value or a pattern,
+   every parameter is also a variable of the argument scope, which the
+   closures in those expressions read, and upstream left the body with
+   the argument itself (or, for a name bound by a pattern, a copy made on
+   the way in): two variables, so the body and the closures did not see
+   each other's assignments. The specification has one, unless the body
+   declares the name with 'var' or as a function, which makes a second
+   that starts from the parameter's value; the argument or the copy is
+   that second one. So the argument scope's variable is returned for a
+   name the body does not declare, and it is no longer closed when the
+   parameters are done (see js_parse_function_decl2).
+
+   A function that calls eval directly in its body keeps upstream's
+   arrangement: the code it evaluates finds the names from the compiled
+   function, where the argument scope is not told apart. */
+static int js_param_binding(JSContext *ctx, JSFunctionDef *fd, JSAtom name,
+                            int var_idx)
+{
+    JSVarDef *vd;
+    int idx;
+
+    if (var_idx < 0 || !fd->has_parameter_expressions ||
+        fd->has_body_eval_call)
+        return var_idx;
+    if (var_idx & ARGUMENT_VAR_OFFSET)
+        vd = &fd->args[var_idx - ARGUMENT_VAR_OFFSET];
+    else
+        vd = &fd->vars[var_idx];
+    if (vd->is_body_var)
+        return var_idx;
+    idx = find_var_in_scope(ctx, fd, name, ARG_SCOPE_INDEX);
+    return idx >= 0 ? idx : var_idx;
+}
+
 static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
                              JSAtom var_name, int scope_level, int op,
                              DynBuf *bc, uint8_t *bc_buf,
@@ -33331,11 +33379,16 @@ static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
         idx = vd->scope_next;
     }
     is_arg_scope = (idx == ARG_SCOPE_END);
+    /* dasher: a name bound by a parameter's pattern has a copy at function
+       level (see js_param_binding) */
+    if (var_idx >= 0 && s->vars[var_idx].scope_level == 0)
+        var_idx = js_param_binding(ctx, s, var_name, var_idx);
     if (var_idx < 0) {
         /* argument scope: variables are not visible but pseudo
            variables are visible */
         if (!is_arg_scope) {
             var_idx = find_var(ctx, s, var_name);
+            var_idx = js_param_binding(ctx, s, var_name, var_idx); /* dasher */
         }
 
         if (var_idx < 0 && is_pseudo_var)
@@ -33489,11 +33542,15 @@ static int resolve_scope_var(JSContext *ctx, JSFunctionDef *s,
             idx = vd->scope_next;
         }
         is_arg_scope = (idx == ARG_SCOPE_END);
-        if (var_idx >= 0)
+        if (var_idx >= 0) {
+            if (fd->vars[var_idx].scope_level == 0) /* dasher */
+                var_idx = js_param_binding(ctx, fd, var_name, var_idx);
             break;
+        }
 
         if (!is_arg_scope) {
             var_idx = find_var(ctx, fd, var_name);
+            var_idx = js_param_binding(ctx, fd, var_name, var_idx); /* dasher */
             if (var_idx >= 0)
                 break;
         }
@@ -34026,6 +34083,17 @@ static void add_eval_variables(JSContext *ctx, JSFunctionDef *s)
             for(i = 0; i < fd->arg_count; i++) {
                 vd = &fd->args[i];
                 if (vd->var_name != JS_ATOM_NULL) {
+                    /* dasher: the variable the body uses for the name */
+                    int j = js_param_binding(ctx, fd, vd->var_name,
+                                             i | ARGUMENT_VAR_OFFSET);
+                    if (!(j & ARGUMENT_VAR_OFFSET)) {
+                        vd = &fd->vars[j];
+                        vd->is_captured = 1;
+                        get_closure_var(ctx, s, fd,
+                                        false, j, vd->var_name, false,
+                                        vd->is_lexical, JS_VAR_NORMAL);
+                        continue;
+                    }
                     get_closure_var(ctx, s, fd,
                                     true, i, vd->var_name, false,
                                     vd->is_lexical, JS_VAR_NORMAL);
@@ -34037,8 +34105,13 @@ static void add_eval_variables(JSContext *ctx, JSFunctionDef *s)
                 if (vd->scope_level == 0 &&
                     vd->var_name != JS_ATOM__ret_ &&
                     vd->var_name != JS_ATOM_NULL) {
+                    /* dasher: as for the arguments */
+                    int j = js_param_binding(ctx, fd, vd->var_name, i);
+                    vd = &fd->vars[j];
+                    if (j != i)
+                        vd->is_captured = 1;
                     get_closure_var(ctx, s, fd,
-                                    false, i, vd->var_name, false,
+                                    false, j, vd->var_name, false,
                                     vd->is_lexical, JS_VAR_NORMAL);
                 }
             }
@@ -36420,12 +36493,16 @@ static int js_lazy_resolve_name(JSContext *ctx, JSFunctionDef *lf,
                     return -1;
             }
         }
-        if (var_idx >= 0)
+        if (var_idx >= 0) {
+            if (fd->vars[var_idx].scope_level == 0)
+                var_idx = js_param_binding(ctx, fd, name, var_idx);
             break;
+        }
         is_arg_scope = (idx == ARG_SCOPE_END);
         step++;
         if (!is_arg_scope) {
             var_idx = find_var(ctx, fd, name);
+            var_idx = js_param_binding(ctx, fd, name, var_idx);
             if (var_idx >= 0)
                 break;
         }
@@ -37406,9 +37483,9 @@ static __exception int js_parse_function_body(JSParseState *s,
             idx = vd->scope_next;
         }
 
-        /* the argument scope has no parent, hence we don't use pop_scope(s) */
-        emit_op(s, OP_leave_scope);
-        emit_u16(s, fd->scope_level);
+        /* the argument scope has no parent, hence we don't use pop_scope(s).
+           dasher: and its variables are not closed here, since the body
+           goes on using them (see js_param_binding) */
 
         /* set the variable scope as the current scope */
         fd->scope_level = 0;
