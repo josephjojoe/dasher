@@ -203,7 +203,7 @@ pub(crate) fn init<'js>(
     let hooks = Hooks::new(ctx, fallbacks, &protos.get("hooks")?, &interfaces)?;
     let (hosts, host_protos) = Hosts::register(ctx, &interfaces)?;
     let members = Members::attach(ctx, &document, hosts, hooks);
-    attrs::install_reflected(ctx, &members, protos.get("reflected")?)?;
+    attrs::adopt_reflected(&members, &dom.reflected);
     let data = DomData {
         exception,
         members,

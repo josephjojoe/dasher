@@ -12,13 +12,14 @@
 //!
 //! `reflect()` in `dom.js` describes each reflected IDL attribute by a type
 //! and an attribute name. It hands each description to `N.reflect`
-//! ([`install_reflect`]), which makes the getter and setter native C
-//! functions: their magic number is the description's index in the
-//! per-context table `Members::reflected`, so one C function,
-//! [`call_reflected`], serves them all. A description that needs JS (a
-//! fallback computed by a function) keeps its JS accessor.
+//! ([`reflect`]), which makes the getter and setter native C functions:
+//! their magic number is the description's index in the per-context
+//! table `Members::reflected`, so one C function, [`call_reflected`],
+//! serves them all. A description that needs JS (a fallback computed by
+//! a function) gets a JS accessor from `reflect()` instead.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::ffi::{CString, c_int};
 
 use dasher_dom::{Document, Name, NodeId};
@@ -299,48 +300,63 @@ pub(crate) struct Reflected {
     how: Reflect,
 }
 
-/// Makes the IDL attributes `reflect()` in `dom.js` described native:
-/// `list` holds `[proto, prop, type, attr, extra]` for each, and `proto[prop]`
-/// becomes a native accessor reflecting `attr` as `type` says, in place of
-/// the JS one `reflect()` defined. Descriptions that need JS (a fallback
-/// computed by a function) keep their JS accessor. Called once `members`
-/// is attached to the context.
-pub(super) fn install_reflected<'js>(
+/// `N.reflect(proto, prop, type, attr, extra)`: makes `proto[prop]` a
+/// native accessor reflecting `attr` as `type` says, enumerable and
+/// configurable, and returns `true`. Returns `false`, having defined
+/// nothing, for a description that needs JS (a fallback computed by a
+/// function), which `reflect()` then gives a JS accessor.
+///
+/// This runs while `dom.js` is still defining its interfaces, before
+/// `N.init` attaches the [`Members`] that hold the table, so the
+/// descriptions wait in `pending` in the order of their indexes, and
+/// [`adopt_reflected`] moves them over. No accessor is called before
+/// that: there is no node to call one on.
+pub(super) fn reflect<'js>(
     ctx: &Ctx<'js>,
-    members: &Members,
-    list: rquickjs::Array<'js>,
-) -> Result<()> {
-    let object: Object<'js> = ctx.globals().get("Object")?;
-    let define: rquickjs::Function<'js> = object.get("defineProperty")?;
-    let describe: rquickjs::Function<'js> = object.get("getOwnPropertyDescriptor")?;
-    for entry in list.iter::<rquickjs::Array<'js>>() {
-        let entry = entry?;
-        let proto: Object<'js> = entry.get(0)?;
-        let prop: String = entry.get(1)?;
-        // `dom.js` may have redefined the property since (`draggable`).
-        let get: Value<'js> = entry.get(5)?;
-        let current: Option<Object<'js>> = describe.call((proto.clone(), prop.as_str()))?;
-        let current = current.map(|d| d.get::<_, Value<'js>>("get")).transpose()?;
-        if current.as_ref() != Some(&get) {
-            continue;
-        }
-        let kind: String = entry.get(2)?;
-        let attr: String = entry.get(3)?;
-        let extra: Value<'js> = entry.get(4)?;
-        let Some(how) = reflect_kind(&kind, &extra)? else {
-            continue;
-        };
-        let index = members.add_reflected(Reflected { attr, how });
-        let getter = reflect_function(ctx, &format!("get {prop}"), 0, index * 2)?;
-        let setter = reflect_function(ctx, &format!("set {prop}"), 1, index * 2 + 1)?;
-        let desc = Object::new(ctx.clone())?;
-        desc.set("get", getter)?;
-        desc.set("set", setter)?;
-        desc.set("enumerable", true)?;
-        desc.set("configurable", true)?;
-        define.call::<_, Value<'js>>((proto, prop, desc))?;
+    pending: &RefCell<Vec<Reflected>>,
+    proto: &Object<'js>,
+    prop: &str,
+    kind: &str,
+    attr: String,
+    extra: &Value<'js>,
+) -> Result<bool> {
+    let Some(how) = reflect_kind(kind, extra)? else {
+        return Ok(false);
+    };
+    let index = pending.borrow().len();
+    let getter = reflect_function(ctx, &format!("get {prop}"), 0, index * 2)?;
+    let setter = reflect_function(ctx, &format!("set {prop}"), 1, index * 2 + 1)?;
+    let raw = ctx.as_raw().as_ptr();
+    // SAFETY: `raw` is the live context `ctx` wraps and the values are
+    // alive in it. The atom is ours until freed below; QuickJS takes the
+    // references made of the getter and the setter.
+    let defined = unsafe {
+        let name = qjs::JS_NewAtomLen(raw, prop.as_ptr().cast(), prop.len() as qjs::size_t);
+        let defined = qjs::JS_DefinePropertyGetSet(
+            raw,
+            proto.as_raw(),
+            name,
+            qjs::JS_DupValue(raw, getter.as_raw()),
+            qjs::JS_DupValue(raw, setter.as_raw()),
+            (qjs::JS_PROP_CONFIGURABLE | qjs::JS_PROP_ENUMERABLE | qjs::JS_PROP_THROW) as c_int,
+        );
+        qjs::JS_FreeAtom(raw, name);
+        defined
+    };
+    if defined < 0 {
+        return Err(rquickjs::Error::Exception);
     }
-    Ok(())
+    pending.borrow_mut().push(Reflected { attr, how });
+    Ok(true)
+}
+
+/// Moves the descriptions [`reflect`] collected into `members`' table,
+/// where their accessors look them up. Called once `members` is attached
+/// to the context.
+pub(super) fn adopt_reflected(members: &Members, pending: &RefCell<Vec<Reflected>>) {
+    for reflected in pending.take() {
+        members.add_reflected(reflected);
+    }
 }
 
 /// What `reflect()`'s `type` and `extra` mean, or `None` if it needs JS.

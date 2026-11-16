@@ -1570,9 +1570,6 @@
     return internals.urlHref(url, internals.baseURL()) ?? url;
   }
 
-  // The accessors reflect() defined, for N.init.
-  const reflected = [];
-
   // spec: { prop: type } or { prop: [type, attr, extra] }. Types: 'string',
   // 'url', 'bool', 'long', 'ulong', 'number', 'enum' (extra: [values,
   // missing, invalid]), 'nullable' (string or null).
@@ -1581,6 +1578,10 @@
       let entry = spec[prop];
       if (typeof entry === 'string') entry = [entry];
       const [type, attrName = prop.toLowerCase(), extra] = entry;
+      // Native, unless the description needs JS (see "Reflected
+      // attributes" in dom/attrs.rs): the accessors below are what the
+      // native ones do.
+      if (N.reflect(Ctor.prototype, prop, type, attrName, extra)) continue;
       let get;
       let set = function (value) {
         N.setAttr(this, attrName, str(value));
@@ -1655,9 +1656,6 @@
           throw new Error('bad reflect type ' + type);
       }
       defineProperty(Ctor.prototype, prop, { get, set, enumerable: true, configurable: true });
-      // N.init makes the accessor native if it is still this one then (see
-      // "Reflected attributes" in dom/attrs.rs).
-      reflected.push([Ctor.prototype, prop, type, attrName, extra, get]);
     }
   }
 
@@ -2452,13 +2450,15 @@
     checkValidity() { return true; },
     reportValidity() { return true; },
   });
+  const ENCTYPE = ['enum', 'enctype', [['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain'], 'application/x-www-form-urlencoded', 'application/x-www-form-urlencoded']];
   reflect(I.HTMLFormElement, {
     acceptCharset: ['string', 'accept-charset'], autocomplete: ['enum', 'autocomplete', [['on', 'off'], 'on', 'on']],
-    enctype: ['enum', 'enctype', [['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain'], 'application/x-www-form-urlencoded', 'application/x-www-form-urlencoded']],
+    enctype: ENCTYPE,
     method: ['enum', 'method', [['get', 'post', 'dialog'], 'get', 'get']], name: 'string',
     noValidate: ['bool', 'novalidate'], target: 'string', rel: 'string',
   });
-  defineProperty(I.HTMLFormElement.prototype, 'encoding', Object.getOwnPropertyDescriptor(I.HTMLFormElement.prototype, 'enctype'));
+  // The same attribute under its older name.
+  reflect(I.HTMLFormElement, { encoding: ENCTYPE });
 
   // Whether a control is disabled: by its own attribute, or by a disabled
   // fieldset around it that does not hold it in its first legend.
@@ -4711,7 +4711,6 @@
       attrAt,
       attrNamed,
     },
-    reflected,
   }, (name, message) => domException(name, message));
   documentNode = N.document();
   getComputedStyle = nativeFunctions.getComputedStyle;

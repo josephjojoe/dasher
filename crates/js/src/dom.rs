@@ -283,6 +283,8 @@ pub(crate) struct DomState {
     /// Nodes the host holds (see [`JsRuntime::hold_node`]), with how many
     /// holds each has. A tree with a held node is not released.
     held: RefCell<HashMap<NodeId, u32>>,
+    /// Reflected attributes described before `N.init` (see `attrs::reflect`).
+    reflected: RefCell<Vec<attrs::Reflected>>,
     /// The nodes held for the parser (see [`JsRuntime::with_parser`]).
     parser_held: RefCell<Vec<NodeId>>,
     /// Bumped by [`JsRuntime::set_document`], so holds taken on the old
@@ -340,6 +342,7 @@ impl DomState {
             activity: Cell::default(),
             clock,
             held: RefCell::default(),
+            reflected: RefCell::default(),
             parser_held: RefCell::default(),
             generation: Cell::new(0),
             rt: Cell::new(std::ptr::null_mut()),

@@ -1353,6 +1353,20 @@ fn install_attributes<'js>(obj: &Object<'js>, dom: &Rc<DomState>) -> Result<()> 
     let d = Rc::clone(dom);
     def(
         obj,
+        "reflect",
+        move |ctx: Ctx<'js>,
+              proto: Object<'js>,
+              prop: String,
+              kind: String,
+              attr: String,
+              extra: Value<'js>|
+              -> Result<bool> {
+            super::attrs::reflect(&ctx, &d.reflected, &proto, &prop, &kind, attr, &extra)
+        },
+    )?;
+    let d = Rc::clone(dom);
+    def(
+        obj,
         "elementName",
         move |ctx: Ctx<'js>, n: Node<'js>| -> Result<Vec<Nullable<String>>> {
             // [localName, namespaceURI, prefix]
