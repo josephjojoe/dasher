@@ -12,7 +12,9 @@ repository = "https://github.com/josephjojoe/dasher"
 readme = "README.md"
 keywords = ["scraping", "headless", "browser", "javascript", "serverless"]
 categories = ["web-programming", "command-line-utilities"]
-publish = true
+# Not for crates.io: a published crate cannot carry the [patch] below, and
+# without it dasher-js does not link. The name `dasher` there is taken, too.
+publish = false
 
 [workspace.dependencies]
 # Internal crates. Depend on these with `dasher-foo.workspace = true`. The
