@@ -151,13 +151,13 @@ with the page error behind it where there was one (see
   then React's hydration error. Lightpanda kept as little of
   disneyplus.com, and of word.cloud.microsoft.
 - instagram.com: the server sends its error page to a navigation
-  without `Sec-Fetch-*` headers, which dasher 0.1.0 did not send. It
-  sends them since, and gets the page Chromium got.
+  without `Sec-Fetch-*` headers, which dasher did not send in this run.
+  It sends them now, and gets the page Chromium got.
 - flashscore.ro: the consent banner, 17,400 characters of Chromium's
   text, was missing. Its script (OneTrust) took the result of
   `querySelectorAll` for an array, because `Array.isArray` said so in
-  dasher 0.1.0, and failed in a promise. Fixed since: a load from a home
-  connection is 0.996 similar to Chrome's.
+  this run's build, and failed in a promise. Fixed since: a load from a
+  home connection is 0.996 similar to Chrome's.
 - digikala.com: the page is built by scripts after load, so under the
   default visibility policy its shelves are below the fold and never
   load. `--visibility all` or `--scroll` returns them.
@@ -187,10 +187,8 @@ These were worked out after the run, from a home connection, on
 ### Starting up
 
 Process start to exit on a page that costs nothing (one inline script,
-served from the sandbox itself), ten sandboxes, ten runs each, medians.
-This part was run again on 2026-11-16, with dasher built from `main`
-after 0.1.0 and the same Lightpanda and Chromium
-([`results/2026-11-16/startup.txt`](results/2026-11-16/startup.txt)):
+served from the sandbox itself), ten sandboxes, ten runs each, medians,
+measured on 2026-11-16 ([`results/2026-11-16/startup.txt`](results/2026-11-16/startup.txt)):
 
 | | dasher | Lightpanda | Chromium |
 | --- | ---: | ---: | ---: |
@@ -202,14 +200,6 @@ after 0.1.0 and the same Lightpanda and Chromium
 Wall times are in steps of 10 ms, the runner's sampling period.
 Waiting for network idle on top of `load` cost dasher and Lightpanda
 nothing and Chromium 500 ms.
-
-dasher 0.1.0 took 60 ms of CPU and 67 ms of wall time on the same page
-([`results/2026-11-15/startup.txt`](results/2026-11-15/startup.txt)):
-it compiled its own JavaScript glue in every process, which is now done
-when dasher is built. By core type the two runs agree on Lightpanda
-(40 and 39 ms on Neoverse N1, 31 and 30 ms on V1), and dasher went from
-64 to 11 ms on N1 and from 50 to 9 ms on V1. Every figure outside this
-section is 0.1.0's and has not been redone.
 
 ### Cost
 

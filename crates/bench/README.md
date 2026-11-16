@@ -35,19 +35,19 @@ Apple M2 Pro):
 
 | Page | Time to settle | Peak RSS | JS heap | DOM nodes |
 | --- | ---: | ---: | ---: | ---: |
-| **static**: 11 KB article, no scripts | 14 ms | 7.4 MiB | 1.9 MiB | 289 |
-| **large**: 1.6 MB listing, 5,000-row table, no scripts | 77 ms | 17.8 MiB | 1.9 MiB | 75,194 |
-| **spa**: React 18 shop, 100 products and 10 review lists from a JSON API | 75 ms | 11.4 MiB | 4.7 MiB | 2,291 |
-| **feed**: infinite scroll, 20 pages of 20 posts behind an `IntersectionObserver` | 125 ms | 9.3 MiB | 2.1 MiB | 8,829 |
+| **static**: 11 KB article, no scripts | 10 ms | 6.8 MiB | 1.8 MiB | 289 |
+| **large**: 1.6 MB listing, 5,000-row table, no scripts | 63 ms | 17.2 MiB | 1.8 MiB | 75,194 |
+| **spa**: React 18 shop, 100 products and 10 review lists from a JSON API | 62 ms | 11.0 MiB | 4.7 MiB | 2,291 |
+| **feed**: infinite scroll, 20 pages of 20 posts behind an `IntersectionObserver` | 114 ms | 8.8 MiB | 2.1 MiB | 8,829 |
 
 | Measure | Value |
 | --- | ---: |
-| Idle RSS (ready, no page) | 4.1 MiB |
-| 100 jobs in a row: highest RSS between jobs, first half → second half | 6.9 → 6.9 MiB |
-| 100 jobs in a row: peak RSS | 19.1 MiB |
-| Process start (`dasher --version`) | 2.6 ms |
-| Process start to static page loaded | 52 ms |
-| Binary size | 6.20 MiB |
+| Idle RSS (ready, no page) | 2.5 MiB |
+| 100 jobs in a row: highest RSS between jobs, first half → second half | 6.5 → 6.3 MiB |
+| 100 jobs in a row: peak RSS | 18.5 MiB |
+| Process start (`dasher --version`) | 0.3 ms |
+| Process start to static page loaded | 11 ms |
+| Binary size | 6.01 MiB |
 
 Memory on macOS reads differently (the allocator and page size differ),
 so footprint is always measured on Linux.
