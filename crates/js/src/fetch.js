@@ -468,7 +468,11 @@
       if (entries === null) {
         throw new TypeError("Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.");
       }
-      for (const [name, value] of entries) this.#entries.push([usv(name), entryValue(value)]);
+      for (const [name, value] of entries) {
+        // A file input's entry is an empty file: none can be chosen.
+        const file = value === null ? new File([], '', { type: 'application/octet-stream' }) : entryValue(value);
+        this.#entries.push([usv(name), file]);
+      }
     }
     static {
       formEntries = (formData) => formData.#entries;

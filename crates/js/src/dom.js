@@ -2460,6 +2460,69 @@
   });
   defineProperty(I.HTMLFormElement.prototype, 'encoding', Object.getOwnPropertyDescriptor(I.HTMLFormElement.prototype, 'enctype'));
 
+  // Whether a control is disabled: by its own attribute, or by a disabled
+  // fieldset around it that does not hold it in its first legend.
+  function controlDisabled(el) {
+    if (N.hasAttr(el, 'disabled')) return true;
+    for (let fs = N.closest(el, 'fieldset[disabled]'); fs !== null;) {
+      const legend = N.queryAll(fs, 'legend').find((l) => N.nav(l, 0) === fs);
+      if (legend === undefined || !N.contains(legend, el)) return true;
+      const parent = N.nav(fs, 0);
+      fs = parent !== null && N.nodeType(parent) === 1 ? N.closest(parent, 'fieldset[disabled]') : null;
+    }
+    return false;
+  }
+
+  // The entry list `new FormData(form, submitter)` starts with, as
+  // [name, value] pairs; a null value is the empty file a file input
+  // submits (no file can be chosen). Null for what is not a form.
+  // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#constructing-form-data-set
+  internals.formDataEntries = (form, submitter) => {
+    if (!(form instanceof I.HTMLFormElement)) return null;
+    if (submitter !== undefined && submitter !== null) {
+      const name = submitter instanceof HTMLElement ? N.elementName(submitter)[0] : '';
+      const type = name === 'input' ? inputType(submitter) : name === 'button' ? submitter.type : '';
+      if (type !== 'submit' && type !== 'image') {
+        throw new TypeError("Failed to construct 'FormData': The specified element is not a submit button.");
+      }
+      if (formOwner(submitter) !== form) {
+        throw domException('NotFoundError', "Failed to construct 'FormData': The specified element is not owned by this form element.");
+      }
+    } else {
+      submitter = null;
+    }
+    const entries = [];
+    for (const el of N.queryAll(N.rootNode(form), 'button, input, select, textarea')) {
+      if (formOwner(el) !== form || controlDisabled(el) || N.closest(el, 'datalist') !== null) continue;
+      const tag = N.elementName(el)[0];
+      const type = tag === 'input' ? inputType(el) : tag;
+      if ((tag === 'button' || ['submit', 'image', 'reset', 'button'].includes(type)) && el !== submitter) continue;
+      if ((type === 'checkbox' || type === 'radio') && !el.checked) continue;
+      const name = N.getAttr(el, 'name');
+      if (type === 'image') {
+        // Where the image was clicked: nowhere.
+        const prefix = name === null || name === '' ? '' : `${name}.`;
+        entries.push([`${prefix}x`, '0'], [`${prefix}y`, '0']);
+        continue;
+      }
+      if (name === null || name === '') continue;
+      if (tag === 'select') {
+        for (const option of selectedOptions(el)) {
+          const group = N.nav(option, 0);
+          if (N.hasAttr(option, 'disabled') || (group !== el && N.hasAttr(group, 'disabled'))) continue;
+          entries.push([name, option.value]);
+        }
+      } else if (type === 'file') {
+        entries.push([name, null]);
+      } else if (type === 'hidden' && name === '_charset_' && !N.hasAttr(el, 'value')) {
+        entries.push([name, 'UTF-8']);
+      } else {
+        entries.push([name, el.value]);
+      }
+    }
+    return entries;
+  };
+
   define(I.HTMLLabelElement, {
     get control() {
       const id = N.getAttr(this, 'for');

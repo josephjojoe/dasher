@@ -1441,3 +1441,41 @@ fn media_track_lists_are_empty_event_targets() {
         json(r#"[true,0,0,"[object TextTrackList]",0,null,true,1,0]"#)
     );
 }
+
+#[test]
+fn form_data_is_built_from_a_form() {
+    let js = page(
+        "<form id=f><input name=t value=one><input name=off value=x disabled>\
+         <input type=checkbox name=c checked><input type=checkbox name=c2>\
+         <input type=checkbox name=c3 value=yes checked>\
+         <input type=radio name=r value=a><input type=radio name=r value=b checked>\
+         <select name=s><option value=A>a<option value=B selected>b</select>\
+         <select name=m multiple><option selected>x<option>y<option selected disabled>z<option selected>w</select>\
+         <textarea name=ta>hello</textarea><input type=hidden name=_charset_><input type=file name=up>\
+         <fieldset disabled><legend><input name=inlegend value=1></legend><input name=infieldset value=2></fieldset>\
+         <input value=nameless><button name=go value=pressed>go</button><input type=submit name=other value=o>\
+         <input type=image name=img></form><input name=outside form=f value=far><input name=stranger value=no>",
+    );
+    let out = eval(
+        &js,
+        r#"
+        const f = document.getElementById('f');
+        const show = (fd) => [...fd].map(([k, v]) => k + '=' + (v instanceof File ? `file(${v.name},${v.size},${v.type})` : v)).join('&');
+        f.elements[0].value = 'typed';
+        const r = [show(new FormData(f)), show(new FormData(f, f.querySelector('button'))),
+          show(new FormData(f, f.querySelector('[type=image]'))).split('&').slice(-3).join('&'),
+          new URLSearchParams(new FormData(document.createElement('form'))).toString()];
+        for (const bad of [document.body, {}, null, 'f']) {
+          try { new FormData(bad); r.push('ok'); } catch (e) { r.push(e.name); }
+        }
+        for (const bad of [f.elements[0], document.createElement('button')]) {
+          try { new FormData(f, bad); r.push('ok'); } catch (e) { r.push(e.name); }
+        }
+        r
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"["t=typed&c=on&c3=yes&r=b&s=B&m=x&m=w&ta=hello&_charset_=UTF-8&up=file(,0,application/octet-stream)&inlegend=1&outside=far","t=typed&c=on&c3=yes&r=b&s=B&m=x&m=w&ta=hello&_charset_=UTF-8&up=file(,0,application/octet-stream)&inlegend=1&go=pressed&outside=far","img.x=0&img.y=0&outside=far","","TypeError","TypeError","TypeError","TypeError","TypeError","NotFoundError"]"#
+    );
+}
