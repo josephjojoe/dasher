@@ -104,5 +104,6 @@
   t('typeof and call through eval after it declares the name', () => { function f(a = () => 1, g = () => a()) { eval('var a = () => 2'); return [a(), eval('a()'), g()]; } return f(); });
   t('eval declares the name the closure assigns', () => { function f(a = 1, set = (v) => { a = v; }, g = () => a) { eval('var a = 5'); set(9); return [a, g()]; } return f(); });
   t('simple parameters, eval declares the name', () => { function f(a) { const g = () => a; eval('var a = 5'); return [a, g()]; } return f(1); });
+  t('eval declares the name twice', () => { function f(a = 1, g = () => a) { eval('var a = 5'); eval('var a; a += 1'); return [a, g()]; } return f(); });
   return out;
 })()

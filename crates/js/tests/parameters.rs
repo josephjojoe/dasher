@@ -22,7 +22,7 @@ fn runtime() -> JsRuntime {
 /// `arguments`, every kind of function, `with`, and `eval` in a default
 /// value, in the body and in a function inside it, reading, assigning and
 /// declaring the names. The expected values are Node 22's; the engine gave
-/// 39 of the 94 before the change.
+/// 39 of the 95 before the change.
 #[test]
 fn a_body_and_the_closures_in_its_defaults_share_the_parameters() {
     let js = runtime();

@@ -34600,8 +34600,35 @@ static void instantiate_hoisted_definitions(JSContext *ctx, JSFunctionDef *s, Dy
                 dbuf_putc(bc, OP_put_var_ref);
                 dbuf_put_u16(bc, idx);
             } else if (has_closure == 1) {
+                int label_has = -1;
+                if (hf->cpool_idx < 0) {
+                    /* dasher: a 'var' leaves alone a variable that an
+                       earlier eval declared: upstream set it to
+                       undefined again. Here: obj undefined */
+                    label_has = new_label_fd(s);
+                    if (label_has < 0) {
+                        dbuf_set_error(bc);
+                        return;
+                    }
+                    dbuf_putc(bc, OP_drop);
+                    dbuf_putc(bc, OP_push_atom_value);
+                    dbuf_put_u32(bc, JS_DupAtom(ctx, hf->var_name));
+                    dbuf_putc(bc, OP_get_var_ref);
+                    dbuf_put_u16(bc, idx);
+                    dbuf_putc(bc, OP_in);
+                    dbuf_putc(bc, OP_if_true);
+                    dbuf_put_u32(bc, label_has);
+                    update_label(s, label_has, 1);
+                    s->jump_size++;
+                    dbuf_putc(bc, OP_undefined);
+                }
                 dbuf_putc(bc, OP_define_field);
                 dbuf_put_u32(bc, JS_DupAtom(ctx, hf->var_name));
+                if (label_has >= 0) {
+                    dbuf_putc(bc, OP_label);
+                    dbuf_put_u32(bc, label_has);
+                    s->label_slots[label_has].pos2 = bc->size;
+                }
                 dbuf_putc(bc, OP_drop);
             } else {
                 /* XXX: Check if variable is writable and enumerable */

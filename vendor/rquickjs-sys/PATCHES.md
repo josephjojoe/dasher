@@ -186,6 +186,11 @@ rquickjs-sys = { git = "https://github.com/josephjojoe/dasher" }
   default values: the object holding those variables is looked in
   before the parameter. Both upstreams still have the two copies.
   Test: `crates/js/tests/parameters.rs`, against Node's answers.
+- **`var` in an `eval` leaves an existing variable alone.** Inside a
+  function, upstream set a variable to `undefined` each time code run
+  by a direct `eval` declared it, so a second `eval('var a')` lost what
+  the first had stored. Test: `crates/js/tests/eval_var.rs`, against
+  Node's answers.
 
 ## Strings, JSON, arrays
 
