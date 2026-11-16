@@ -9,7 +9,7 @@ use std::time::Duration;
 use dasher_net::header::{self, HeaderMap, HeaderValue};
 use dasher_net::{
     BlockReason, Client, CookieJar, Credentials, ErrorKind, Method, RedirectMode, Request,
-    RequestPolicy, ResourceType, StatusCode, Url, Version,
+    RequestMode, RequestPolicy, ResourceType, StatusCode, Url, Version,
 };
 use dasher_test_server::{FixtureResponse, FixtureServer};
 
@@ -420,6 +420,158 @@ async fn sends_referer_and_basic_auth() {
     with_auth.set_password(Some("pa ss")).unwrap();
     let auth = Request::get(with_auth, ResourceType::Fetch);
     assert_eq!(get(auth).await, "Basic dXNlcjpwYSBzcw==");
+}
+
+/// The four fetch metadata headers a request arrived with, `-` for one
+/// that is absent.
+fn fetch_metadata(request: &dasher_test_server::RecordedRequest) -> String {
+    [
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+        "sec-fetch-user",
+    ]
+    .map(|name| request.header(name).unwrap_or("-"))
+    .join(" ")
+}
+
+#[tokio::test]
+async fn sends_fetch_metadata() {
+    let server = echo_server();
+    let session = client().session();
+    let sent = |request: Request| {
+        let session = session.clone();
+        let server = &server;
+        async move {
+            server.clear_requests();
+            session.send(request).await.unwrap();
+            fetch_metadata(&server.requests()[0])
+        }
+    };
+    let page = url(&server.url("/page"));
+    let target = || url(&server.url("/"));
+
+    // A navigation nothing asked for is the user's.
+    assert_eq!(
+        sent(Request::get(target(), ResourceType::Document)).await,
+        "document navigate none ?1"
+    );
+    // One from a page is not.
+    assert_eq!(
+        sent(Request::get(target(), ResourceType::Document).with_referrer(page.clone())).await,
+        "document navigate same-origin -"
+    );
+    assert_eq!(
+        sent(Request::get(target(), ResourceType::Fetch).with_referrer(page.clone())).await,
+        "empty cors same-origin -"
+    );
+    assert_eq!(
+        sent(Request::get(target(), ResourceType::Xhr).with_referrer(page.clone())).await,
+        "empty cors same-origin -"
+    );
+    assert_eq!(
+        sent(Request::get(target(), ResourceType::Script).with_referrer(page.clone())).await,
+        "script no-cors same-origin -"
+    );
+    assert_eq!(
+        sent(
+            Request::get(target(), ResourceType::Script)
+                .with_referrer(page.clone())
+                .with_mode(RequestMode::Cors)
+        )
+        .await,
+        "script cors same-origin -"
+    );
+    assert_eq!(
+        sent(
+            Request::get(target(), ResourceType::Fetch)
+                .with_referrer(page.clone())
+                .with_mode(RequestMode::SameOrigin)
+        )
+        .await,
+        "empty same-origin same-origin -"
+    );
+    // Another port is another origin of the same site.
+    let other_port = url(&format!("http://127.0.0.1:{}/", server.addr().port() ^ 1));
+    assert_eq!(
+        sent(Request::get(target(), ResourceType::Fetch).with_referrer(other_port)).await,
+        "empty cors same-site -"
+    );
+    assert_eq!(
+        sent(
+            Request::get(target(), ResourceType::Fetch)
+                .with_referrer(url("https://other.example/page"))
+        )
+        .await,
+        "empty cors cross-site -"
+    );
+    // The initiator decides the site, whatever the referrer says.
+    assert_eq!(
+        sent(
+            Request::get(target(), ResourceType::Fetch)
+                .with_referrer(url("https://other.example/page"))
+                .with_initiator(page.origin())
+        )
+        .await,
+        "empty cors same-origin -"
+    );
+    // A request's own headers win.
+    assert_eq!(
+        sent(
+            Request::get(target(), ResourceType::Fetch)
+                .with_referrer(page)
+                .with_header(
+                    header::HeaderName::from_static("sec-fetch-site"),
+                    HeaderValue::from_static("cross-site"),
+                )
+        )
+        .await,
+        "empty cors cross-site -"
+    );
+}
+
+#[tokio::test]
+async fn fetch_metadata_follows_redirects() {
+    let far = echo_server();
+    let landing = far.url("/");
+    let near = FixtureServer::builder()
+        .route("/away", move |_| FixtureResponse::redirect(302, &landing))
+        .route("/stay", |_| FixtureResponse::redirect(302, "/here"))
+        .route("/here", |_| FixtureResponse::text("here"))
+        .start()
+        .unwrap();
+    let session = client().session();
+    let page = url(&near.url("/page"));
+
+    // A redirect to another origin of the site makes the request same-site
+    // from there on.
+    let request = Request::get(url(&near.url("/away")), ResourceType::Fetch).with_referrer(page);
+    session.send(request.clone()).await.unwrap();
+    assert_eq!(
+        fetch_metadata(&near.requests()[0]),
+        "empty cors same-origin -"
+    );
+    assert_eq!(fetch_metadata(&far.requests()[0]), "empty cors same-site -");
+
+    near.clear_requests();
+    let mut request = request;
+    request.url = url(&near.url("/stay"));
+    session.send(request).await.unwrap();
+    assert_eq!(
+        fetch_metadata(&near.requests()[1]),
+        "empty cors same-origin -"
+    );
+
+    // The user's navigation stays the user's through redirects.
+    far.clear_requests();
+    session
+        .get(url(&near.url("/away")), ResourceType::Document)
+        .await
+        .unwrap();
+    assert_eq!(
+        fetch_metadata(&far.requests()[0]),
+        "document navigate none ?1"
+    );
 }
 
 #[tokio::test]

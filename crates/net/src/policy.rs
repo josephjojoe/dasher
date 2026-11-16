@@ -69,6 +69,20 @@ impl ResourceType {
         }
     }
 
+    /// The request destination the Fetch standard gives this type, as
+    /// `Sec-Fetch-Dest` reports it.
+    pub fn destination(self) -> &'static str {
+        match self {
+            Self::Document => "document",
+            Self::Script => "script",
+            Self::Fetch | Self::Xhr => "empty",
+            Self::Image => "image",
+            Self::Stylesheet => "style",
+            Self::Font => "font",
+            Self::Media => "video",
+        }
+    }
+
     /// The default `Accept` header a browser sends for this type of request.
     pub fn accept(self) -> &'static str {
         match self {

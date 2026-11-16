@@ -30,7 +30,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use dasher_dom::{Name, NodeId};
-use dasher_net::{Credentials, Request, ResourceType, Session};
+use dasher_net::{Credentials, Request, RequestMode, ResourceType, Session};
 use rquickjs::function::{Opt, This};
 use rquickjs::{
     Coerced, Ctx, Exception, FromJs, Function, JsLifetime, Object, Promise, Value, qjs,
@@ -295,8 +295,10 @@ fn request(shared: &Shared, url: Url, credentials: ModuleCredentials) -> Request
         ModuleCredentials::SameOrigin => Credentials::SameOrigin(document.origin()),
         ModuleCredentials::Include => Credentials::Include,
     };
+    // Module scripts are always fetched in CORS mode.
     Request::get(url, ResourceType::Script)
         .with_referrer(document)
+        .with_mode(RequestMode::Cors)
         .with_credentials(credentials)
 }
 

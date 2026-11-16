@@ -24,6 +24,7 @@ use crate::connector::{Connector, Proxy};
 use crate::cookies::CookieJar;
 use crate::decode::ACCEPT_ENCODING as ACCEPT_ENCODING_VALUE;
 use crate::error::{Error, ErrorKind, Result};
+use crate::fetch_metadata::{self, Relation, RequestMode};
 use crate::guard::{self, GuardedHttp};
 use crate::policy::{BlockReason, RequestInfo, RequestPolicy, ResourceType};
 #[cfg(feature = "replay")]
@@ -416,6 +417,13 @@ pub struct Request {
     /// header under the `strict-origin-when-cross-origin` policy (unless
     /// `headers` has one).
     pub referrer: Option<Url>,
+    /// The request's mode, which `Sec-Fetch-Mode` reports. `None` for what
+    /// `resource_type` implies ([`RequestMode::for_type`]).
+    pub mode: Option<RequestMode>,
+    /// The origin of the page making the request, which `Sec-Fetch-Site`
+    /// is relative to. `None` for `referrer`'s; with neither, the request
+    /// counts as the user's own, as a typed URL is.
+    pub initiator: Option<Origin>,
     /// Whether cookies are sent and stored.
     pub credentials: Credentials,
     /// What to do with redirects.
@@ -437,6 +445,8 @@ impl Request {
             headers: HeaderMap::new(),
             body: Bytes::new(),
             referrer: None,
+            mode: None,
+            initiator: None,
             credentials: Credentials::Include,
             redirect: RedirectMode::Follow,
             timeout: None,
@@ -464,6 +474,18 @@ impl Request {
     /// Sets the referrer.
     pub fn with_referrer(mut self, referrer: Url) -> Self {
         self.referrer = Some(referrer);
+        self
+    }
+
+    /// Sets the request mode.
+    pub fn with_mode(mut self, mode: RequestMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Sets the origin making the request.
+    pub fn with_initiator(mut self, initiator: Origin) -> Self {
+        self.initiator = Some(initiator);
         self
     }
 
@@ -644,10 +666,15 @@ impl Session {
             mut headers,
             mut body,
             referrer,
+            mode,
+            initiator,
             credentials,
             redirect,
             ..
         } = request;
+        let mode = mode.unwrap_or_else(|| RequestMode::for_type(resource_type));
+        let initiator = initiator.or_else(|| referrer.as_ref().map(Url::origin));
+        let mut site = Relation::of(initiator.as_ref(), &url);
         let mut redirects = 0;
         loop {
             let use_cookies = credentials.allowed_for(&url);
@@ -655,6 +682,7 @@ impl Session {
                 &method,
                 &url,
                 resource_type,
+                (mode, site),
                 &headers,
                 &body,
                 referrer.as_ref(),
@@ -734,6 +762,7 @@ impl Session {
                     headers.remove(AUTHORIZATION);
                     headers.remove(COOKIE);
                 }
+                site = site.after_redirect(initiator.as_ref(), &next);
                 url = next;
                 continue;
             }
@@ -782,6 +811,7 @@ impl Session {
         method: &Method,
         url: &Url,
         resource_type: ResourceType,
+        (mode, site): (RequestMode, Relation),
         headers: &HeaderMap,
         body: &Bytes,
         referrer: Option<&Url>,
@@ -793,13 +823,14 @@ impl Session {
                 .with_source(e.to_string())
         };
 
-        let mut all = HeaderMap::with_capacity(8 + self.default_headers.len() + headers.len());
+        let mut all = HeaderMap::with_capacity(12 + self.default_headers.len() + headers.len());
         all.insert(USER_AGENT, self.user_agent.clone());
         all.insert(ACCEPT, HeaderValue::from_static(resource_type.accept()));
         all.insert(
             ACCEPT_ENCODING,
             HeaderValue::from_static(ACCEPT_ENCODING_VALUE),
         );
+        fetch_metadata::insert(&mut all, url, resource_type, mode, site);
         override_headers(&mut all, &self.default_headers);
         override_headers(&mut all, headers);
 

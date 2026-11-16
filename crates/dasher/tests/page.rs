@@ -707,3 +707,118 @@ async fn blocking_requests_do_not_wait_on_pooled_connections() {
     );
     assert!(started.elapsed() < Duration::from_secs(5));
 }
+
+/// A server may read the fetch metadata headers to decide what to serve, as
+/// instagram.com does: its error page to a navigation without them.
+#[tokio::test]
+async fn requests_carry_fetch_metadata() {
+    let other = FixtureServer::builder()
+        .route("/data", |_| {
+            FixtureResponse::json("1").with_header("Access-Control-Allow-Origin", "*")
+        })
+        .start()
+        .unwrap();
+    let other_url = other.url("/data");
+    let server = FixtureServer::builder()
+        .route("/", move |req| {
+            if req.header("sec-fetch-mode") != Some("navigate")
+                || req.header("sec-fetch-dest") != Some("document")
+            {
+                return FixtureResponse::html("<title>Page isn't available</title>");
+            }
+            FixtureResponse::html(format!(
+                r#"<title>Home</title>
+                <script src="/classic.js"></script>
+                <script src="/anonymous.js" crossorigin></script>
+                <script type="module" src="/module.js"></script>
+                <script>
+                  const xhr = new XMLHttpRequest();
+                  xhr.open('GET', '/xhr');
+                  xhr.send();
+                  Promise.all([
+                    fetch('/fetch'),
+                    fetch('/fetch-same-origin', {{ mode: 'same-origin' }}),
+                    fetch('/fetch-no-referrer', {{ referrerPolicy: 'no-referrer' }}),
+                    fetch('/fetch-forged', {{ headers: {{ 'Sec-Fetch-Site': 'none' }} }}),
+                    fetch('{other_url}'),
+                  ]).then(() => document.body.append('fetched'));
+                </script>"#
+            ))
+        })
+        .route("/classic.js", |_| {
+            FixtureResponse::ok("text/javascript", "")
+        })
+        .route("/anonymous.js", |_| {
+            FixtureResponse::ok("text/javascript", "")
+        })
+        .route("/module.js", |_| {
+            FixtureResponse::ok("text/javascript", "import './dependency.js';")
+        })
+        .route("/dependency.js", |_| {
+            FixtureResponse::ok("text/javascript", "")
+        })
+        .route("/xhr", |_| FixtureResponse::text("x"))
+        .route("/fetch", |_| FixtureResponse::text("f"))
+        .route("/fetch-same-origin", |_| FixtureResponse::text("f"))
+        .route("/fetch-no-referrer", |_| FixtureResponse::text("f"))
+        .route("/fetch-forged", |_| FixtureResponse::text("f"))
+        .route("/hop", |_| {
+            FixtureResponse::html("<script>location.href = '/landed';</script>")
+        })
+        .route("/landed", |_| {
+            FixtureResponse::html("<title>Landed</title>")
+        })
+        .start()
+        .unwrap();
+
+    let mut page = browser().new_page();
+    page.goto(&server.url("/")).await.unwrap();
+    assert_eq!(page.title().as_deref(), Some("Home"));
+    page.wait_for_function("document.body.textContent.includes('fetched')")
+        .await
+        .unwrap();
+    assert!(page.errors().is_empty(), "{:?}", page.errors());
+
+    let metadata = |request: &dasher_test_server::RecordedRequest| {
+        [
+            "sec-fetch-dest",
+            "sec-fetch-mode",
+            "sec-fetch-site",
+            "sec-fetch-user",
+        ]
+        .map(|name| request.header(name).unwrap_or("-"))
+        .join(" ")
+    };
+    let requests = server.requests();
+    let sent = |path: &str| {
+        let request = requests
+            .iter()
+            .find(|r| r.path == path)
+            .unwrap_or_else(|| panic!("no request for {path}"));
+        metadata(request)
+    };
+    assert_eq!(sent("/"), "document navigate none ?1");
+    assert_eq!(sent("/classic.js"), "script no-cors same-origin -");
+    assert_eq!(sent("/anonymous.js"), "script cors same-origin -");
+    assert_eq!(sent("/module.js"), "script cors same-origin -");
+    assert_eq!(sent("/dependency.js"), "script cors same-origin -");
+    assert_eq!(sent("/xhr"), "empty cors same-origin -");
+    assert_eq!(sent("/fetch"), "empty cors same-origin -");
+    assert_eq!(
+        sent("/fetch-same-origin"),
+        "empty same-origin same-origin -"
+    );
+    // The document made the request, whether or not it says so.
+    assert_eq!(sent("/fetch-no-referrer"), "empty cors same-origin -");
+    // A script cannot set the headers itself.
+    assert_eq!(sent("/fetch-forged"), "empty cors same-origin -");
+    // Another port of the same host is the same site.
+    assert_eq!(metadata(&other.requests()[0]), "empty cors same-site -");
+
+    // A navigation the page asks for is the page's, not the user's.
+    let navigation = page.goto(&server.url("/hop")).await.unwrap();
+    assert_eq!(navigation.url, server.url("/landed"));
+    let requests = server.requests();
+    let landed = requests.iter().find(|r| r.path == "/landed").unwrap();
+    assert_eq!(metadata(landed), "document navigate same-origin -");
+}

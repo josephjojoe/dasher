@@ -1034,7 +1034,7 @@
   }
 
   // The request as `native.netSend` takes it.
-  function wireRequest(method, url, headerPairs, bytes, credentials, redirect, kind, timeout, referrer) {
+  function wireRequest(method, url, headerPairs, bytes, credentials, redirect, kind, timeout, referrer, mode) {
     return {
       method,
       url,
@@ -1045,6 +1045,7 @@
       kind,
       timeout,
       referrer,
+      mode,
       document: documentURL(),
     };
   }
@@ -1138,7 +1139,7 @@
       };
       try {
         startRequest(wireRequest(s.method, s.url, headerList(s.headers), bytes, s.credentials,
-          s.redirect, 'fetch', 0, referrerFor(s.referrer, s.referrerPolicy)), job);
+          s.redirect, 'fetch', 0, referrerFor(s.referrer, s.referrerPolicy), s.mode), job);
       } catch (error) {
         reject(error);
         return;

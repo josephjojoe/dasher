@@ -48,6 +48,7 @@ mod connector;
 mod cookies;
 mod decode;
 mod error;
+mod fetch_metadata;
 mod guard;
 mod policy;
 #[cfg(feature = "replay")]
@@ -64,6 +65,7 @@ pub use cookies::{
     Cookie, CookieJar, MAX_COOKIE_SIZE, MAX_COOKIES, MAX_COOKIES_PER_DOMAIN, SameSite,
 };
 pub use error::{Error, ErrorKind, Result};
+pub use fetch_metadata::RequestMode;
 pub use policy::{BlockReason, RequestInfo, RequestPolicy, ResourceType, UrlPattern};
 pub use response::Response;
 

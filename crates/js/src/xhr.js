@@ -213,7 +213,7 @@
       x.send = true;
       const wire = wireRequest(x.method, x.url, headers, bytes,
         x.withCredentials ? 'include' : 'same-origin', 'follow', 'xhr', x.timeout,
-        referrerFor('about:client', ''));
+        referrerFor('about:client', ''), 'cors');
 
       if (!x.async) {
         this.#sendSync(wire);

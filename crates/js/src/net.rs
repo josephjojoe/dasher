@@ -23,8 +23,8 @@ use bytes::Bytes;
 use dasher_net::header::{HeaderName, HeaderValue, ORIGIN};
 use dasher_net::url::Origin;
 use dasher_net::{
-    CookieJar, Credentials, HeaderMap, Method, RedirectMode, Request, ResourceType, Response,
-    Session, Url,
+    CookieJar, Credentials, HeaderMap, Method, RedirectMode, Request, RequestMode, ResourceType,
+    Response, Session, Url,
 };
 use rquickjs::{ArrayBuffer, Ctx, Exception, Function, JsLifetime, Object, TypedArray};
 use tokio::runtime::Handle;
@@ -284,6 +284,15 @@ fn read_request<'js>(ctx: &Ctx<'js>, object: &Object<'js>) -> rquickjs::Result<O
     }
     let referrer: Option<String> = object.get("referrer")?;
     request.referrer = referrer.as_deref().and_then(|r| Url::parse(r).ok());
+    // What `Sec-Fetch-Mode` and `Sec-Fetch-Site` report: the mode the
+    // script asked for, and the document's origin whatever the referrer.
+    let mode: Option<String> = object.get("mode")?;
+    request.mode = Some(match mode.as_deref() {
+        Some("no-cors") => RequestMode::NoCors,
+        Some("same-origin") => RequestMode::SameOrigin,
+        _ => RequestMode::Cors,
+    });
+    request.initiator = Some(origin.clone());
     Ok(Outgoing { request, origin })
 }
 

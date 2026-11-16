@@ -10,7 +10,7 @@ use dasher_js::{
     ConsoleLevel, EventTarget, HeldNode, JsRuntime, ModuleCredentials, ModuleGraph,
     ModuleGraphStatus, PendingOperation,
 };
-use dasher_net::{Credentials, Request, ResourceType, Session, Url};
+use dasher_net::{Credentials, Request, RequestMode, ResourceType, Session, Url};
 use encoding_rs::Encoding;
 use tokio::task::JoinSet;
 
@@ -186,6 +186,8 @@ pub(crate) struct Scripts {
 pub(crate) struct FetchParams {
     pub(crate) url: Url,
     pub(crate) referrer: Url,
+    /// CORS for an element with `crossorigin`, no-CORS without.
+    pub(crate) mode: RequestMode,
     pub(crate) credentials: Credentials,
     /// The encoding to decode with when the response names none.
     pub(crate) fallback: &'static Encoding,
@@ -199,10 +201,15 @@ impl FetchParams {
         document_url: &Url,
         document_encoding: &'static Encoding,
     ) -> Self {
-        let credentials = match element.cross_origin.as_deref() {
-            None => Credentials::Include,
-            Some(v) if v.eq_ignore_ascii_case("use-credentials") => Credentials::Include,
-            Some(_) => Credentials::SameOrigin(document_url.origin()),
+        let (mode, credentials) = match element.cross_origin.as_deref() {
+            None => (RequestMode::NoCors, Credentials::Include),
+            Some(v) if v.eq_ignore_ascii_case("use-credentials") => {
+                (RequestMode::Cors, Credentials::Include)
+            }
+            Some(_) => (
+                RequestMode::Cors,
+                Credentials::SameOrigin(document_url.origin()),
+            ),
         };
         let fallback = element
             .charset
@@ -212,6 +219,7 @@ impl FetchParams {
         Self {
             url,
             referrer: document_url.clone(),
+            mode,
             credentials,
             fallback,
         }
@@ -233,11 +241,13 @@ impl Scripts {
         let FetchParams {
             url,
             referrer,
+            mode,
             credentials,
             fallback,
         } = params;
         let request = Request::get(url.clone(), ResourceType::Script)
             .with_referrer(referrer)
+            .with_mode(mode)
             .with_credentials(credentials);
         self.fetches.spawn(async move {
             let fetched = match fetch(&session, request, fallback).await {
