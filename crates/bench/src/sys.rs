@@ -126,9 +126,10 @@ mod tests {
         let block = vec![1u8; 32 << 20];
         let now = rss();
         assert!(now >= before + (16 << 20));
-        // Read after: other tests load pages meanwhile, and the high-water
-        // mark only rises.
-        assert!(peak_rss() >= now);
+        // The high-water mark has seen the block. Not `>= now`: the two are
+        // separate readings of counters the kernel keeps approximately while
+        // other tests allocate, and the peak has come out just under.
+        assert!(peak_rss() >= before + (16 << 20));
         drop(block);
     }
 }
