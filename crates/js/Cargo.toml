@@ -38,6 +38,10 @@ zstd = { version = "0.14", default-features = false }
 # mmap and friends, for the JS heap's slab allocator.
 libc = "0.2"
 
+[build-dependencies]
+# The engine, built for the host: build.rs compiles the glue with it.
+rquickjs-sys = "0.11"
+
 [dev-dependencies]
 dasher-test-server.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }

@@ -160,7 +160,6 @@ fn run(options: &Options) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     let browser = Browser::new().map_err(|e| e.to_string())?;
-    dasher::precompile().map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
     let mut dom_nodes = 0;

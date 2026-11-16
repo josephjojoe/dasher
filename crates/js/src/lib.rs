@@ -117,8 +117,8 @@
 //! defined in `src/stubs.js`. Its header lists every stub, plus the APIs
 //! left out on purpose (workers, `indexedDB`, `caches`).
 //!
-//! The JS side is compiled to bytecode once per process. Call
-//! [`precompile`] at start-up to keep that cost off the first page.
+//! The JS side is compiled to bytecode when the crate is built
+//! (`build.rs`), so a process never compiles it.
 //!
 //! ```
 //! use dasher_js::{JsRuntime, NavigationKind, RuntimeOptions, WindowOptions};

@@ -113,7 +113,6 @@ fn sequential_jobs_do_not_grow_the_heap() {
         .build()
         .unwrap();
     let browser = Browser::new().unwrap();
-    dasher::precompile().unwrap();
     let scroll =
         GotoOptions::settle(SettleOptions::default()).with_auto_scroll(AutoScrollOptions {
             max_scrolls: 10,

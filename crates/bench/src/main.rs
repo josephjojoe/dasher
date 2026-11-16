@@ -293,9 +293,7 @@ fn ready_browser() -> Result<Browser, String> {
             })
         }));
     }
-    let browser = builder.build().map_err(|e| e.to_string())?;
-    dasher::precompile().map_err(|e| e.to_string())?;
-    Ok(browser)
+    builder.build().map_err(|e| e.to_string())
 }
 
 /// `child-page <scenario> <url>`: loads one page and reports what it cost.
