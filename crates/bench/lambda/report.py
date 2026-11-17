@@ -1,4 +1,4 @@
-"""report.py TAG: dasher against Lightpanda and Chromium, five variants per sandbox.
+"""report.py TAG: dasher against Lightpanda and Chromium, six variants per sandbox.
 
 Reads data/TAG-live.jsonl (from extract.py), prints the report and writes
 data/TAG-sites.csv, one row per site. Only sites in sites.json (or
@@ -7,8 +7,8 @@ import collections, csv, json, os, re, statistics, sys
 from lib import *
 
 tag = sys.argv[1] if len(sys.argv) > 1 else "r1"
-D, L, C, L30, CN = "dasher", "lightpanda", "chromium", "lightpanda-30s", "chromium-noimg"
-V = (D, L, C, L30, CN)
+D, L, C, D30, L30, CN = "dasher", "lightpanda", "chromium", "dasher-30s", "lightpanda-30s", "chromium-noimg"
+V = (D, L, C, D30, L30, CN)
 H = (D, L, C)
 rows = load(f"{tag}-live")
 
@@ -25,7 +25,7 @@ S = summarize(group(rows, "live"), V)
 for s in S:
     s["set"] = meta[s["slug"]]["list"]
     s["stratum"] = meta[s["slug"]]["stratum"]
-print(f"sites measured: {measured}; in the site list: {len(meta)}; with all five variants: {len(S)}; runs: {len(rows)}")
+print(f"sites measured: {measured}; in the site list: {len(meta)}; with all six variants: {len(S)}; runs: {len(rows)}")
 print("runs per variant:", dict(collections.Counter(r["variant"] for r in rows)))
 print("sandbox CPUs (by /proc/cpuinfo part):", dict(collections.Counter(r.get("cpu_part") for r in rows if r["variant"] == D and r["run"] == 0)))
 print("sets:", dict(collections.Counter(s["set"] for s in S)), "strata:", dict(collections.Counter(s["stratum"] for s in S)))
@@ -122,6 +122,24 @@ dc = [s for s in S if ok(s, D) and ok(s, C)]
 table(dc, (D, C), "DASHER AND CHROMIUM OK")
 table([s for s in dc if (sim(s, D, C) or 0) >= .9], (D, C), "dasher and Chromium ok, same content (>= 0.9)")
 
+print("\n== SENSITIVITY: dasher's wait budget (default 5 s) against 30 s")
+ss = [s for s in S if ok(s, D) and ok(s, D30)]
+table(ss, (D, D30), "dasher and dasher-30s ok")
+print("  CPU 30s/default:", ratio_line(ss, D30, D, "cpu_t"))
+print("  wall 30s/default:", ratio_line(ss, D30, D, "wall", 0.01))
+print("  text 30s/default: total", f"{sum(s[D30]['text'] for s in ss) / sum(s[D]['text'] for s in ss):.3f}", "| sites with >10% more text at 30 s:", sum(s[D30]["text"] > 1.1 * s[D]["text"] + 50 for s in ss), "| with >10% less:", sum(s[D]["text"] > 1.1 * s[D30]["text"] + 50 for s in ss))
+for s in sorted((s for s in ss if s[D30]["text"] > 1.1 * s[D]["text"] + 50), key=lambda s: s[D]["text"] / max(1, s[D30]["text"])):
+    print(f"    {s['slug'][:40]:40s} text {s[D]['text']:.0f} at 5 s, {s[D30]['text']:.0f} at 30 s | lightpanda {s[L]['text']:.0f} ({s[L]['cls']}) chromium {s[C]['text']:.0f} ({s[C]['cls']}) | wall {s[D]['wall']:.1f} / {s[D30]['wall']:.1f} s")
+print("  outcomes changed:", dict(collections.Counter((s[D]["cls"], s[D30]["cls"]) for s in S if s[D]["cls"] != s[D30]["cls"])))
+for s in S:
+    if s[D]["cls"] != s[D30]["cls"]:
+        print(f"    {s['slug'][:40]:40s} {s[D]['cls']} at 5 s, {s[D30]['cls']} at 30 s (wall {s[D]['wall']:.1f} / {s[D30]['wall']:.1f} s)")
+ss = [s for s in S if ok(s, D30) and ok(s, C)]
+x = [sim(s, D30, C) for s in ss if sim(s, D30, C) is not None]
+print(f"  dasher-30s similarity to Chromium: n={len(x)} median {statistics.median(x):.3f} >=0.9 {sum(q >= .9 for q in x)}")
+ss4 = [s for s in S if all(ok(s, v) for v in (D, L, C, D30, L30))]
+print(f"  both at 30 s, all ok (n={len(ss4)}): dasher-30s / lightpanda-30s CPU", ratio_line(ss4, D30, L30, "cpu_t"), "| wall", ratio_line(ss4, D30, L30, "wall", 0.01))
+
 print("\n== SENSITIVITY: Lightpanda's wait cap (default 5 s) against 30 s")
 ss = [s for s in S if ok(s, L) and ok(s, L30)]
 table(ss, (L, L30), "lightpanda and lightpanda-30s ok")
@@ -144,6 +162,9 @@ print("\n== LIMITS HIT (runs)")
 dr = [r for r in rows if r["variant"] == D]
 print(f"  dasher: budget_exhausted {dict(collections.Counter(r.get('budget') for r in dr))} timed_out {sum(1 for r in dr if r.get('timed_out'))} runs >= 25 s wall {sum(1 for r in dr if (r['wall'] or 0) >= 25)}")
 print(f"     sites with a budget on most runs: {sorted(s['slug'] for s in S if len(s[D]['budget']) >= 2)}")
+d3 = [r for r in rows if r["variant"] == D30]
+print(f"  dasher-30s: budget_exhausted {dict(collections.Counter(r.get('budget') for r in d3))} timed_out {sum(1 for r in d3 if r.get('timed_out'))} runs >= 25 s wall {sum(1 for r in d3 if (r['wall'] or 0) >= 25)}")
+print(f"  dasher: runs >= 4.9 s wall {sum(1 for r in dr if (r['wall'] or 0) >= 4.9)} (sites, most runs: {sum(1 for s in S if s[D]['wall'] >= 4.9)}), >= 5.5 s {sum(1 for r in dr if (r['wall'] or 0) >= 5.5)}, >= 10 s {sum(1 for r in dr if (r['wall'] or 0) >= 10)}, longest {max((r['wall'] or 0) for r in dr):.1f} s")
 for v in (L, L30):
     lr = [r for r in rows if r["variant"] == v]
     print(f"  {v}: runs >= 4.9 s wall {sum(1 for r in lr if (r['wall'] or 0) >= 4.9)} (sites, most runs: {sum(1 for s in S if s[v]['wall'] >= 4.9)}), >= 25 s {sum(1 for r in lr if (r['wall'] or 0) >= 25)}, killed {sum(1 for r in lr if r.get('killed'))}")
@@ -161,8 +182,8 @@ print(f"  chromium summed RSS / summed PSS: median {statistics.median(x):.2f}; p
 print("\n== ORDER EFFECT: median CPU by position in the round (all three ok)")
 oks = {s["slug"] for s in all3}
 for v in V:
-    print(f"  {v:15s}", {pos: round(statistics.median(r["cpu_t"] for r in rows if r["variant"] == v and r["pos"] == pos and r["slug"] in oks), 3) for pos in range(5)},
-          "n", {pos: sum(1 for r in rows if r["variant"] == v and r["pos"] == pos) for pos in range(5)})
+    print(f"  {v:15s}", {pos: round(statistics.median(r["cpu_t"] for r in rows if r["variant"] == v and r["pos"] == pos and r["slug"] in oks), 3) for pos in range(len(V))},
+          "n", {pos: sum(1 for r in rows if r["variant"] == v and r["pos"] == pos) for pos in range(len(V))})
 print("\n== RUN-TO-RUN: per-site spread of CPU over the 3 runs, (max-min)/median, all three ok")
 for v in H:
     x = [(max(s[v]["cpu_runs"]) - min(s[v]["cpu_runs"])) / max(statistics.median(s[v]["cpu_runs"]), .01) for s in all3]

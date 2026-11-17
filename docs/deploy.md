@@ -283,9 +283,9 @@ Failures carry an `error` message and one of these statuses:
   nodes. A page that goes over either is stopped, its memory freed, and
   the job answers `422`, so one runaway page cannot take the instance
   down.
-- **What pages cost.** On 336 popular sites that dasher, Lightpanda and
-  Chromium all loaded from Lambda, dasher's median peak was 41 MiB and
-  nine in ten stayed within 117 MiB (see
+- **What pages cost.** On 335 popular sites that dasher, Lightpanda and
+  Chromium all loaded from Lambda, dasher's median peak was 39 MiB and
+  nine in ten stayed within 108 MiB (see
   [crates/bench/lambda](../crates/bench/lambda/README.md)). Size an instance
   for its concurrency times a typical page of your sites, plus the
   script cache, with headroom for the heavy ones, and measure.

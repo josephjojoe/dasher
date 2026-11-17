@@ -38,7 +38,7 @@ _WARM = False
 # with --no-sandbox, so child processes are started directly.
 CHROME_FLAGS = ["--no-zygote"]
 
-VARIANTS = ["dasher", "lightpanda", "chromium", "lightpanda-30s", "chromium-noimg"]
+VARIANTS = ["dasher", "lightpanda", "chromium", "dasher-30s", "lightpanda-30s", "chromium-noimg"]
 
 
 def slug(url):
@@ -90,8 +90,10 @@ def run(cmd, base, hard_timeout, skip_root=False):
 
 def command(variant, url, timeout, wait="idle"):
     """The command line of one variant, and whether its direct child is a driver to leave out."""
-    if variant == "dasher":
+    if variant.startswith("dasher"):
         cmd = [DASHER, "--json", "-t", str(timeout)]
+        if variant == "dasher-30s":
+            cmd += ["--wait-budget", str(timeout)]
         if wait == "load":
             cmd += ["--wait", "load"]
         return cmd + [url], False

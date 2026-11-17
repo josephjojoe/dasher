@@ -35,10 +35,10 @@ Pro):
 
 | Page | Time to settle | Peak RSS | JS heap | DOM nodes |
 | --- | ---: | ---: | ---: | ---: |
-| **static**: 11 KB article, no scripts | 9 ms | 6.9 MiB | 1.9 MiB | 289 |
-| **large**: 1.6 MB listing, 5,000-row table, no scripts | 49 ms | 17.3 MiB | 1.9 MiB | 75,194 |
-| **spa**: React 18 shop, 100 products and 10 review lists from a JSON API | 56 ms | 11.1 MiB | 4.8 MiB | 2,289 |
-| **feed**: infinite scroll, 20 pages of 20 posts behind an `IntersectionObserver` | 104 ms | 8.4 MiB | 2.1 MiB | 8,829 |
+| **static**: 11 KB article, no scripts | 9 ms | 7.0 MiB | 1.9 MiB | 289 |
+| **large**: 1.6 MB listing, 5,000-row table, no scripts | 48 ms | 17.3 MiB | 1.9 MiB | 75,194 |
+| **spa**: React 18 shop, 100 products and 10 review lists from a JSON API | 59 ms | 11.1 MiB | 4.8 MiB | 2,291 |
+| **feed**: infinite scroll, 20 pages of 20 posts behind an `IntersectionObserver` | 118 ms | 8.8 MiB | 2.1 MiB | 8,829 |
 
 | Measure | Value |
 | --- | ---: |
@@ -47,7 +47,7 @@ Pro):
 | 100 jobs in a row: peak RSS | 18.5 MiB |
 | Process start (`dasher --version`) | 0.3 ms |
 | Process start to static page loaded | 11 ms |
-| Binary size | 6.07 MiB |
+| Binary size | 6.01 MiB |
 
 Memory on macOS reads differently (the allocator and page size differ),
 so footprint is always measured on Linux.
