@@ -30,24 +30,24 @@ With `--budgets` it fails when a result is over a limit in
 [`budgets.json`](budgets.json). CI runs it that way on the static
 x86_64 musl build on every push, and puts the table in the job summary.
 
-Results for 0.1.0, static musl build on aarch64 Linux (Docker on an
-Apple M2 Pro):
+Results, static musl build on aarch64 Linux (Docker on an Apple M2
+Pro):
 
 | Page | Time to settle | Peak RSS | JS heap | DOM nodes |
 | --- | ---: | ---: | ---: | ---: |
-| **static**: 11 KB article, no scripts | 10 ms | 6.8 MiB | 1.8 MiB | 289 |
-| **large**: 1.6 MB listing, 5,000-row table, no scripts | 63 ms | 17.2 MiB | 1.8 MiB | 75,194 |
-| **spa**: React 18 shop, 100 products and 10 review lists from a JSON API | 62 ms | 11.0 MiB | 4.7 MiB | 2,291 |
-| **feed**: infinite scroll, 20 pages of 20 posts behind an `IntersectionObserver` | 114 ms | 8.8 MiB | 2.1 MiB | 8,829 |
+| **static**: 11 KB article, no scripts | 9 ms | 6.9 MiB | 1.9 MiB | 289 |
+| **large**: 1.6 MB listing, 5,000-row table, no scripts | 49 ms | 17.3 MiB | 1.9 MiB | 75,194 |
+| **spa**: React 18 shop, 100 products and 10 review lists from a JSON API | 56 ms | 11.1 MiB | 4.8 MiB | 2,289 |
+| **feed**: infinite scroll, 20 pages of 20 posts behind an `IntersectionObserver` | 104 ms | 8.4 MiB | 2.1 MiB | 8,829 |
 
 | Measure | Value |
 | --- | ---: |
 | Idle RSS (ready, no page) | 2.5 MiB |
-| 100 jobs in a row: highest RSS between jobs, first half → second half | 6.5 → 6.3 MiB |
+| 100 jobs in a row: highest RSS between jobs, first half → second half | 6.5 → 6.5 MiB |
 | 100 jobs in a row: peak RSS | 18.5 MiB |
 | Process start (`dasher --version`) | 0.3 ms |
 | Process start to static page loaded | 11 ms |
-| Binary size | 6.01 MiB |
+| Binary size | 6.07 MiB |
 
 Memory on macOS reads differently (the allocator and page size differ),
 so footprint is always measured on Linux.
