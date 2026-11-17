@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (2026-11-16)
+## 0.1.0 (2026-11-17)
 
 The first release.
 
@@ -15,10 +15,10 @@ The first release.
   module scripts, `defer` and `async`, `document.write`, import maps,
   dynamic `import()`, script navigations and meta refreshes, cookies,
   `fetch` and XHR, web components and shadow DOM.
-- **Bounded loads.** A time limit, and budgets for page time, CPU and
-  requests; a page that runs out of one is returned as it stands. Caps
-  on the JS heap and the DOM stop a runaway page without taking the
-  process down.
+- **Bounded loads.** A time limit, and budgets for page time, CPU,
+  requests and the real time a page is waited for (5 s by default); a
+  page that runs out of one is returned as it stands. Caps on the JS
+  heap and the DOM stop a runaway page without taking the process down.
 - **Visibility policies** (`loaded`, `all`, `viewport`) decide how much
   lazy content loads, and `--scroll` works through infinite feeds.
 - **A script cache** keeps compiled scripts across pages, in memory and
