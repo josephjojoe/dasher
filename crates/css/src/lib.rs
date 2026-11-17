@@ -124,6 +124,14 @@ impl SelectorList {
         self.selectors.is_empty()
     }
 
+    /// Whether what the list matches can depend on the data of text nodes
+    /// (`:empty`, `:placeholder-shown`), and not only on the shape of the
+    /// tree and on attributes. A caller that keeps results until the tree
+    /// or an attribute changes must not keep these.
+    pub fn reads_text(&self) -> bool {
+        self.selectors.iter().any(selector::Complex::reads_text)
+    }
+
     /// `Element.matches`: whether `element` matches any selector in the
     /// list, with `:scope` matching `element` itself. False for non-elements.
     pub fn matches(&self, doc: &Document, element: NodeId) -> bool {

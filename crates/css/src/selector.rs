@@ -25,6 +25,26 @@ pub(crate) struct Complex {
     pub(crate) parts: Box<[Part]>,
 }
 
+impl Complex {
+    /// See [`SelectorList::reads_text`].
+    pub(crate) fn reads_text(&self) -> bool {
+        self.parts
+            .iter()
+            .flat_map(|part| part.compound.iter())
+            .any(|simple| match simple {
+                Simple::Pseudo(Pseudo::Empty | Pseudo::PlaceholderShown) => true,
+                Simple::Pseudo(Pseudo::Not(list) | Pseudo::Is(list)) => list.reads_text(),
+                Simple::Pseudo(Pseudo::Has(relatives)) => {
+                    relatives.iter().any(|r| r.complex.reads_text())
+                }
+                Simple::Pseudo(Pseudo::Nth(nth)) => {
+                    nth.of.as_ref().is_some_and(SelectorList::reads_text)
+                }
+                _ => false,
+            })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Part {
     pub(crate) compound: Box<[Simple]>,

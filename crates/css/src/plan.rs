@@ -2,8 +2,15 @@
 //! how it tests each one.
 //!
 //! The general plan walks every descendant of the query's root and runs
-//! the full matcher on each element. Two things let a query do less:
+//! the full matcher on each element. Three things let a query do less:
 //!
+//! - A tag or attribute name the document has never used. Elements and
+//!   attributes hold their names as entries of the document's name table,
+//!   so a name that is not in the table is on no node. If every selector
+//!   in the list has such a name in one of its compounds (`my-widget`,
+//!   `[data-tracker-id="7"] a`), nothing can match and there is no walk.
+//!   Scripts probe for markup that is not there far more often than for
+//!   markup that is.
 //! - An `#id` in the selector. The document's id index gives the elements
 //!   with that id directly (see `Document::elements_with_id`). If every
 //!   selector in the list has an id in its subject (rightmost) compound,
@@ -27,7 +34,7 @@
 use dasher_dom::{Descendants, Document, Name, NodeId};
 
 use crate::matching::Context;
-use crate::selector::{Complex, NameRef, SelectorList, Simple};
+use crate::selector::{Complex, LocalName, NameRef, SelectorList, Simple};
 
 /// Where a query's candidates come from.
 pub(crate) enum Source<'a> {
@@ -125,6 +132,20 @@ pub(crate) fn source<'a>(list: &SelectorList, cx: &Context<'a>, root: NodeId) ->
     let doc = cx.doc;
     let quirks = cx.quirks;
 
+    // Every selector needs a name that is on no node: nothing matches.
+    if list
+        .selectors
+        .iter()
+        .all(|complex| needs_unused_name(complex, doc))
+    {
+        debug_assert!(
+            doc.descendants(root)
+                .all(|n| !doc.is_element(n) || !cx.matches_list(list, n)),
+            "a selector with an unused name matched"
+        );
+        return Source::One(None);
+    }
+
     // Every selector's subject has an id: the candidates are the elements
     // with those ids.
     if list
@@ -175,6 +196,28 @@ pub(crate) fn source<'a>(list: &SelectorList, cx: &Context<'a>, root: NodeId) ->
     }
 
     Source::Tree(doc.descendants(root))
+}
+
+/// Whether `complex` cannot match in `doc` because one of its compounds
+/// requires a tag or attribute name that is not in the document's name
+/// table, in the form it is compared in for an HTML element or in the form
+/// for any other. Only a compound's own simple selectors count: a name
+/// inside `:not()`, `:is()` or `:has()` is not required.
+fn needs_unused_name(complex: &Complex, doc: &Document) -> bool {
+    let unused = |name: &NameRef| match name {
+        NameRef::Static(_) => false,
+        NameRef::Other(name) => doc.names().get(name).is_none(),
+    };
+    let unused = |local: &LocalName| unused(&local.lower) && unused(&local.exact);
+    complex.parts.iter().any(|part| {
+        part.compound.iter().any(|simple| match simple {
+            Simple::Type {
+                local: Some(local), ..
+            } => unused(local),
+            Simple::Attr(attr) => unused(&attr.local),
+            _ => false,
+        })
+    })
 }
 
 /// The id a compound requires, if any.

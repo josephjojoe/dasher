@@ -237,6 +237,58 @@ impl SelectorCache {
     }
 }
 
+/// How many results each of the query cache's two maps holds, and how many
+/// node ids its `querySelectorAll` results hold between them: about 300 KiB
+/// at the most. Results beyond either are not kept. See [`QueryCache`].
+const QUERY_CACHE_RESULTS: usize = 1024;
+const QUERY_CACHE_IDS: usize = 1 << 16;
+
+/// What `querySelector` and `querySelectorAll` found, kept until the DOM
+/// next changes, so a page that asks the same question again and again of
+/// a tree it has not touched walks the tree once. Pages do: a script that
+/// polls for an element, or runs a list of probes on every timer, repeats
+/// each query hundreds or thousands of times between changes.
+///
+/// A result is for one parsed selector list on one root node at one DOM
+/// version (see [`DomState::version`]). The version moves on every change
+/// to the tree or to an attribute, which is all a selector can read apart
+/// from text, so results of selectors that read text are not kept (see
+/// `SelectorList::reads_text`). Node ids are reused once a detached tree is
+/// released, which is not a change of version, so releasing one empties
+/// the cache (see [`DomState::sweep`]).
+///
+/// Debug builds check every result taken from the cache against a fresh
+/// walk.
+#[derive(Default)]
+struct QueryCache {
+    /// The DOM version the results are for.
+    version: u32,
+    /// How many node ids `all` holds.
+    ids: usize,
+    first: HashMap<QueryKey, (Rc<SelectorList>, Option<NodeId>)>,
+    all: HashMap<QueryKey, (Rc<SelectorList>, Rc<[NodeId]>)>,
+}
+
+/// A selector list, by address, and the root it was run on. Each entry
+/// holds the list, so the address stays that list's while the entry lives.
+type QueryKey = (*const SelectorList, NodeId);
+
+impl QueryCache {
+    /// Drops the results of any version but `version`.
+    fn sync(&mut self, version: u32) {
+        if self.version != version {
+            self.version = version;
+            self.clear();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.first.clear();
+        self.all.clear();
+        self.ids = 0;
+    }
+}
+
 /// How busy scripts have been changing the document, for judging when a
 /// page has settled. Read it with [`JsRuntime::dom_activity`].
 ///
@@ -267,6 +319,7 @@ pub(crate) struct DomState {
     /// Bumped by every change to the tree or to attributes.
     version: Cell<u32>,
     selectors: RefCell<SelectorCache>,
+    queries: RefCell<QueryCache>,
     /// Nodes with registered mutation observers. Each has a wrapper, whose
     /// finalizer removes it.
     observed: RefCell<HashSet<NodeId>>,
@@ -334,6 +387,7 @@ impl DomState {
             candidates: RefCell::default(),
             version: Cell::new(0),
             selectors: RefCell::default(),
+            queries: RefCell::default(),
             observed: RefCell::default(),
             pending: RefCell::default(),
             ce_names: RefCell::default(),
@@ -426,6 +480,61 @@ impl DomState {
             .borrow_mut()
             .insert(text.to_owned(), Rc::clone(&list));
         Ok(list)
+    }
+
+    /// `querySelector`: the first element under `root` that `list` matches,
+    /// from the query cache if the same was asked since the DOM last
+    /// changed.
+    pub(crate) fn query_first(
+        &self,
+        doc: &Document,
+        root: NodeId,
+        list: &Rc<SelectorList>,
+    ) -> Option<NodeId> {
+        let key = (Rc::as_ptr(list), root);
+        let mut queries = self.queries.borrow_mut();
+        queries.sync(self.version());
+        if let Some(&(_, found)) = queries.first.get(&key) {
+            debug_assert_eq!(found, list.query_first(doc, root), "a stale query result");
+            return found;
+        }
+        let found = list.query_first(doc, root);
+        if queries.first.len() < QUERY_CACHE_RESULTS && !list.reads_text() {
+            queries.first.insert(key, (Rc::clone(list), found));
+        }
+        found
+    }
+
+    /// `querySelectorAll`: the elements under `root` that `list` matches,
+    /// in tree order, from the query cache if the same was asked since the
+    /// DOM last changed.
+    pub(crate) fn query_all(
+        &self,
+        doc: &Document,
+        root: NodeId,
+        list: &Rc<SelectorList>,
+    ) -> Rc<[NodeId]> {
+        let key = (Rc::as_ptr(list), root);
+        let mut queries = self.queries.borrow_mut();
+        queries.sync(self.version());
+        if let Some((_, found)) = queries.all.get(&key) {
+            debug_assert!(
+                list.query_all(doc, root).eq(found.iter().copied()),
+                "a stale query result"
+            );
+            return Rc::clone(found);
+        }
+        let found: Rc<[NodeId]> = list.query_all(doc, root).collect();
+        if queries.all.len() < QUERY_CACHE_RESULTS
+            && queries.ids + found.len() <= QUERY_CACHE_IDS
+            && !list.reads_text()
+        {
+            queries.ids += found.len();
+            queries
+                .all
+                .insert(key, (Rc::clone(list), Rc::clone(&found)));
+        }
+        found
     }
 
     /// Notes that script made a document besides the page's.
@@ -578,6 +687,10 @@ impl DomState {
             self.owners.borrow_mut().retain(|&tree, &mut owner| {
                 !garbage.contains(&group_root(doc, tree)) && !garbage.contains(&owner)
             });
+        }
+        if !garbage.is_empty() {
+            // The ids released here may be given to new nodes.
+            self.queries.borrow_mut().clear();
         }
         for root in garbage {
             doc.release(root);

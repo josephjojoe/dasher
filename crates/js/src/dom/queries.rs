@@ -3,8 +3,10 @@
 //!
 //! They run with the document borrowed and reach dasher-dom's id index and
 //! dasher-css's query plans directly, with the selector parsed once and
-//! cached by text (`DomState::selector`). `querySelectorAll` returns a
-//! static `NodeList` of the matches (see the `lists` module).
+//! cached by text (`DomState::selector`), and what `querySelector` and
+//! `querySelectorAll` found kept until the DOM next changes
+//! (`DomState::query_first`, `DomState::query_all`). `querySelectorAll`
+//! returns a static `NodeList` of the matches (see the `lists` module).
 
 use std::rc::Rc;
 
@@ -32,7 +34,7 @@ pub(super) fn get_element_by_id<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValu
 
 pub(super) fn query_selector<'c>(c: &'c Call<'_>, n: NodeId, _: &[qjs::JSValue]) -> Outcome<'c> {
     let list = selector(c)?;
-    Ok(Ret::Node(list.query_first(&c.doc, n)))
+    Ok(Ret::Node(c.dom.query_first(&c.doc, n, &list)))
 }
 
 pub(super) fn query_selector_all<'c>(
@@ -41,9 +43,9 @@ pub(super) fn query_selector_all<'c>(
     _: &[qjs::JSValue],
 ) -> Outcome<'c> {
     let list = selector(c)?;
-    let found: Vec<NodeId> = list.query_all(&c.doc, n).collect();
+    let found = c.dom.query_all(&c.doc, n, &list);
     let mut values = Vec::with_capacity(found.len());
-    for id in found {
+    for &id in found.iter() {
         let v = c.value(Ret::Node(Some(id)));
         // SAFETY: a tag check.
         if unsafe { qjs::JS_IsException(v) } {

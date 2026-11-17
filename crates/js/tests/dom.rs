@@ -383,6 +383,125 @@ fn selectors_and_collections() {
     );
 }
 
+/// `querySelector` and `querySelectorAll` keep what they found until the
+/// DOM changes. Each query here runs twice, so the second answer is a kept
+/// one, before and after every kind of change a selector can see: to an
+/// attribute (by each API that writes one), to the tree, and to text.
+#[test]
+fn repeated_queries_see_every_change() {
+    let js = page(
+        "<div id=a class=x><p id=p1></p><p id=p2>t</p></div><textarea id=t placeholder=p></textarea>",
+    );
+    let out = eval(
+        &js,
+        r#"
+        const names = (list) => [...list].map((e) => e.id || e.localName).join();
+        const q = (selector, root = document) => {
+          const all = names(root.querySelectorAll(selector));
+          const first = root.querySelector(selector);
+          if (names(root.querySelectorAll(selector)) !== all || root.querySelector(selector) !== first
+              || (first ? first.id || first.localName : '') !== all.split(',')[0]) {
+            throw new Error('two answers for ' + selector);
+          }
+          return all;
+        };
+        const a = document.getElementById('a'), p1 = document.getElementById('p1'),
+          p2 = document.getElementById('p2'), t = document.getElementById('t');
+        const r = [q('.x'), q('p'), q('[data-v]'), q('#a > p:first-child')];
+
+        // Attributes.
+        a.className = 'y'; r.push(q('.x'));
+        a.classList.add('x'); r.push(q('.x'));
+        a.classList.toggle('x'); r.push(q('.x'));
+        a.setAttribute('data-v', '1'); r.push(q('[data-v]'), q('[data-v="2"]'));
+        a.dataset.v = '2'; r.push(q('[data-v="2"]'));
+        a.removeAttribute('data-v'); r.push(q('[data-v]'));
+        a.toggleAttribute('data-v'); r.push(q('[data-v]'));
+        delete a.dataset.v; r.push(q('[data-v]'));
+        a.setAttributeNS(null, 'data-v', '3'); r.push(q('[data-v]'));
+        a.attributes.removeNamedItem('data-v'); r.push(q('[data-v]'));
+        p1.id = 'q1'; r.push(q('p'), q('#p1'), q('#q1'));
+        a.hidden = true; r.push(q('[hidden]'));
+        a.style.display = 'none'; r.push(q('[style]'));
+
+        // The tree.
+        const p3 = document.createElement('p'); p3.id = 'p3';
+        r.push(q('p'));
+        a.appendChild(p3); r.push(q('p'), q('#a > p:last-child'));
+        a.insertBefore(p3, p1); r.push(q('p'), q('#a > p:first-child'));
+        p2.remove(); r.push(q('p'));
+        a.replaceChild(p2, p3); r.push(q('p'));
+        p1.innerHTML = '<b id=b></b>'; r.push(q('p b'), q('b', p1));
+        p1.textContent = ''; r.push(q('p b'), q('b', p1));
+        document.body.append(p3); r.push(q('body > p'));
+        document.body.insertAdjacentHTML('beforeend', '<p id=p4></p>'); r.push(q('body > p'));
+
+        // Text, which :empty and :placeholder-shown read.
+        r.push(q('p:empty'));
+        p2.firstChild.data = ''; r.push(q('p:empty'));
+        p2.firstChild.nodeValue = 'u'; r.push(q('p:empty'));
+        p2.firstChild.deleteData(0, 1); r.push(q('p:empty'), q('p:not(:empty)'), q('div:has(> p:empty)'));
+        p2.firstChild.appendData('v'); r.push(q('p:empty'), q('p:not(:empty)'));
+        r.push(q(':placeholder-shown'));
+        t.appendChild(document.createTextNode('')); r.push(q(':placeholder-shown'));
+        t.firstChild.data = 'typed'; r.push(q(':placeholder-shown'));
+        t.firstChild.data = ''; r.push(q(':placeholder-shown'));
+
+        // A tree that is not in the document, and a fragment.
+        const d = document.createElement('div');
+        r.push(q('span', d));
+        d.innerHTML = '<span id=s1></span>'; r.push(q('span', d), q('span'));
+        d.firstChild.id = 's2'; r.push(q('span', d));
+        d.firstChild.className = 'k'; r.push(q('.k', d), q('.k'));
+        const f = document.createDocumentFragment();
+        r.push(q('span', f));
+        f.appendChild(d.firstChild); r.push(q('span', f), q('span', d));
+        a.appendChild(f); r.push(q('span', f), q('span'));
+        r
+        "#,
+    );
+    assert_eq!(
+        out,
+        concat!(
+            r#"["a","p1,p2","","p1","#,
+            r#""","a","","a","","a","","a","","a","","q1,p2","","q1","a","a","#,
+            r#""q1,p2","q1,p2,p3","p3","p3,q1,p2","p3","p3,q1","p2,q1","b","b","","","p3","p3,p4","#,
+            r#""q1,p3,p4","p2,q1,p3,p4","q1,p3,p4","p2,q1,p3,p4","","a","q1,p3,p4","p2","#,
+            r#""t","t","","t","#,
+            r#""","s1","","s2","s2","","","s2","","","s2"]"#
+        )
+    );
+}
+
+/// A node's id is given to a new node once its tree is released. What a
+/// query found under the old node, or the old node as something found, must
+/// not come back for the new one.
+#[test]
+fn a_reused_node_id_does_not_bring_back_query_results() {
+    let js = page("<p id=keep></p>");
+    run(
+        &js,
+        r#"
+        (() => {
+          const d = document.createElement('div');
+          d.innerHTML = '<i></i><i></i>';
+          if (!d.querySelector('i') || d.querySelectorAll('i').length !== 2) throw new Error('setup');
+        })();
+        "#,
+    );
+    js.run_gc();
+    let out = eval(
+        &js,
+        r#"
+        const fresh = [];
+        for (let k = 0; k < 8; k++) fresh.push(document.createElement('div'));
+        fresh.map((e) => [e.querySelector('i'), e.querySelectorAll('i').length])
+          .concat([[document.querySelector('i'), document.querySelectorAll('i').length]])
+        "#,
+    );
+    assert_eq!(out, format!("[{}]", ["[null,0]"; 9].join(",")));
+}
+
 #[test]
 fn urls_resolve_against_the_document_and_base() {
     let js = page("<a id=a href='../x?q=1#h'>link</a><img id=i src='img.png'>");
