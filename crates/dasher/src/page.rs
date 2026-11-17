@@ -33,7 +33,8 @@ const BLANK: &str = "<html><head></head><body></body></html>";
 /// The default waits for the `load` event, then settles with
 /// [`SettleOptions::default`] (network idle for 500ms, within 5 seconds of
 /// page time), all within the page's
-/// [timeout](Page::set_timeout) and the default [`WorkBudget`].
+/// [timeout](Page::set_timeout) and the default [`WorkBudget`], which
+/// waits for the page for 5 seconds of real time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GotoOptions {
     /// What to wait for after the `load` event; `None` returns as soon as
@@ -48,11 +49,15 @@ pub struct GotoOptions {
     /// runs out, the page is left as far as it got.
     pub timeout: Option<Duration>,
     /// How much CPU time and how many requests the whole navigation may
-    /// use: loading, settling and scrolling. When either runs out the page
-    /// is left as it is and [`Navigation::budget_exhausted`] says which.
-    /// The budget is lifted when `goto` returns, so the page can still be
-    /// evaluated. Defaults to [`WorkBudget::default`]: 10 CPU seconds and
-    /// 1000 requests.
+    /// use, and how long the page is waited for: loading, settling and
+    /// scrolling. When one runs out the page is left as it is and
+    /// [`Navigation::budget_exhausted`] says which. The budget is lifted
+    /// when `goto` returns, so the page can still be evaluated. Defaults
+    /// to [`WorkBudget::default`]: 10 CPU seconds, 1000 requests and 5
+    /// seconds of waiting. A page that takes longer than that to bring in
+    /// what is wanted (a slow API behind [`SettleOptions::selector`], a
+    /// long [auto-scroll](Self::auto_scroll)) needs a longer
+    /// [`WorkBudget::wait`].
     pub budget: WorkBudget,
 }
 
@@ -128,6 +133,9 @@ pub struct Navigation {
     ///   quiet (pages that update themselves on a timer forever).
     /// - [`Budget::Cpu`] or [`Budget::Requests`]: the navigation used up
     ///   [`GotoOptions::budget`], while loading, settling or scrolling.
+    /// - [`Budget::Wait`]: the page had been waited for as long as
+    ///   [`WorkBudget::wait`] allows before it loaded or settled. Nothing
+    ///   was interrupted; what had not arrived or run by then is missing.
     ///
     /// When more than one ran out, this is the last.
     pub budget_exhausted: Option<Budget>,

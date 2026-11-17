@@ -630,6 +630,38 @@ async fn a_page_that_never_goes_quiet_ends_on_its_page_time_budget() {
 }
 
 #[tokio::test]
+async fn the_wait_budget_ends_a_navigation_without_a_timeout() {
+    let server = server();
+    let mut page = browser().new_page();
+    let options = GotoOptions::default().with_budget(WorkBudget {
+        requests: None,
+        wait: Some(Duration::from_millis(400)),
+        ..WorkBudget::default()
+    });
+    let navigation = page
+        .goto_with(&server.url("/more.html"), &options)
+        .await
+        .unwrap();
+    assert_eq!(navigation.budget_exhausted, Some(Budget::Wait));
+    assert_eq!(
+        navigation.settle,
+        Some(SettleOutcome::BudgetExhausted(Budget::Wait))
+    );
+    assert!(!navigation.timed_out);
+    assert!(
+        navigation.elapsed >= Duration::from_millis(400)
+            && navigation.elapsed < Duration::from_secs(3),
+        "{:?}",
+        navigation.elapsed
+    );
+    // The page holds what had come in, and can still be evaluated.
+    let items = page.count("li").unwrap();
+    assert!(items > 0);
+    let sum: u32 = page.evaluate_as("1 + 2").await.unwrap();
+    assert_eq!(sum, 3);
+}
+
+#[tokio::test]
 async fn the_work_budget_bounds_a_navigation_and_is_lifted_after() {
     let server = server();
     let mut page = browser().new_page();

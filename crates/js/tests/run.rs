@@ -441,6 +441,48 @@ async fn the_cpu_limit_stops_a_busy_page_until_lifted() {
 }
 
 #[tokio::test]
+async fn the_end_of_the_wait_starts_no_task_and_interrupts_none() {
+    let js = runtime(ClockMode::Realtime);
+    js.run_script(
+        r#"
+        var log = [];
+        setTimeout(() => {
+            const end = performance.now() + 300;
+            while (performance.now() < end) {}
+            log.push('long');
+        }, 50);
+        setTimeout(() => log.push('next'), 60);
+        setTimeout(() => log.push('late'), 5000);
+        "#,
+        "a.js",
+    )
+    .unwrap();
+    js.set_work_limits(WorkLimits::default().with_wait(Some(ms(150))));
+    let started = Instant::now();
+    assert_eq!(
+        js.run(RunLimits::default()).await,
+        RunOutcome::BudgetExhausted(Budget::Wait)
+    );
+    // The task that was running at 150ms ran to its end at 350ms, and the
+    // one due after it was not started.
+    assert!(started.elapsed() >= ms(350));
+    assert!(js.waited_out());
+    assert_eq!(js.budget_exhausted(), None);
+    assert_eq!(json(&js, "log.join()"), r#""long""#);
+    // The host can still run JS, and the loop runs again with new limits.
+    js.set_work_limits(WorkLimits::default().with_wait(Some(ms(200))));
+    let started = Instant::now();
+    assert_eq!(
+        js.run(RunLimits::default()).await,
+        RunOutcome::BudgetExhausted(Budget::Wait)
+    );
+    // It did not wait for the timer due in five seconds.
+    let took = started.elapsed();
+    assert!(took >= ms(200) && took < ms(2000), "{took:?}");
+    assert_eq!(json(&js, "log.join()"), r#""long,next""#);
+}
+
+#[tokio::test]
 async fn a_script_looping_forever_is_stopped_by_the_cpu_limit() {
     let js = runtime(ClockMode::Virtual);
     js.set_work_limits(WorkLimits::from_now(Some(ms(50)), None, 0));

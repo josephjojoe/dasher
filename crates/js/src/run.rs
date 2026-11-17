@@ -60,7 +60,10 @@ pub enum RunOutcome {
     /// [`JsRuntime::set_work_limits`]); it runs no more JS until the
     /// limits are set again. Or, with [`Budget::PageTime`], the
     /// [skip limit](JsRuntime::set_skip_limit) was reached under
-    /// [`ClockMode::Manual`], so page time can move no further.
+    /// [`ClockMode::Manual`], so page time can move no further. Or, with
+    /// [`Budget::Wait`], the page has been waited for as long as it may
+    /// be ([`WorkLimits::wait_until`](crate::WorkLimits::wait_until)):
+    /// nothing was interrupted, and no more tasks are started.
     BudgetExhausted(Budget),
     /// The page asked to load another document (see
     /// [`JsRuntime::navigation_request`]). The loop stops after the task
@@ -85,10 +88,12 @@ impl JsRuntime {
     ///
     /// When nothing is runnable it waits for the next timer or animation
     /// frame, for tasks posted through a [`TaskSender`], or for the
-    /// deadline. In [`ClockMode::Virtual`] and [`ClockMode::Manual`] it
-    /// skips ahead to the next timer or frame instead of waiting, unless
-    /// host operations are in progress; then time runs at wall-clock speed
-    /// (frozen in `Manual`) until they finish.
+    /// deadline or the end of the [wait](crate::WorkLimits::wait_until),
+    /// whichever comes first. In [`ClockMode::Virtual`] and
+    /// [`ClockMode::Manual`] it skips ahead to the next timer or frame
+    /// instead of waiting, unless host operations are in progress; then
+    /// time runs at wall-clock speed (frozen in `Manual`) until they
+    /// finish.
     ///
     /// Skipping stops at the [skip limit](Self::set_skip_limit): past it,
     /// `Virtual` waits for timers in real time, and `Manual`, where page
@@ -115,6 +120,12 @@ impl JsRuntime {
                 }
                 if self.shared().window.has_navigation() {
                     return RunOutcome::NavigationRequested;
+                }
+                // Once the page has been waited for long enough no task
+                // is started; the one that ran past that was left to
+                // finish.
+                if self.waited_out() {
+                    return RunOutcome::BudgetExhausted(Budget::Wait);
                 }
                 match self.step() {
                     Ok(true) => {}
@@ -181,7 +192,10 @@ impl JsRuntime {
                     (a, b) => a.or(b),
                 },
             };
-            let deadline = self.deadline();
+            let deadline = match (self.deadline(), self.work_limits().wait_until) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             tokio::select! {
                 () = remote.notify.notified() => {}
                 () = sleep_for(wake_at.map(|at| at.saturating_sub(now))) => {}

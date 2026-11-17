@@ -1,0 +1,7 @@
+<!doctype html>
+<title>A late deferred script</title>
+<script>
+  document.addEventListener('DOMContentLoaded', () => { window.ready = true; });
+</script>
+<script defer src="/wait/late.js"></script>
+<p id="after">after</p>

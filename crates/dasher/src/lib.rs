@@ -72,8 +72,8 @@
 //! By default [`goto`](Page::goto) waits for the `load` event, then until
 //! the network has been idle for 500ms (see [`SettleOptions`]), within
 //! the budgets that keep any page from running on: 5 s of page time, 10 s
-//! of CPU and 1000 requests ([`Navigation::budget_exhausted`] says if one
-//! ended it). [`GotoOptions`] chooses other conditions, and
+//! of CPU, 1000 requests and 5 s of waiting in real time
+//! ([`Navigation::budget_exhausted`] says if one ended it). [`GotoOptions`] chooses other conditions, and
 //! [`Page::wait_for_selector`] and [`Page::wait_for_function`] wait for
 //! something specific. For infinite feeds, auto-scroll after settling:
 //!
@@ -145,7 +145,8 @@ pub use dasher_net::{Cookie, SameSite};
 pub use dasher_page::{
     AutoScrollOptions, AutoScrollReport, AutoScrollStop, Budget, DEFAULT_CPU_BUDGET,
     DEFAULT_MAX_SCROLLS, DEFAULT_PAGE_TIME_BUDGET, DEFAULT_QUIET, DEFAULT_REQUEST_BUDGET,
-    DEFAULT_SETTLE_TIMEOUT, LoadError, NetworkIdle, SettleOptions, SettleOutcome, WorkBudget,
+    DEFAULT_SETTLE_TIMEOUT, DEFAULT_WAIT_BUDGET, LoadError, NetworkIdle, SettleOptions,
+    SettleOutcome, WorkBudget,
 };
 /// The JSON value [`Page::evaluate`] returns, from `serde_json`.
 pub use serde_json::Value as JsonValue;

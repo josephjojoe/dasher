@@ -1,0 +1,8 @@
+<!doctype html>
+<title>A late async script</title>
+<p id="before">before</p>
+<script>
+  addEventListener('load', () => { window.loaded = true; });
+</script>
+<script async src="/wait/late.js"></script>
+<p id="after">after</p>

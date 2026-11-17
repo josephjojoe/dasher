@@ -28,6 +28,11 @@ pub const DEFAULT_MAX_NAVIGATIONS: usize = 5;
 /// and up that pages polling for updates refresh at.
 pub const DEFAULT_MAX_REFRESH_DELAY: Duration = Duration::from_secs(10);
 
+/// How long a chunk of the document may take to be handed over and still
+/// count as having arrived, once the [wait budget](WorkBudget::wait) is
+/// over: the parser takes the chunks that are there and waits for no more.
+const ARRIVED: Duration = Duration::from_millis(10);
+
 /// How a [`Page`] is loaded.
 #[derive(Clone, Debug)]
 pub struct PageOptions {
@@ -79,7 +84,9 @@ pub enum LoadError {
     InvalidUrl(String),
     /// The document could not be fetched.
     Network(dasher_net::Error),
-    /// The time limit ran out before the document's response arrived.
+    /// No response for the document arrived in time: within the
+    /// [time limit](PageOptions::timeout) and the
+    /// [wait budget](WorkBudget::wait).
     Timeout,
     /// The page's JS runtime could not be created.
     Runtime(ScriptError),
@@ -216,8 +223,13 @@ impl Page {
         if let Some(referrer) = &referrer {
             request = request.with_referrer(referrer.clone());
         }
-        let response = match deadline {
-            Some(deadline) => tokio::time::timeout_at(deadline.into(), session.send(request))
+        // The document is waited for no longer than anything else is.
+        let give_up = match (deadline, work_limits.wait_until) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let response = match give_up {
+            Some(at) => tokio::time::timeout_at(at.into(), session.send(request))
                 .await
                 .map_err(|_| LoadError::Timeout)?,
             None => session.send(request).await,
@@ -300,7 +312,11 @@ impl Page {
         let Some(request) = self.js.take_navigation_request() else {
             return Ok(false);
         };
-        if self.navigations_left == 0 || self.timed_out || self.budget_exhausted.is_some() {
+        if self.navigations_left == 0
+            || self.timed_out
+            || self.budget_exhausted.is_some()
+            || self.js.waited_out()
+        {
             return Ok(false);
         }
         let Ok(url) = Url::parse(&request.url) else {
@@ -372,16 +388,17 @@ impl Page {
     }
 
     /// The budget that stopped loading before the `load` event (or while
-    /// waiting for a refresh), if one did: [`Budget::Cpu`] or
-    /// [`Budget::Requests`] of [`PageOptions::budget`]. The page is as far
-    /// as it got.
+    /// waiting for a refresh), if one did: [`Budget::Cpu`],
+    /// [`Budget::Requests`] or [`Budget::Wait`] of
+    /// [`PageOptions::budget`]. The page is as far as it got.
     pub fn budget_exhausted(&self) -> Option<Budget> {
         self.budget_exhausted
     }
 
     /// Replaces the page's [work budget](PageOptions::budget), counting
     /// from now. [`WorkBudget::unlimited`] lets a page that used up its
-    /// budget run again.
+    /// budget, or was waited for as long as its budget allowed, run
+    /// again.
     pub fn set_budget(&mut self, budget: WorkBudget) {
         self.work_limits = work_limits(&self.session, budget);
         self.js.set_work_limits(self.work_limits);
@@ -506,6 +523,9 @@ impl Page {
         self.preload_links(true);
         self.find_refresh();
 
+        // The parser went on through what had arrived. Past the wait
+        // budget nothing new is started: no deferred script, no event.
+        self.check_wait()?;
         self.js.set_ready_state(ReadyState::Interactive);
         self.check_navigation()?;
         while let Some(id) = self.scripts.next_deferred() {
@@ -513,11 +533,13 @@ impl Page {
             self.scripts.execute(&self.js, id);
             self.check_navigation()?;
         }
+        self.check_wait()?;
         self.js
             .fire_event(EventTarget::Document, "DOMContentLoaded", true, false);
         self.check_navigation()?;
         self.spin(&mut wait, Until::AsapScriptsDone).await?;
 
+        self.check_wait()?;
         self.js.set_ready_state(ReadyState::Complete);
         self.js
             .fire_event(EventTarget::Window, "load", false, false);
@@ -659,7 +681,7 @@ impl Page {
             .scripts
             .fetch(&self.session, hold, params, order, operation);
         if order == Order::Blocking {
-            self.spin(wait, Until::Script(id)).await?;
+            self.spin(wait, Until::ParserScript(id)).await?;
             self.js.set_document_write(DocumentWrite::Capture);
             self.scripts.execute(&self.js, id);
             self.take_written(parser);
@@ -854,11 +876,27 @@ impl Page {
         Ok(())
     }
 
+    /// Fails with [`Stop::Budget`] once the page has been waited for as
+    /// long as its [wait budget](WorkBudget::wait) allows.
+    fn check_wait(&self) -> Result<(), Stop> {
+        if self.js.waited_out() {
+            return Err(Stop::Budget(Budget::Wait));
+        }
+        Ok(())
+    }
+
     /// Runs the event loop, loading and running scripts as they become
     /// ready, until `until` holds.
     ///
     /// For [`Until::Body`], returns the next chunk of the document, or
     /// `None` at its end.
+    ///
+    /// Once the [wait budget](WorkBudget::wait) is over nothing more is
+    /// run or waited for, and this ends with [`Stop::Budget`] (for
+    /// [`Until::Run`], the outcome [`RunOutcome::BudgetExhausted`]), with
+    /// two exceptions that let the parser finish what it has: a chunk of
+    /// the document that has arrived is still handed over, and the script
+    /// the parser stopped at is still waited for.
     pub(crate) async fn spin(
         &mut self,
         wait: &mut Wait,
@@ -867,12 +905,40 @@ impl Page {
         let mut loop_active = true;
         loop {
             self.prepare_inserted();
-            if self.scripts.run_ready(&self.js) {
+            let waited_out = self.js.waited_out();
+            if !waited_out && self.scripts.run_ready(&self.js) {
                 loop_active = true;
             }
             self.check_navigation()?;
+            if waited_out {
+                match until {
+                    Until::Body => {
+                        let Some(body) = wait.body.as_mut() else {
+                            return Ok(None);
+                        };
+                        return match tokio::time::timeout(ARRIVED, body.next()).await {
+                            Ok(chunk) => Ok(chunk),
+                            Err(_) => Err(Stop::Budget(Budget::Wait)),
+                        };
+                    }
+                    // Only the script is waited for; nothing runs meanwhile.
+                    Until::ParserScript(_) => loop_active = false,
+                    Until::Run(_) => {
+                        wait.outcome
+                            .get_or_insert(RunOutcome::BudgetExhausted(Budget::Wait));
+                        return Ok(None);
+                    }
+                    Until::Script(_) | Until::AsapScriptsDone => {
+                        return Err(Stop::Budget(Budget::Wait));
+                    }
+                }
+            }
             match until {
-                Until::Script(id) if self.scripts.is_ready(&self.js, id) => return Ok(None),
+                Until::Script(id) | Until::ParserScript(id)
+                    if self.scripts.is_ready(&self.js, id) =>
+                {
+                    return Ok(None);
+                }
                 Until::AsapScriptsDone if !self.scripts.has_pending_asap() => return Ok(None),
                 Until::Run(_) if wait.outcome.is_some() => return Ok(None),
                 _ => {}
@@ -882,6 +948,7 @@ impl Page {
                 _ => RunLimits::default(),
             };
             let deadline = self.deadline;
+            let wait_until = self.work_limits.wait_until;
             let Page { js, scripts, .. } = self;
             let fetching = scripts.fetching();
             let body = wait.body.as_mut();
@@ -894,7 +961,10 @@ impl Page {
                 () = js.script_inserted() => {}
                 () = js.module_graph_settled() => {}
                 outcome = js.run(limits), if loop_active => match outcome {
-                    RunOutcome::NavigationRequested => {}
+                    // The top of the loop decides what the end of the wait
+                    // means for what is waited for.
+                    RunOutcome::NavigationRequested
+                    | RunOutcome::BudgetExhausted(Budget::Wait) => {}
                     RunOutcome::DeadlineExceeded
                     | RunOutcome::Interrupted
                     | RunOutcome::LimitExceeded(_)
@@ -921,6 +991,7 @@ impl Page {
                     }
                 },
                 () = sleep_until(deadline), if !loop_active => return Err(Stop::Halted),
+                () = sleep_until(wait_until), if !waited_out => {}
             }
         }
     }
@@ -933,6 +1004,9 @@ pub(crate) enum Until {
     Body,
     /// Script `id` to have loaded.
     Script(ScriptId),
+    /// Script `id`, which the parser has stopped at, to have loaded. The
+    /// end of the [wait budget](WorkBudget::wait) does not end this wait.
+    ParserScript(ScriptId),
     /// The async and in-order scripts to have run.
     AsapScriptsDone,
     /// The event loop to stop, as `JsRuntime::run` with these limits does.
@@ -990,10 +1064,10 @@ impl Drop for BodyReader {
 /// The work limits that give `budget` from now.
 fn work_limits(session: &Session, budget: WorkBudget) -> WorkLimits {
     let started = session.activity().requests_started();
-    WorkLimits::from_now(budget.cpu, budget.requests, started)
+    WorkLimits::from_now(budget.cpu, budget.requests, started).with_wait(budget.wait)
 }
 
-async fn sleep_until(deadline: Option<Instant>) {
+pub(crate) async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
         None => std::future::pending().await,

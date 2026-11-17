@@ -1,0 +1,12 @@
+<!doctype html>
+<title>A page whose network never goes quiet</title>
+<ul id="list"></ul>
+<script>
+  window.polls = 0;
+  async function poll() {
+    await fetch('/wait/api');
+    window.polls++;
+    poll();
+  }
+  poll();
+</script>

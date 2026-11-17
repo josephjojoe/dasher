@@ -113,8 +113,10 @@
 //! a timer forever, a feed fetches "more stories" as soon as the last
 //! batch arrives. Under the virtual clock, skipping from one tick to the
 //! next would turn a page doing 20ms of work a second into a busy loop
-//! that runs until the timeout. Three budgets bound every page load, and
-//! when one runs out the page is left as it stands. That is not an error:
+//! that runs until the timeout. Other pages are just slow: a script or
+//! an API takes its time, and what it would add may not be worth the
+//! wait. Four budgets bound every page load, and when one runs out the
+//! page is left as it stands. That is not an error:
 //! what ended it is reported as [`SettleOutcome::BudgetExhausted`],
 //! [`AutoScrollStop::BudgetExhausted`] or [`Page::budget_exhausted`], with
 //! the [`Budget`] that ran out.
@@ -129,10 +131,16 @@
 //!   scrolling.
 //! - **Requests** ([`WorkBudget::requests`], 1000 by default): requests
 //!   made through the page's session over the same span.
+//! - **Wait** ([`WorkBudget::wait`], 5 s by default): real time, over the
+//!   same span. Once it has passed nothing new is started and nothing
+//!   that has not arrived is waited for. Unlike the others, and unlike
+//!   [`PageOptions::timeout`], it interrupts nothing: a script that is
+//!   running finishes, and the parser goes on through what has arrived of
+//!   the document, scripts included.
 //!
-//! The CPU and request budgets are set with [`PageOptions::budget`] and
-//! replaced with [`Page::set_budget`]; a page that used one up runs no JS
-//! until it gets another.
+//! The CPU, request and wait budgets are set with [`PageOptions::budget`]
+//! and replaced with [`Page::set_budget`]; a page that used up its CPU
+//! time or requests runs no JS until it gets another.
 //!
 //! Callbacks waiting in `requestIdleCallback` run as page time passes, but
 //! never hold a page open: a page whose only work left is idle callbacks
@@ -183,7 +191,8 @@ mod scroll;
 mod settle;
 
 pub use budget::{
-    DEFAULT_CPU_BUDGET, DEFAULT_PAGE_TIME_BUDGET, DEFAULT_REQUEST_BUDGET, WorkBudget,
+    DEFAULT_CPU_BUDGET, DEFAULT_PAGE_TIME_BUDGET, DEFAULT_REQUEST_BUDGET, DEFAULT_WAIT_BUDGET,
+    WorkBudget,
 };
 pub use dasher_js::Budget;
 pub use page::{DEFAULT_MAX_NAVIGATIONS, DEFAULT_MAX_REFRESH_DELAY, LoadError, Page, PageOptions};

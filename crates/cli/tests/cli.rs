@@ -343,6 +343,20 @@ fn budgets_end_pages_that_never_finish_and_say_so() {
     assert_eq!(out["budget_exhausted"], "requests");
     assert!(out["requests"].as_u64().unwrap() <= 22, "{out}");
 
+    // The wait budget ends a page that keeps the network busy, and that
+    // is not a timeout.
+    let out = json(&dasher(&[
+        &server.url("/more.html"),
+        "--json",
+        "--request-budget=0",
+        "--wait-budget",
+        "0.4",
+    ]));
+    assert_eq!(out["timed_out"], false);
+    assert_eq!(out["settle"], "budget_exhausted");
+    assert_eq!(out["budget_exhausted"], "wait");
+    assert!(out["html"].as_str().unwrap().contains("<li>"));
+
     // With the budgets off, the page runs until the timeout.
     let out = json(&dasher(&[
         &server.url("/ticker.html"),
@@ -350,6 +364,7 @@ fn budgets_end_pages_that_never_finish_and_say_so() {
         "--wait=settled",
         "--page-time-budget",
         "0",
+        "--wait-budget=0",
         "-t",
         "0.5",
     ]));

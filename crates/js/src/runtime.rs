@@ -882,6 +882,15 @@ impl JsRuntime {
         self.shared.budget_exhausted()
     }
 
+    /// Whether the page has been waited for as long as it may be: the
+    /// time in [`WorkLimits::wait_until`] has passed. [`run`](Self::run)
+    /// then starts no more tasks and ends with [`Budget::Wait`]. JS the
+    /// host runs itself is not stopped, so a host that honours the limit
+    /// asks before it starts any.
+    pub fn waited_out(&self) -> bool {
+        self.shared.budget.waited_out()
+    }
+
     /// How much page time the event loop has skipped in all, jumping
     /// ahead to timers in [`ClockMode::Virtual`] or through
     /// [`advance`](Self::advance): how far page time is ahead of the wall

@@ -194,6 +194,7 @@ unknown field is an error, so a typo does not go unnoticed.
 | `page_time_budget_ms` | `5000` | The most page time to spend waiting for the page to go quiet. `0` for no limit. See [Budgets](#budgets). |
 | `cpu_budget_ms` | `10000` | The most CPU time loading, waiting and scrolling may use. `0` for no limit. |
 | `request_budget` | `1000` | The most requests the page may make. `0` for no limit. |
+| `wait_budget_ms` | `5000` | The longest the page is waited for, in real time. Past it nothing new is started or waited for, and nothing is interrupted. `0` for no limit. |
 | `scroll` | `false` | `true` or `{"max_scrolls": n}`: scroll to load infinite feeds and lazy content. |
 | `html` | `true` unless `extract` is given | Return the page's HTML. |
 | `extract` | | Named values to pull out; see below. |
@@ -246,7 +247,7 @@ A job that loaded its page answers `200`:
 - `status` is the site's: a 404 page loads like any other and answers
   `200` here, with `"status": 404`.
 - `budget_exhausted` names the budget that ended the page early, if one
-  did (`"page_time"`, `"cpu"` or `"requests"`); `settle` (or
+  did (`"page_time"`, `"cpu"`, `"requests"` or `"wait"`); `settle` (or
   `scroll.stopped`) is then `"budget_exhausted"`. That is a success: the
   page is returned as it stood.
 - `html` is there when asked for.
@@ -291,9 +292,9 @@ Failures carry an `error` message and one of these statuses:
 
 ### Budgets
 
-Besides its time limit, every job is bounded by three budgets, so a page
+Besides its time limit, every job is bounded by four budgets, so a page
 that would never finish costs a few CPU seconds and not a core until
-`timeout_ms`:
+`timeout_ms`, and a slow one a few seconds of an instance:
 
 - **Page time** (`page_time_budget_ms`, 5 s). dasher's clock skips ahead
   to a page's next timer instead of sleeping. A carousel, ticker or
@@ -306,6 +307,18 @@ that would never finish costs a few CPU seconds and not a core until
   loading, settling and scrolling. It stops scripts that never yield.
 - **Requests** (`request_budget`, 1000): for pages that fetch more as
   soon as the last batch arrives.
+- **Wait** (`wait_budget_ms`, 5 s): real time from the start of the
+  job. Once it has passed the page is waited for no longer: no new
+  timer or network callback runs, no deferred or async script, no
+  `load` event, and a response that has not arrived is given up on (if
+  it is the document's, the job fails as it does on `timeout_ms`).
+  Nothing is interrupted: a script that is running finishes, and the
+  parser goes on through the part of the document that has arrived,
+  still fetching and running the scripts it meets. So a job can outlast
+  this budget, by a long script or a slow script the parser stops at;
+  `timeout_ms` is the hard stop. Raise it for a page whose content
+  takes longer to come in, as with a slow API behind `wait_for` or a
+  long `scroll`.
 
 When one runs out the job answers `200` with the page as it stood and
 `budget_exhausted` naming the budget. Extraction still runs: the budgets

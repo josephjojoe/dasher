@@ -1,11 +1,12 @@
 //! Work budgets: how much CPU time and how many requests a page may use
-//! before it is stopped, and which budget ran out.
+//! before it is stopped, how long it may wait, and which budget ran out.
 //!
 //! The limits are thresholds, as a deadline is: the page stops once the
 //! thread's CPU time reaches one, or once its session has started more
-//! requests than the other. The host works them out from a budget when an
-//! operation starts (see `dasher_page`), so they carry over unchanged to
-//! the runtime of a document the page navigates to.
+//! requests than the other, and starts nothing new once the clock passes
+//! the third. The host works them out from a budget when an operation
+//! starts (see `dasher_page`), so they carry over unchanged to the runtime
+//! of a document the page navigates to.
 
 use std::cell::Cell;
 use std::fmt;
@@ -26,15 +27,22 @@ pub enum Budget {
     Cpu,
     /// The page made too many requests ([`WorkLimits::requests`]).
     Requests,
+    /// The page has been given as long as it may have
+    /// ([`WorkLimits::wait_until`]). Unlike the others this interrupts
+    /// nothing: the task that was running finished, and no more are
+    /// started.
+    Wait,
 }
 
 impl Budget {
-    /// The budget's snake_case name: `page_time`, `cpu` or `requests`.
+    /// The budget's snake_case name: `page_time`, `cpu`, `requests` or
+    /// `wait`.
     pub fn name(self) -> &'static str {
         match self {
             Self::PageTime => "page_time",
             Self::Cpu => "cpu",
             Self::Requests => "requests",
+            Self::Wait => "wait",
         }
     }
 }
@@ -45,6 +53,7 @@ impl fmt::Display for Budget {
             Self::PageTime => "the page-time budget ran out",
             Self::Cpu => "the CPU budget ran out",
             Self::Requests => "the request budget ran out",
+            Self::Wait => "the wait budget ran out",
         })
     }
 }
@@ -60,6 +69,12 @@ pub struct WorkLimits {
     /// [`requests_started`](dasher_net::NetworkActivity::requests_started)
     /// count goes past this.
     pub requests: Option<u64>,
+    /// The time after which the page starts nothing new and is waited for
+    /// no longer: [`JsRuntime::run`](crate::JsRuntime::run) runs no more
+    /// tasks and ends with [`Budget::Wait`]. Nothing is interrupted: a
+    /// task that is running finishes, and scripts the host runs itself
+    /// still run.
+    pub wait_until: Option<Instant>,
 }
 
 impl WorkLimits {
@@ -70,7 +85,14 @@ impl WorkLimits {
         Self {
             cpu_time: cpu.map(|cpu| thread_cpu_time() + cpu),
             requests: requests.map(|n| started.saturating_add(n)),
+            wait_until: None,
         }
+    }
+
+    /// These limits, with the page waited for `wait` longer from now.
+    pub fn with_wait(mut self, wait: Option<Duration>) -> Self {
+        self.wait_until = wait.map(|wait| Instant::now() + wait);
+        self
     }
 }
 
@@ -127,6 +149,14 @@ impl BudgetState {
 
     pub(crate) fn limits(&self) -> WorkLimits {
         self.limits.get()
+    }
+
+    /// Whether the time the page is waited for is over.
+    pub(crate) fn waited_out(&self) -> bool {
+        self.limits
+            .get()
+            .wait_until
+            .is_some_and(|at| Instant::now() >= at)
     }
 
     /// The budget that ran out, if one has; `requests_started` gives the

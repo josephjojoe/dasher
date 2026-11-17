@@ -38,6 +38,10 @@ Budgets (when one runs out, the page is output as it stands; 0 for none):
       --cpu-budget <secs>   most CPU time for loading, waiting and
                             scrolling [default: 10]
       --request-budget <n>  most requests the page may make [default: 1000]
+      --wait-budget <secs>  longest the page is waited for, in real time
+                            [default: 5]. Past it nothing new is started
+                            or waited for; a script that is running
+                            finishes, and so does parsing what has arrived
 
 Browser:
   -A, --user-agent <ua>     User-Agent header and navigator.userAgent
@@ -121,6 +125,8 @@ pub struct Options {
     pub cpu_budget: Option<Duration>,
     /// `Some(0)` lifts the budget, `None` keeps the default.
     pub request_budget: Option<u64>,
+    /// `Some(ZERO)` lifts the budget, `None` keeps the default.
+    pub wait_budget: Option<Duration>,
     pub user_agent: Option<String>,
     pub viewport: Option<(u32, u32)>,
     pub headers: Vec<(String, String)>,
@@ -153,6 +159,7 @@ impl Options {
             page_time_budget: None,
             cpu_budget: None,
             request_budget: None,
+            wait_budget: None,
             user_agent: None,
             viewport: None,
             headers: Vec::new(),
@@ -241,6 +248,9 @@ pub fn parse(
             "--cpu-budget" => options.cpu_budget = Some(budget_seconds(&name, &value("seconds")?)?),
             "--request-budget" => {
                 options.request_budget = Some(number(&name, &value("a count")?)?);
+            }
+            "--wait-budget" => {
+                options.wait_budget = Some(budget_seconds(&name, &value("seconds")?)?);
             }
             "-A" | "--user-agent" => options.user_agent = Some(value("a user agent")?),
             "--viewport" => options.viewport = Some(viewport(&value("WIDTHxHEIGHT")?)?),
@@ -372,6 +382,7 @@ mod tests {
             "0",
             "--request-budget",
             "300",
+            "--wait-budget=7.5",
             "-A",
             "bot/1",
             "--viewport",
@@ -414,6 +425,7 @@ mod tests {
         assert_eq!(options.page_time_budget, Some(Duration::from_millis(2500)));
         assert_eq!(options.cpu_budget, Some(Duration::ZERO));
         assert_eq!(options.request_budget, Some(300));
+        assert_eq!(options.wait_budget, Some(Duration::from_millis(7500)));
         assert_eq!(options.user_agent.as_deref(), Some("bot/1"));
         assert_eq!(options.viewport, Some((390, 844)));
         assert_eq!(
@@ -464,6 +476,7 @@ mod tests {
         assert!(err(&["u", "--quiet", "1.5"]).contains("whole number"));
         assert!(err(&["u", "--cpu-budget", "-1"]).contains("seconds"));
         assert!(err(&["u", "--request-budget", "lots"]).contains("whole number"));
+        assert!(err(&["u", "--wait-budget", "soon"]).contains("seconds"));
         assert!(err(&["u", "--viewport", "100"]).contains("WIDTHxHEIGHT"));
         assert!(err(&["u", "--viewport", "0x10"]).contains("WIDTHxHEIGHT"));
         assert!(err(&["u", "-H", "no colon"]).contains("Name: value"));

@@ -7,7 +7,7 @@ use dasher_css::SelectorList;
 use dasher_js::{Budget, ClockMode, ResourceLimit, RunLimits, RunOutcome, thread_cpu_time};
 
 use crate::budget::DEFAULT_PAGE_TIME_BUDGET;
-use crate::page::{Page, Stop, Until, Wait};
+use crate::page::{Page, Stop, Until, Wait, sleep_until};
 
 /// How often, in page time, conditions are looked at again while the
 /// page is busy.
@@ -145,7 +145,9 @@ pub enum SettleOutcome {
     /// before the page went quiet; the selector and predicate, if any,
     /// hold. With [`Budget::Cpu`] or [`Budget::Requests`], the page's
     /// [work budget](crate::WorkBudget) ran out, and it runs no more JS
-    /// until [`Page::set_budget`] gives it another.
+    /// until [`Page::set_budget`] gives it another. With
+    /// [`Budget::Wait`], the page had been waited for as long as that
+    /// budget allows before the conditions held; nothing was interrupted.
     BudgetExhausted(Budget),
 }
 
@@ -175,7 +177,9 @@ impl Page {
     /// checked whenever the event loop has run, at least every 50ms of
     /// page time. Scripts still running when the timeout passes are
     /// interrupted. So are they when the page's
-    /// [work budget](crate::WorkBudget) runs out.
+    /// [work budget](crate::WorkBudget) runs out of CPU time or requests;
+    /// when its [wait](crate::WorkBudget::wait) is over, settling ends
+    /// after the task that is running.
     pub async fn settle(&mut self, options: &SettleOptions) -> Result<SettleOutcome, SettleError> {
         let selector = options
             .selector
@@ -336,6 +340,7 @@ impl Page {
                             () = tokio::time::sleep(pause) => {}
                             _ = in_flight.changed() => {}
                             () = tokio::time::sleep_until(deadline.into()) => {}
+                            () = sleep_until(self.js.work_limits().wait_until) => {}
                         }
                     }
                 }

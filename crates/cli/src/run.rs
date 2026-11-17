@@ -172,6 +172,10 @@ fn goto_options(options: &Options) -> GotoOptions {
             None => defaults.requests,
             Some(n) => (n > 0).then_some(n),
         },
+        wait: match options.wait_budget {
+            None => defaults.wait,
+            Some(wait) => (!wait.is_zero()).then_some(wait),
+        },
     };
     let mut goto = GotoOptions {
         settle: waits.then_some(settle),

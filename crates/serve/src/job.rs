@@ -66,6 +66,11 @@ pub struct Job {
     /// The most requests the page may make: the document, scripts,
     /// `fetch()` and XHR. Defaults to 1000; 0 for no limit.
     pub request_budget: Option<u64>,
+    /// The longest the page is waited for, in milliseconds of real time.
+    /// Past it nothing new is started or waited for; a script that is
+    /// running finishes, and so does parsing what has arrived. Defaults to
+    /// 5000; 0 for no limit.
+    pub wait_budget_ms: Option<u64>,
     /// Scrolls the page after it has loaded to bring in infinite feeds
     /// and lazy content: `true`, or `{"max_scrolls": n}`.
     #[serde(default)]
@@ -162,7 +167,7 @@ impl Job {
         }
     }
 
-    /// The CPU and request budget for the whole page load.
+    /// The CPU, request and wait budget for the whole page load.
     pub fn work_budget(&self) -> dasher::WorkBudget {
         let defaults = dasher::WorkBudget::default();
         dasher::WorkBudget {
@@ -175,6 +180,11 @@ impl Job {
                 None => defaults.requests,
                 Some(0) => None,
                 Some(n) => Some(n),
+            },
+            wait: match self.wait_budget_ms {
+                None => defaults.wait,
+                Some(0) => None,
+                Some(ms) => Some(Duration::from_millis(ms)),
             },
         }
     }

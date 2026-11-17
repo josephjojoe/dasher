@@ -98,8 +98,9 @@ pub enum AutoScrollStop {
     /// The page went over a resource limit and can run no more.
     LimitExceeded(dasher_js::ResourceLimit),
     /// The page's [work budget](crate::WorkBudget) ran out:
-    /// [`Budget::Cpu`] or [`Budget::Requests`]. (A round whose settle
-    /// spends its page-time budget just ends, and scrolling goes on.)
+    /// [`Budget::Cpu`], [`Budget::Requests`] or [`Budget::Wait`]. (A
+    /// round whose settle spends its page-time budget just ends, and
+    /// scrolling goes on.)
     BudgetExhausted(Budget),
 }
 
@@ -148,6 +149,10 @@ impl Page {
                     return Ok(report);
                 }
                 settle.timeout = settle.timeout.min(left);
+            }
+            if self.js.waited_out() {
+                report.stopped = AutoScrollStop::BudgetExhausted(Budget::Wait);
+                return Ok(report);
             }
             self.scroll_down();
             report.scrolls += 1;

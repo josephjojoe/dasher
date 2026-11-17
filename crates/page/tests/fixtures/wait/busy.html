@@ -1,0 +1,16 @@
+<!doctype html>
+<title>A script that runs past the wait</title>
+<p id="before">before</p>
+<script>
+  document.addEventListener('DOMContentLoaded', () => { window.ready = true; });
+  setTimeout(() => { window.timer = true; }, 0);
+  Promise.resolve().then(() => { window.microtask = true; });
+  const start = performance.now();
+  while (performance.now() - start < 600) {}
+  window.finished = true;
+</script>
+<script>
+  window.next = true;
+</script>
+<script defer src="/wait/quick.js"></script>
+<p id="after">after</p>

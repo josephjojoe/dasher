@@ -1,0 +1,11 @@
+<!doctype html>
+<title>A slow script the parser waits for</title>
+<script>
+  addEventListener('load', () => { window.loaded = true; });
+  setTimeout(() => { window.timer = true; }, 400);
+</script>
+<script src="/wait/late.js"></script>
+<script>
+  window.sawLate = window.late === true;
+</script>
+<p id="after">after</p>

@@ -177,14 +177,26 @@ dasher waits for a page to go quiet (by default, no requests for
 500 ms) under a clock that skips ahead to the page's next timer instead
 of sleeping. Some pages never go quiet: a carousel changes the DOM on a
 timer forever, a feed fetches more as soon as the last batch arrives.
-Three budgets bound every load, and when one runs out the page is
-returned as it stands, as a success that names the budget:
+Others are slow: a script or an API takes seconds to answer. Four
+budgets bound every load, and when one runs out the page is returned as
+it stands, as a success that names the budget:
 
 | Budget | Default | CLI | Job field |
 | --- | --- | --- | --- |
 | Page time spent waiting for quiet | 5 s | `--page-time-budget` | `page_time_budget_ms` |
 | CPU time for loading, settling and scrolling | 10 s | `--cpu-budget` | `cpu_budget_ms` |
 | Requests the page makes | 1000 | `--request-budget` | `request_budget` |
+| Real time the page is waited for | 5 s | `--wait-budget` | `wait_budget_ms` |
+
+The wait budget interrupts nothing. Once it has passed, dasher starts
+nothing new (no timer or network callback, no deferred script, no
+`load` event) and waits for nothing that has not arrived, but a script
+that is running finishes, and the parser goes on through what has
+arrived of the document, still fetching and running the scripts it
+meets there. The hard stop is the time limit (`-t`, 30 s), which does
+interrupt. A page whose content takes longer than 5 s to come in (a
+slow API behind `--wait-for`, a long `--scroll`) needs a longer
+`--wait-budget`.
 
 A page's JS heap is capped as well (256 MiB), and its DOM (500,000
 nodes); a page that goes over is stopped and the load fails, so one
