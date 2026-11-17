@@ -73,6 +73,24 @@ rquickjs-sys = { git = "https://github.com/josephjojoe/dasher" }
   through the record that is not there: a segmentation fault, which a
   page reached at its memory limit. Both now return when there is no
   record. Test: `crates/js/tests/limits.rs`.
+- **A compile is not refused memory part-way.** Upstream's compiler uses
+  most of what it allocates without checking it, and a bytecode buffer
+  that cannot grow goes on taking the writes that still fit, so the next
+  pass reads code that is cut short: a segmentation fault, which a page
+  reached when it filled its heap and then called a function for the
+  first time (linkedin.com). Here, while the engine compiles, a limit
+  lets an allocation go over it and notes that it did: `JSOverdraft` and
+  `JS_GetOverdraft()` in `quickjs.h`, which `crates/js/src/heap.rs` uses
+  for dasher's limit. The parser then fails with an out-of-memory error
+  at its next token, and `js_create_function2()` before each of its
+  passes, so what goes over the limit is what one token or one pass
+  allocates. Three smaller changes go with it. A `DynBuf` that could not
+  grow takes no more writes at all. `js_create_function2()` refuses a
+  function whose code buffer failed. And a function whose compile on its
+  first call failed is compiled the next time without the records of the
+  functions inside it: the failed parse took and freed them, and
+  `js_lazy_peek()` read through one. Tests: `crates/js/tests/limits.rs`,
+  and `starved` in `crates/js/src/heap.rs`.
 - **A closure keeps the suspended function it reads from.** A generator
   or async function keeps its frame on the heap, and a closure made in
   it reads the frame's variables in place. Upstream's collector did not

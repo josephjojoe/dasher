@@ -58,6 +58,48 @@ fn a_bind_the_heap_has_no_room_for_fails_cleanly() {
 }
 
 #[test]
+fn a_function_first_called_on_a_full_heap_fails_cleanly() {
+    // linkedin.com filled its heap, caught the error, and went on to call
+    // a function nothing had called before. A function is compiled when it
+    // is first called, and the heap had room for the compiler's first few
+    // blocks but not for the function's bytecode to grow: the buffer was
+    // left cut short, the next pass read past its end, and the process
+    // died on a signal.
+    //
+    // The page here does the same, and then lets go of a little more of
+    // its heap each time, so that the room runs out at each point of the
+    // compile in turn: with too little the compile fails at its start,
+    // and with enough the function runs.
+    let body = "a.toString(a.length, a.name);\n".repeat(60);
+    for freed in 0..64 {
+        let js = with_heap(8 * MIB);
+        let err = js
+            .run_script(
+                &format!(
+                    "function report(a) {{\n{body} return a; }}
+                     const keep = new Array(20000).fill(null);
+                     let n = 0;
+                     for (const size of [4096, 256, 1]) {{
+                         try {{
+                             for (;;) {{ keep[n] = 'x'.repeat(size) + n; n++; }}
+                         }} catch (e) {{}}
+                     }}
+                     for (let i = 1; i <= {freed}; i++) keep[n - i] = null;
+                     report({{}});"
+                ),
+                "full.js",
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::OutOfMemory, "{freed}: {err:?}");
+        assert_eq!(
+            js.limit_exceeded(),
+            Some(ResourceLimit::JsHeap { limit: 8 * MIB }),
+            "{freed}"
+        );
+    }
+}
+
+#[test]
 fn filling_the_heap_stops_the_page_even_if_it_catches_the_error() {
     let js = with_heap(16 * MIB);
     // The page swallows the out-of-memory error and carries on.

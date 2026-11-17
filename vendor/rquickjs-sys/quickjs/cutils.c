@@ -137,6 +137,12 @@ int dbuf_realloc(DynBuf *s, size_t new_size)
         new_buf = s->realloc_func(s->opaque, s->buf, new_size);
         if (!new_buf) {
             s->error = true;
+            /* dasher: and nothing more is written, where upstream goes on
+               writing what still fits: a byte after four that did not. A
+               reader of the buffer (free_bytecode_atoms) can take a
+               buffer cut short, not one with a hole in it. With no room
+               every write comes here, and fails above. */
+            s->allocated_size = 0;
             return -1;
         }
         s->buf = new_buf;

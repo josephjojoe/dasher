@@ -453,6 +453,19 @@ JS_EXTERN JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque);
    blocks (see quickjs.c) */
 JS_EXTERN void JS_SetMallocFunctions(JSRuntime *rt, const JSMallocFunctions *mf,
                                      void *opaque);
+/* dasher: the compiler does not survive a refused allocation: most of
+   what it allocates it uses unchecked, and a buffer that could not grow
+   leaves bytecode cut short for the next pass to read. So while the engine
+   compiles (`allowed`), a limit lets an allocation go over it and sets
+   `taken`: the engine's own limit does, and an allocator with a limit of
+   its own should, through this pointer. The compiler stops with an
+   out-of-memory error at its next token or pass, so what goes over is what
+   one token or one pass allocates. */
+typedef struct JSOverdraft {
+    int allowed; /* set by the engine while it compiles */
+    int taken;   /* set when an allocation went over a limit */
+} JSOverdraft;
+JS_EXTERN JSOverdraft *JS_GetOverdraft(JSRuntime *rt);
 JS_EXTERN void JS_FreeRuntime(JSRuntime *rt);
 JS_EXTERN void *JS_GetRuntimeOpaque(JSRuntime *rt);
 JS_EXTERN void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque);

@@ -50,6 +50,11 @@ pub struct RuntimeOptions {
     /// past it fail with an out-of-memory error inside the script, and one
     /// refused once more than half the limit is in use stops the page (see
     /// [`ResourceLimit::JsHeap`]). `None` means unlimited.
+    ///
+    /// The engine's compiler is not refused: an allocation it makes past
+    /// the limit succeeds, counts as a refusal, and fails the compile at
+    /// its next token, so the heap can stand over the limit by what one
+    /// token allocates until the compile has been abandoned.
     pub memory_limit: Option<usize>,
     /// Upper bound on the nodes the page's document may hold, attached or
     /// not. Going over it stops the page (see [`ResourceLimit::DomNodes`]).

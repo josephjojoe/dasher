@@ -325,6 +325,8 @@ struct JSRuntime {
     bool can_block; /* true if Atomics.wait can block */
     /* dasher: compile a function on its first call (JS_SetLazyFunctions) */
     bool lazy_functions;
+    /* dasher: see JSOverdraft in quickjs.h */
+    JSOverdraft overdraft;
     /* dasher: the embedder's script cache (JS_SetScriptSource,
        JS_SetLazyCompileHook) */
     const JSScriptSource *script_source;
@@ -1721,6 +1723,16 @@ static size_t js_malloc_usable_size_unknown(const void *ptr)
     return 0;
 }
 
+/* dasher: whether an allocation over the engine's limit is refused: not
+   while compiling (see JSOverdraft) */
+static bool js_malloc_refused(JSRuntime *rt)
+{
+    if (!rt->overdraft.allowed)
+        return true;
+    rt->overdraft.taken = 1;
+    return false;
+}
+
 void *js_calloc_rt(JSRuntime *rt, size_t count, size_t size)
 {
     void *ptr;
@@ -1735,7 +1747,8 @@ void *js_calloc_rt(JSRuntime *rt, size_t count, size_t size)
 
     s = &rt->malloc_state;
     /* When malloc_limit is 0 (unlimited), malloc_limit - 1 will be SIZE_MAX. */
-    if (unlikely(s->malloc_size + (count * size) > s->malloc_limit - 1))
+    if (unlikely(s->malloc_size + (count * size) > s->malloc_limit - 1) &&
+        js_malloc_refused(rt))
         return NULL;
 
     ptr = rt->mf.js_calloc(s->opaque, count, size);
@@ -1757,7 +1770,8 @@ void *js_malloc_rt(JSRuntime *rt, size_t size)
 
     s = &rt->malloc_state;
     /* When malloc_limit is 0 (unlimited), malloc_limit - 1 will be SIZE_MAX. */
-    if (unlikely(s->malloc_size + size > s->malloc_limit - 1))
+    if (unlikely(s->malloc_size + size > s->malloc_limit - 1) &&
+        js_malloc_refused(rt))
         return NULL;
 
     ptr = rt->mf.js_malloc(s->opaque, size);
@@ -1799,7 +1813,8 @@ void *js_realloc_rt(JSRuntime *rt, void *ptr, size_t size)
     old_size = rt->mf.js_malloc_usable_size(ptr);
     s = &rt->malloc_state;
     /* When malloc_limit is 0 (unlimited), malloc_limit - 1 will be SIZE_MAX. */
-    if (s->malloc_size + size - old_size > s->malloc_limit - 1)
+    if (s->malloc_size + size - old_size > s->malloc_limit - 1 &&
+        js_malloc_refused(rt))
         return NULL;
 
     ptr = rt->mf.js_realloc(s->opaque, ptr, size);
@@ -1821,6 +1836,29 @@ void JS_SetMallocFunctions(JSRuntime *rt, const JSMallocFunctions *mf,
     if (!rt->mf.js_malloc_usable_size)
         rt->mf.js_malloc_usable_size = js_malloc_usable_size_unknown;
     rt->malloc_state.opaque = opaque;
+}
+
+JSOverdraft *JS_GetOverdraft(JSRuntime *rt)
+{
+    return &rt->overdraft;
+}
+
+/* dasher: around a compile, from its first allocation to its last (see
+   JSOverdraft). js_compile_leave() takes what js_compile_enter() returned,
+   and may be called more than once. */
+static int js_compile_enter(JSRuntime *rt)
+{
+    int was = rt->overdraft.allowed;
+
+    if (!was)
+        rt->overdraft.taken = 0;
+    rt->overdraft.allowed = 1;
+    return was;
+}
+
+static void js_compile_leave(JSRuntime *rt, int was)
+{
+    rt->overdraft.allowed = was;
 }
 
 size_t js_malloc_usable_size_rt(JSRuntime *rt, const void *ptr)
@@ -22885,6 +22923,12 @@ static __exception int next_token(JSParseState *s)
         JS_ThrowStackOverflow(s->ctx);
         return -1;
     }
+    /* dasher: the heap is full (see JSOverdraft): every token fails from
+       here on, as it does when the stack is */
+    if (unlikely(s->ctx->rt->overdraft.taken)) {
+        JS_ThrowOutOfMemory(s->ctx);
+        return -1;
+    }
 
     free_token(s, &s->token);
 
@@ -32479,6 +32523,18 @@ static void js_lazy_record_free(JSRuntime *rt, JSLazyRecord *r)
     js_free_rt(rt, r);
 }
 
+/* dasher: frees the records of the functions inside 'r' */
+static void js_lazy_record_forget_children(JSRuntime *rt, JSLazyRecord *r)
+{
+    uint32_t i;
+
+    for (i = 0; i < r->child_count; i++)
+        js_lazy_record_free(rt, r->children[i]);
+    js_free_rt(rt, r->children);
+    r->children = NULL;
+    r->child_count = 0;
+}
+
 static void js_free_function_def(JSContext *ctx, JSFunctionDef *fd)
 {
     int i;
@@ -36902,6 +36958,17 @@ static void js_link_scopes(JSFunctionDef *fd)
 
 static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd);
 
+/* dasher: whether the compile of 'fd' has run out of memory: an allocation
+   went over the limit (see JSOverdraft), or the function's code could not
+   grow and is cut short. Throws if so. */
+static bool js_compile_out_of_memory(JSContext *ctx, JSFunctionDef *fd)
+{
+    if (likely(!ctx->rt->overdraft.taken && !dbuf_error(&fd->byte_code)))
+        return false;
+    JS_ThrowOutOfMemory(ctx);
+    return true;
+}
+
 /* create a function object from a function definition. The function
    definition is freed. All the child functions are also created. It
    must be done this way to resolve all the variables. */
@@ -36918,6 +36985,10 @@ static JSValue js_create_function2(JSContext *ctx, JSFunctionDef *fd,
     int function_size, byte_code_offset, cpool_offset;
     int closure_var_offset, vardefs_offset;
     uint8_t *base;
+
+    /* dasher: each pass below reads what the one before it wrote */
+    if (js_compile_out_of_memory(ctx, fd))
+        goto fail;
 
     js_link_scopes(fd);
 
@@ -36968,6 +37039,8 @@ static JSValue js_create_function2(JSContext *ctx, JSFunctionDef *fd,
 
     if (resolve_variables(ctx, fd))
         goto fail;
+    if (js_compile_out_of_memory(ctx, fd)) /* dasher */
+        goto fail;
 
 #ifdef ENABLE_DUMPS // JS_DUMP_BYTECODE_PASS2
     if (check_dump_flag(ctx->rt, JS_DUMP_BYTECODE_PASS2)) {
@@ -36985,6 +37058,8 @@ static JSValue js_create_function2(JSContext *ctx, JSFunctionDef *fd,
         goto fail;
 
     if (compute_stack_size(ctx, fd, &stack_size) < 0)
+        goto fail;
+    if (js_compile_out_of_memory(ctx, fd)) /* dasher */
         goto fail;
 
     function_size = sizeof(*b);
@@ -38250,11 +38325,12 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     char filename_buf[ATOM_GET_STR_BUF_SIZE];
     const char *filename;
     JSValue ret;
-    int i, err;
+    int i, err, was_compiling;
     uint64_t tag;
     uint32_t start;
 
     ctx = b->realm;
+    was_compiling = js_compile_enter(ctx->rt);
     tag = t->tag;
     start = r->start;
     /* only for error messages, which a parse that has succeeded once
@@ -38312,6 +38388,7 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     ret = js_create_function2(ctx, fd, b);
     if (JS_IsException(ret))
         goto fail;
+    js_compile_leave(ctx->rt, was_compiling);
     /* compiled: the record went with the parse */
     if (tag && ctx->rt->lazy_compile_hook)
         ctx->rt->lazy_compile_hook(ctx->rt->lazy_compile_opaque, tag, start);
@@ -38320,9 +38397,14 @@ static int js_lazy_compile(JSContext *ctx, JSFunctionBytecode *b)
     return 0;
  fail_fd:
     js_free_function_def(ctx, fd);
-    return -1;
  fail:
     js_source_text_release(ctx->rt, s->source_text);
+    /* the function is still to be compiled, and may be called again. The
+       parse took the records of the functions inside it as it met them
+       and they went with it, so the next one starts without any, as the
+       script's did. */
+    js_lazy_record_forget_children(ctx->rt, r);
+    js_compile_leave(ctx->rt, was_compiling);
     return -1;
 }
 
@@ -38729,6 +38811,7 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     JSFunctionDef *fd;
     JSModuleDef *m;
     bool is_strict_mode;
+    int was_compiling; /* dasher: see js_compile_enter() */
 
     js_parse_init(ctx, s, input, input_len, filename, line);
     s->lazy = ctx->rt->lazy_functions; /* dasher */
@@ -38765,6 +38848,7 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
             is_strict_mode = true;
         }
     }
+    was_compiling = js_compile_enter(ctx->rt); /* dasher */
     fd = js_new_function_def(ctx, NULL, true, false, filename, line, 1);
     if (!fd)
         goto fail1;
@@ -38819,6 +38903,7 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     fun_obj = js_create_function(ctx, fd);
     if (JS_IsException(fun_obj))
         goto fail1;
+    js_compile_leave(ctx->rt, was_compiling); /* dasher */
     /* Could add a flag to avoid resolution if necessary */
     if (m) {
         m->func_obj = fun_obj;
@@ -38833,6 +38918,7 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     }
     return ret_val;
  fail1:
+    js_compile_leave(ctx->rt, was_compiling); /* dasher */
     /* XXX: should free all the unresolved dependencies */
     if (m)
         js_free_module_def(ctx, m);
