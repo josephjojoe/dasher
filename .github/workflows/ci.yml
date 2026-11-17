@@ -45,6 +45,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --locked
 
+  msrv:
+    # The oldest toolchain that builds dasher, as `rust-version` and the
+    # README state it. `+1.88` because rust-toolchain.toml asks for stable.
+    name: minimum Rust (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.88 check --workspace --locked
+
   deny:
     # Advisories, licences, duplicate and wildcard dependencies, and crate
     # sources, by the policy in deny.toml.

@@ -269,9 +269,9 @@ cargo build --release   # size-tuned: LTO, one codegen unit, panic=abort, stripp
 ```
 
 CI runs these on every push and pull request, with `cargo deny`, a
-static musl build held to the memory and size budgets in
-[`crates/bench/budgets.json`](crates/bench/budgets.json), and a build of
-the container image.
+build on Rust 1.88, a static musl build held to the memory and size
+budgets in [`crates/bench/budgets.json`](crates/bench/budgets.json), and
+a build of the container image.
 
 Behaviour that needs a page is tested against local fixtures served by
 `dasher-test-server`, never against live sites. The compatibility suite
