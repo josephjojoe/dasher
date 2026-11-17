@@ -727,9 +727,9 @@ fn strings_are_the_same_however_they_are_built() {
 /// insertion sort, counts the comparator's calls on sorted, reversed and
 /// run-wise sorted arrays, and covers comparators that throw, contradict
 /// themselves or change the array, holes, array-likes, the default order
-/// and odd comparator answers. V8 gives the same values, apart from two
-/// of the call counts (it makes fewer calls for two runs out of order,
-/// and calls the comparator for identical values, which QuickJS skips).
+/// and odd comparator answers, and that the comparator is called for two
+/// identical values. V8 gives the same values, apart from one of the call
+/// counts (it makes fewer calls for two runs out of order).
 #[test]
 fn sorts_are_stable_and_cheap_on_sorted_runs() {
     let js = runtime();

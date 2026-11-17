@@ -65,6 +65,19 @@
     allEqual: calls(new Array(1000).fill(7)),
   };
 
+  // The comparator is called for two identical values too. A sort that
+  // removes duplicates by noting them in its comparator, as jQuery's
+  // uniqueSort does, depends on it.
+  const duplicates = (() => {
+    const a = { n: 1 }, b = { n: 2 };
+    const items = [b, a, b, a, a, b];
+    let seen = false;
+    items.sort((x, y) => { if (x === y) seen = true; return x.n - y.n; });
+    let n = 0;
+    [a, a, a, a].sort(() => (n++, 0));
+    return [seen, n, items.map((x) => x.n)];
+  })();
+
   // A comparator that throws: the error comes out, nothing is lost.
   const thrown = (() => {
     const items = shuffled.slice(0, 200);
@@ -101,6 +114,7 @@
     arrays,
     mismatches,
     counts,
+    duplicates,
     thrown,
     contradictory,
     changed,

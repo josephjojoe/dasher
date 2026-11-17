@@ -210,7 +210,11 @@ rquickjs-sys = { git = "https://github.com/josephjojoe/dasher" }
   given; this finds the runs already there, so a sorted or reversed
   array costs n - 1 calls. It is stable, and like V8 it moves an element
   only on a negative answer, so a comparator that answers `true` or
-  `false` leaves the array as it is. Test: `fixtures/sort.js`, against
+  `false` leaves the array as it is. **The comparator is called for two
+  identical values**, where upstream answers 0 for them itself: jQuery's
+  `uniqueSort` removes duplicates only if its comparator was handed the
+  same element twice, so without the call `$(items).parent()` keeps one
+  copy of the parent per item. Test: `fixtures/sort.js`, against
   `sort.expected.json`.
 
 ## Regular expressions
